@@ -481,9 +481,14 @@ Each session plist has keys:
          (insert path "\n")))))
   ;; Result section
   (when result
-    (let ((stdout (alist-get 'stdout result))
-          (stderr (alist-get 'stderr result))
-          (file-data (alist-get 'file result)))
+    ;; Normalize MCP-style vector results [((type . "text") (text . "..."))]
+    (when (vectorp result)
+      (let* ((first (and (> (length result) 0) (aref result 0)))
+             (text (and (listp first) (alist-get 'text first))))
+        (setq result (when text (list (cons 'stdout text))))))
+    (let ((stdout (and (listp result) (alist-get 'stdout result)))
+          (stderr (and (listp result) (alist-get 'stderr result)))
+          (file-data (and (listp result) (alist-get 'file result))))
       ;; Bash-style stdout
       (when (and stdout (not (string-empty-p stdout)))
         (let* ((lines (split-string stdout "\n" t))
@@ -557,8 +562,8 @@ Each session plist has keys:
 (defun claude-gravity--current-overview-session-id ()
   "Return session-id at point in the overview buffer, or nil."
   (let ((section (magit-current-section)))
-    (when (and section (eq (magit-section-type section) 'session-entry))
-      (magit-section-value section))))
+    (when (and section (eq (oref section type) 'session-entry))
+      (oref section value))))
 
 (defun claude-gravity-insert-plan-link (session)
   "Insert a link to the plan for SESSION in the gravity buffer."
@@ -808,12 +813,15 @@ Each session plist has keys:
   "Open or switch to the buffer for SESSION-ID."
   (interactive)
   (let* ((session (claude-gravity--get-session session-id))
-         (buf-name (claude-gravity--session-buffer-name session)))
-    (with-current-buffer (get-buffer-create buf-name)
-      (claude-gravity-session-mode)
-      (setq claude-gravity--buffer-session-id session-id)
-      (claude-gravity--render-session-buffer session)
-      (switch-to-buffer (current-buffer)))))
+         (buf-name (claude-gravity--session-buffer-name session))
+         (existing (get-buffer buf-name)))
+    (if existing
+        (pop-to-buffer existing)
+      (with-current-buffer (get-buffer-create buf-name)
+        (claude-gravity-session-mode)
+        (setq claude-gravity--buffer-session-id session-id)
+        (claude-gravity--render-session-buffer session)
+        (pop-to-buffer (current-buffer))))))
 
 (defun claude-gravity--render-session-buffer (session)
   "Render the magit-section UI for SESSION into its buffer."
@@ -859,8 +867,8 @@ Each session plist has keys:
   "If on a session entry, open it.  Otherwise toggle the section."
   (interactive)
   (let ((section (magit-current-section)))
-    (if (and section (eq (magit-section-type section) 'session-entry))
-        (claude-gravity-open-session (magit-section-value section))
+    (if (and section (eq (oref section type) 'session-entry))
+        (claude-gravity-open-session (oref section value))
       (magit-section-toggle section))))
 
 (defun claude-gravity-refresh ()
