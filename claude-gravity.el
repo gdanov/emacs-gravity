@@ -93,7 +93,8 @@ Each session plist has keys:
                            :prompts []
                            :agents []
                            :files (make-hash-table :test 'equal)
-                           :tasks (make-hash-table :test 'equal))))
+                           :tasks (make-hash-table :test 'equal)
+                           :current-turn 0)))
         (puthash session-id session claude-gravity--sessions)
         session)))
 
@@ -218,7 +219,9 @@ Each session plist has keys:
           ;; Re-key from temp ID to real taskId
           (let* ((temp-key (concat "_pending_" tool-use-id))
                  (entry (gethash temp-key tasks))
-                 (task-id (alist-get 'taskId tool-response)))
+                 (task-data (alist-get 'task tool-response))
+                 (task-id (or (alist-get 'taskId tool-response)
+                              (alist-get 'id task-data))))
             (when (and entry task-id)
               (setf (alist-get 'taskId entry) task-id)
               (puthash task-id entry tasks)
@@ -270,7 +273,9 @@ Each session plist has keys:
             (prompt-text (alist-get 'prompt data)))
        (when prompt-text
          (plist-put session :prompts
-                    (vconcat (plist-get session :prompts) (vector prompt-text))))
+                    (vconcat (plist-get session :prompts) (vector prompt-text)))
+         (plist-put session :current-turn
+                    (1+ (or (plist-get session :current-turn) 0))))
        (plist-put session :claude-status 'responding)))
 
     ("Stop"
@@ -305,7 +310,8 @@ Each session plist has keys:
                           (cons 'name (alist-get 'tool_name data))
                           (cons 'input (alist-get 'tool_input data))
                           (cons 'status "running")
-                          (cons 'timestamp (current-time)))))
+                          (cons 'timestamp (current-time))
+                          (cons 'turn (or (plist-get session :current-turn) 0)))))
        (setf (alist-get 'tools state) (vconcat tools (vector new-tool)))
        (plist-put session :claude-status 'responding)
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
@@ -586,34 +592,62 @@ Each session plist has keys:
     (insert (format "Tools Executed: %d\n" (length (alist-get 'tools state))))
     (insert "\n")))
 
-(defun claude-gravity-insert-tools (state)
-  "Insert tool usage section from STATE."
-  (let ((tools (alist-get 'tools state)))
+(defun claude-gravity-insert-tools (session)
+  "Insert tool usage section from SESSION, grouped by prompt turn."
+  (let* ((state (plist-get session :state))
+         (tools (alist-get 'tools state))
+         (prompts (plist-get session :prompts))
+         (current-turn (or (plist-get session :current-turn) 0)))
     (when (> (length tools) 0)
-      (magit-insert-section (tools)
-        (magit-insert-heading "Tool Usage")
+      ;; Group tools by turn
+      (let ((groups (make-hash-table :test 'equal))
+            (max-turn 0))
         (dolist (item (append tools nil))
-          (let* ((name (alist-get 'name item))
-                 (status (alist-get 'status item))
-                 (input (alist-get 'input item))
-                 (result (alist-get 'result item))
-                 (done-p (equal status "done"))
-                 (indicator (propertize (if done-p "[x]" "[/]")
-                                        'face (if done-p
-                                                   'claude-gravity-tool-done
-                                                 'claude-gravity-tool-running)))
-                 (tool-face (propertize (or name "?") 'face 'claude-gravity-tool-name))
-                 (summary (claude-gravity--tool-summary name input))
-                 (desc (claude-gravity--tool-description input)))
-            (magit-insert-section (tool item t)
-              (magit-insert-heading
-                (format "%s %s  %s%s"
-                        indicator
-                        tool-face
-                        summary
-                        (if desc (format "  (%s)" desc) "")))
-              (claude-gravity--insert-tool-detail name input result))))
-        (insert "\n")))))
+          (let ((turn (or (alist-get 'turn item) 0)))
+            (when (> turn max-turn) (setq max-turn turn))
+            (puthash turn (append (gethash turn groups) (list item)) groups)))
+        (magit-insert-section (tools)
+          (magit-insert-heading "Tool Usage")
+          (dotimes (i (1+ max-turn))
+            (let ((turn-tools (gethash i groups))
+                  (prompt-text (when (and prompts (> (length prompts) 0)
+                                         (> i 0) (<= i (length prompts)))
+                                 (aref prompts (1- i)))))
+              (when turn-tools
+                (let* ((count (length turn-tools))
+                       (is-current (= i current-turn))
+                       (heading (if (and prompt-text (> (length prompt-text) 0))
+                                    (format "Turn %d: \"%s\" (%d tools)"
+                                            i (claude-gravity--truncate prompt-text 50) count)
+                                  (format "Turn %d (%d tools)" i count))))
+                  (magit-insert-section (tool-turn i (not is-current))
+                    (magit-insert-heading heading)
+                    (dolist (item turn-tools)
+                      (claude-gravity--insert-tool-item item)))))))
+          (insert "\n"))))))
+
+(defun claude-gravity--insert-tool-item (item)
+  "Insert a single tool ITEM as a magit-section."
+  (let* ((name (alist-get 'name item))
+         (status (alist-get 'status item))
+         (input (alist-get 'input item))
+         (result (alist-get 'result item))
+         (done-p (equal status "done"))
+         (indicator (propertize (if done-p "[x]" "[/]")
+                                'face (if done-p
+                                           'claude-gravity-tool-done
+                                         'claude-gravity-tool-running)))
+         (tool-face (propertize (or name "?") 'face 'claude-gravity-tool-name))
+         (summary (claude-gravity--tool-summary name input))
+         (desc (claude-gravity--tool-description input)))
+    (magit-insert-section (tool item t)
+      (magit-insert-heading
+        (format "%s %s  %s%s"
+                indicator
+                tool-face
+                summary
+                (if desc (format "  (%s)" desc) "")))
+      (claude-gravity--insert-tool-detail name input result))))
 
 (defun claude-gravity-insert-tasks (session)
   "Insert tasks section for SESSION."
@@ -836,7 +870,7 @@ Each session plist has keys:
             (claude-gravity-insert-header state)
             (claude-gravity-insert-plan-link session)
             (claude-gravity-insert-prompts session)
-            (claude-gravity-insert-tools state)
+            (claude-gravity-insert-tools session)
             (claude-gravity-insert-agents session)
             (claude-gravity-insert-files session)
             (claude-gravity-insert-tasks session))
