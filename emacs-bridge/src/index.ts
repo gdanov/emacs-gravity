@@ -1,9 +1,6 @@
 import { createConnection } from "net";
-import { readFileSync } from "fs";
-import { homedir } from "os";
+import { readFileSync, appendFileSync } from "fs";
 import { join } from "path";
-
-import { appendFileSync } from "fs";
 
 // Debug logging
 function log(msg: string) {
@@ -15,13 +12,19 @@ function log(msg: string) {
   }
 }
 
+// Resolve socket path from plugin root or fallback to relative location
+function getSocketPath(): string {
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+  if (pluginRoot) {
+    return join(pluginRoot, "..", "claude-gravity.sock");
+  }
+  return join(__dirname, "..", "..", "claude-gravity.sock");
+}
+
 // Helper to send data to Emacs socket
-async function sendToEmacs(eventName: string, payload: any) {
-  log(`Sending event: ${eventName}`);
-  const socketPath = join(
-    homedir(),
-    "work/playground/emacs-gravity/claude-gravity.sock",
-  );
+async function sendToEmacs(eventName: string, sessionId: string, cwd: string, payload: any) {
+  log(`Sending event: ${eventName} session: ${sessionId}`);
+  const socketPath = getSocketPath();
   log(`Socket path: ${socketPath}`);
 
   return new Promise<void>((resolve, reject) => {
@@ -30,7 +33,7 @@ async function sendToEmacs(eventName: string, payload: any) {
     client.on("connect", () => {
       log("Connected to socket");
       const message =
-        JSON.stringify({ event: eventName, data: payload }) + "\n";
+        JSON.stringify({ event: eventName, session_id: sessionId, cwd: cwd, data: payload }) + "\n";
       client.write(message);
       client.end();
     });
@@ -67,8 +70,12 @@ async function main() {
 
     log(`Payload: ${JSON.stringify(inputData)}`);
 
+    // Extract session identifiers from hook input
+    const sessionId = (inputData as any).session_id || "unknown";
+    const cwd = (inputData as any).cwd || "";
+
     // Send to Emacs
-    await sendToEmacs(eventName, inputData);
+    await sendToEmacs(eventName, sessionId, cwd, inputData);
 
     // Always output valid JSON to stdout as expected by Claude Code
     console.log(JSON.stringify({}));

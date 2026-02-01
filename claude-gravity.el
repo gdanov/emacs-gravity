@@ -3,12 +3,12 @@
 ;; Copyright (C) 2024  User
 
 ;; Author: User <user@example.com>
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "27.1") (magit-section "3.0.0") (transient "0.3.0"))
 ;; Keywords: tools, ai, claude
 
 ;;; Commentary:
-;; A Magit-like interface for Claude Code.
+;; A Magit-like interface for Claude Code with multi-session support.
 
 ;;; Code:
 
@@ -16,12 +16,14 @@
 (require 'transient)
 (require 'json)
 (require 'seq)
+(require 'cl-lib)
 
 (defgroup claude-gravity nil
   "Claude Code interface."
   :group 'tools)
 
-(defvar claude-gravity-buffer-name "*Claude Gravity*")
+(defvar claude-gravity-buffer-name "*Claude Gravity*"
+  "Name of the overview buffer.")
 
 ;;; Comments (Mock)
 
@@ -44,43 +46,162 @@
           (message "Added comment: %s" text))
       (message "No section selected"))))
 
+;;; Session Registry
 
-;;; Data Models (Mock)
+(defvar claude-gravity--sessions (make-hash-table :test 'equal)
+  "Hash table mapping session-id -> session plist.
+Each session plist has keys:
+  :session-id  - string
+  :cwd         - string (project working directory)
+  :project     - string (basename of cwd)
+  :state       - alist with (tools . []) (chat . [])
+  :status      - symbol: active or ended
+  :start-time  - time value
+  :plan        - plist (:content STRING) or nil")
 
-;;; State
+(defvar-local claude-gravity--buffer-session-id nil
+  "Session ID for this per-session buffer.")
 
-(defvar claude-gravity--state
-  '((tools . [])
-    (chat . []))
-  "Current state of the Claude Code session.")
+(defun claude-gravity--get-session (session-id)
+  "Return session plist for SESSION-ID, or nil."
+  (gethash session-id claude-gravity--sessions))
+
+(defun claude-gravity--session-short-id (session-id)
+  "Return first 4 chars of SESSION-ID for display."
+  (if (and session-id (> (length session-id) 4))
+      (substring session-id 0 4)
+    (or session-id "?")))
+
+(defun claude-gravity--session-label (session)
+  "Return display label like \"emacs-gravity [a3f2]\"."
+  (format "%s [%s]"
+          (plist-get session :project)
+          (claude-gravity--session-short-id (plist-get session :session-id))))
+
+(defun claude-gravity--ensure-session (session-id cwd)
+  "Get or create session for SESSION-ID with CWD.  Returns session plist."
+  (or (gethash session-id claude-gravity--sessions)
+      (let ((session (list :session-id session-id
+                           :cwd (or cwd "")
+                           :project (file-name-nondirectory
+                                     (directory-file-name (or cwd "")))
+                           :state (list (cons 'tools []) (cons 'chat []))
+                           :status 'active
+                           :start-time (current-time)
+                           :plan nil)))
+        (puthash session-id session claude-gravity--sessions)
+        session)))
 
 (defun claude-gravity-get-state ()
-  "Retrieve current state."
-  claude-gravity--state)
+  "Return state for the current session buffer, or first active session."
+  (if claude-gravity--buffer-session-id
+      (let ((session (claude-gravity--get-session claude-gravity--buffer-session-id)))
+        (when session (plist-get session :state)))
+    ;; Fallback: first active session
+    (let ((result (list (cons 'tools []) (cons 'chat []))))
+      (maphash (lambda (_id session)
+                 (when (eq (plist-get session :status) 'active)
+                   (setq result (plist-get session :state))))
+               claude-gravity--sessions)
+      result)))
 
-(defun claude-gravity-handle-event (event data)
-  "Handle an incoming EVENT with DATA."
-  (message "Handling event: %s" event)
+;;; Refresh timers
+
+(defvar claude-gravity--refresh-timer nil
+  "Timer for debounced overview UI refresh.")
+
+(defvar claude-gravity--session-refresh-timers (make-hash-table :test 'equal)
+  "Per-session debounce timers.")
+
+(defun claude-gravity--schedule-refresh ()
+  "Schedule an overview UI refresh after events settle."
+  (when claude-gravity--refresh-timer
+    (cancel-timer claude-gravity--refresh-timer))
+  (setq claude-gravity--refresh-timer
+        (run-with-idle-timer 0.1 nil #'claude-gravity--do-refresh)))
+
+(defun claude-gravity--do-refresh ()
+  "Perform the actual debounced overview refresh."
+  (setq claude-gravity--refresh-timer nil)
+  (when (get-buffer claude-gravity-buffer-name)
+    (claude-gravity--render-overview)))
+
+(defun claude-gravity--schedule-session-refresh (session-id)
+  "Schedule a refresh for the session buffer of SESSION-ID."
+  (let ((existing (gethash session-id claude-gravity--session-refresh-timers)))
+    (when existing (cancel-timer existing))
+    (puthash session-id
+             (run-with-idle-timer 0.1 nil
+                                  #'claude-gravity--do-session-refresh session-id)
+             claude-gravity--session-refresh-timers)))
+
+(defun claude-gravity--do-session-refresh (session-id)
+  "Refresh the buffer for SESSION-ID if it exists."
+  (remhash session-id claude-gravity--session-refresh-timers)
+  (let* ((session (claude-gravity--get-session session-id))
+         (buf-name (when session (claude-gravity--session-buffer-name session))))
+    (when (and buf-name (get-buffer buf-name))
+      (claude-gravity--render-session-buffer session))))
+
+;;; Tool helpers
+
+(defun claude-gravity--find-tool-by-id (tools tool-use-id)
+  "Find index of tool in TOOLS vector matching TOOL-USE-ID."
+  (let ((idx nil))
+    (dotimes (i (length tools))
+      (when (equal (alist-get 'tool_use_id (aref tools i)) tool-use-id)
+        (setq idx i)))
+    idx))
+
+;;; Event handling
+
+(defun claude-gravity-handle-event (event session-id cwd data)
+  "Handle EVENT for SESSION-ID (with CWD) carrying DATA."
+  (unless session-id
+    (setq session-id "legacy")
+    (setq cwd (or cwd "")))
+  (message "Handling event: %s for session: %s" event session-id)
   (pcase event
+    ("SessionStart"
+     (claude-gravity--ensure-session session-id cwd))
+
+    ("SessionEnd"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (plist-put session :status 'ended))))
+
     ("PreToolUse"
-     (let* ((tools (alist-get 'tools claude-gravity--state))
-            (new-tool `((name . ,(alist-get 'tool_name data))
-                        (input . ,(alist-get 'tool_input data))
-                        (status . "running")
-                        (timestamp . ,(current-time)))))
-       (setf (alist-get 'tools claude-gravity--state)
-             (vconcat tools (vector new-tool)))))
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (state (plist-get session :state))
+            (tools (alist-get 'tools state))
+            (new-tool (list (cons 'tool_use_id (alist-get 'tool_use_id data))
+                          (cons 'name (alist-get 'tool_name data))
+                          (cons 'input (alist-get 'tool_input data))
+                          (cons 'status "running")
+                          (cons 'timestamp (current-time)))))
+       (setf (alist-get 'tools state) (vconcat tools (vector new-tool)))))
+
     ("PostToolUse"
-     (let* ((tools (alist-get 'tools claude-gravity--state))
-            (len (length tools)))
-       (when (> len 0)
-         (let* ((last-idx (1- len))
-                (tool (aref tools last-idx)))
-           (when (equal (alist-get 'status tool) "running")
-             (setf (alist-get 'status tool) "done")
-             (setf (alist-get 'result tool) (alist-get 'tool_response data))
-             (aset tools last-idx tool)))))))
-  (claude-gravity-refresh))
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (state (plist-get session :state))
+            (tools (alist-get 'tools state))
+            (tool-use-id (alist-get 'tool_use_id data))
+            (idx (claude-gravity--find-tool-by-id tools tool-use-id)))
+       (when idx
+         (let ((tool (aref tools idx)))
+           (setf (alist-get 'status tool) "done")
+           (setf (alist-get 'result tool) (alist-get 'tool_response data))
+           (aset tools idx tool)))
+       ;; Detect plan presentation
+       (let ((tool-name (alist-get 'tool_name data)))
+         (when (equal tool-name "ExitPlanMode")
+           (let ((plan-content (alist-get 'plan (alist-get 'tool_input data))))
+             (when plan-content
+               (plist-put session :plan (list :content plan-content)))))))))
+
+  (claude-gravity--schedule-refresh)
+  (when session-id
+    (claude-gravity--schedule-session-refresh session-id)))
 
 ;;; Faces
 
@@ -107,6 +228,11 @@
 (defface claude-gravity-stderr
   '((t :foreground "red"))
   "Face for stderr output."
+  :group 'claude-gravity)
+
+(defface claude-gravity-session-ended
+  '((t :foreground "gray50"))
+  "Face for ended session indicator."
   :group 'claude-gravity)
 
 ;;; Tool display helpers
@@ -214,16 +340,73 @@
         (dolist (line (seq-take (split-string stderr "\n" t) 4))
           (insert (propertize (concat "      " line "\n") 'face 'claude-gravity-stderr)))))))
 
-;;; Sections
+;;; Plan display
 
-(defun claude-gravity-insert-header (plan)
+(defun claude-gravity--update-plan (session content)
+  "Update plan for SESSION from CONTENT string."
+  (plist-put session :plan (list :content content))
+  (claude-gravity--show-plan-buffer session))
+
+(defun claude-gravity--show-plan-buffer (session)
+  "Display the plan for SESSION in a dedicated buffer."
+  (let ((plan (plist-get session :plan)))
+    (when plan
+      (let* ((label (claude-gravity--session-label session))
+             (buf (get-buffer-create (format "*Claude Plan: %s*" label)))
+             (content (plist-get plan :content)))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert content)
+            (goto-char (point-min)))
+          (when (fboundp 'markdown-mode)
+            (markdown-mode))
+          (setq buffer-read-only t)
+          (set-buffer-modified-p nil))
+        (display-buffer buf '(display-buffer-in-side-window
+                              (side . right)
+                              (window-width . 0.4)))))))
+
+(defun claude-gravity-show-plan ()
+  "Show the plan for the current session."
+  (interactive)
+  (let* ((sid (or claude-gravity--buffer-session-id
+                  (claude-gravity--current-overview-session-id)))
+         (session (when sid (claude-gravity--get-session sid))))
+    (if (and session (plist-get session :plan))
+        (claude-gravity--show-plan-buffer session)
+      (message "No plan available"))))
+
+(defun claude-gravity--current-overview-session-id ()
+  "Return session-id at point in the overview buffer, or nil."
+  (let ((section (magit-current-section)))
+    (when (and section (eq (magit-section-type section) 'session-entry))
+      (magit-section-value section))))
+
+(defun claude-gravity-insert-plan-link (session)
+  "Insert a link to the plan for SESSION in the gravity buffer."
+  (let ((plan (plist-get session :plan)))
+    (when plan
+      (let* ((content (plist-get plan :content))
+             (first-line (car (split-string content "\n" t))))
+        (magit-insert-section (plan-link)
+          (magit-insert-heading
+            (propertize "Current Plan" 'face 'claude-gravity-tool-name))
+          (insert (format "  %s\n" (or first-line ""))
+                  (propertize "  Press 'P' to view\n\n" 'face 'claude-gravity-detail-label)))))))
+
+;;; Section renderers (used by per-session buffers)
+
+(defun claude-gravity-insert-header (state)
+  "Insert header section showing tool count from STATE."
   (magit-insert-section (header)
     (magit-insert-heading "Claude Code Gravity")
-    (insert (format "Tools Executed: %d\n" (length (alist-get 'tools plan))))
+    (insert (format "Tools Executed: %d\n" (length (alist-get 'tools state))))
     (insert "\n")))
 
-(defun claude-gravity-insert-tools (plan)
-  (let ((tools (alist-get 'tools plan)))
+(defun claude-gravity-insert-tools (state)
+  "Insert tool usage section from STATE."
+  (let ((tools (alist-get 'tools state)))
     (when (> (length tools) 0)
       (magit-insert-section (tools)
         (magit-insert-heading "Tool Usage")
@@ -250,8 +433,9 @@
               (claude-gravity--insert-tool-detail name input result))))
         (insert "\n")))))
 
-(defun claude-gravity-insert-steps (plan)
-  (let ((steps (alist-get 'steps plan)))
+(defun claude-gravity-insert-steps (state)
+  "Insert plan steps section from STATE."
+  (let ((steps (alist-get 'steps state)))
     (magit-insert-section (steps)
       (magit-insert-heading "Plan")
       (seq-do (lambda (step)
@@ -265,8 +449,9 @@
               steps)
       (insert "\n"))))
 
-(defun claude-gravity-insert-memory (plan)
-  (let* ((mem (alist-get 'memory plan))
+(defun claude-gravity-insert-memory (state)
+  "Insert working memory section from STATE."
+  (let* ((mem (alist-get 'memory state))
          (files (alist-get 'files mem)))
     (magit-insert-section (memory)
       (magit-insert-heading "Working Memory")
@@ -275,29 +460,131 @@
         (seq-do (lambda (f) (insert (format " - %s\n" f))) files))
       (insert "\n"))))
 
-;;; Mode
+;;; Overview Buffer
 
-(defvar claude-gravity-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map magit-section-mode-map)
-    (define-key map (kbd "g") 'claude-gravity-refresh)
-    (define-key map (kbd "c") 'claude-gravity-comment-at-point)
-    (define-key map (kbd "TAB") 'magit-section-toggle)
-    (define-key map (kbd "<return>") 'magit-section-toggle)
-    map)
+(defun claude-gravity--render-overview ()
+  "Render the overview buffer with all sessions grouped by project."
+  (let ((buf (get-buffer claude-gravity-buffer-name)))
+    (when buf
+      (with-current-buffer buf
+        (let ((inhibit-read-only t)
+              (pos (point))
+              (projects (make-hash-table :test 'equal)))
+          ;; Group sessions by project
+          (maphash (lambda (_id session)
+                     (let ((proj (plist-get session :project)))
+                       (puthash proj
+                                (cons session (gethash proj projects nil))
+                                projects)))
+                   claude-gravity--sessions)
+          (erase-buffer)
+          (magit-insert-section (root)
+            (magit-insert-section (header)
+              (magit-insert-heading "Claude Code Gravity")
+              (let ((active-count 0))
+                (maphash (lambda (_k s)
+                           (when (eq (plist-get s :status) 'active)
+                             (cl-incf active-count)))
+                         claude-gravity--sessions)
+                (insert (format "Active sessions: %d\n\n" active-count))))
+            (if (= (hash-table-count claude-gravity--sessions) 0)
+                (insert (propertize "  No sessions.\n" 'face 'claude-gravity-detail-label))
+              (maphash
+               (lambda (proj-name sessions)
+                 (magit-insert-section (project proj-name t)
+                   (magit-insert-heading
+                     (format "%s (%d)" proj-name (length sessions)))
+                   (dolist (session (sort sessions
+                                         (lambda (a b)
+                                           (time-less-p (plist-get b :start-time)
+                                                        (plist-get a :start-time)))))
+                     (let* ((sid (plist-get session :session-id))
+                            (label (claude-gravity--session-label session))
+                            (status (plist-get session :status))
+                            (tools (alist-get 'tools (plist-get session :state)))
+                            (n-tools (length tools))
+                            (indicator (if (eq status 'active)
+                                           (propertize "●" 'face 'claude-gravity-tool-running)
+                                         (propertize "○" 'face 'claude-gravity-session-ended))))
+                       (magit-insert-section (session-entry sid)
+                         (magit-insert-heading
+                           (format "  %s %s  [%d tools]" indicator label n-tools)))))))
+               projects)))
+          (goto-char (min pos (point-max))))))))
+
+;;; Per-Session Buffer
+
+(defun claude-gravity--session-buffer-name (session)
+  "Return buffer name for SESSION."
+  (format "*Claude Gravity: %s*" (claude-gravity--session-label session)))
+
+(defun claude-gravity-open-session (session-id)
+  "Open or switch to the buffer for SESSION-ID."
+  (interactive)
+  (let* ((session (claude-gravity--get-session session-id))
+         (buf-name (claude-gravity--session-buffer-name session)))
+    (with-current-buffer (get-buffer-create buf-name)
+      (claude-gravity-session-mode)
+      (setq claude-gravity--buffer-session-id session-id)
+      (claude-gravity--render-session-buffer session)
+      (switch-to-buffer (current-buffer)))))
+
+(defun claude-gravity--render-session-buffer (session)
+  "Render the magit-section UI for SESSION into its buffer."
+  (let* ((buf-name (claude-gravity--session-buffer-name session))
+         (state (plist-get session :state)))
+    (when-let ((buf (get-buffer buf-name)))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t)
+              (pos (point)))
+          (erase-buffer)
+          (magit-insert-section (root)
+            (claude-gravity-insert-header state)
+            (claude-gravity-insert-plan-link session)
+            (claude-gravity-insert-tools state)
+            (claude-gravity-insert-steps state)
+            (claude-gravity-insert-memory state))
+          (goto-char (min pos (point-max))))))))
+
+;;; Modes
+
+(defvar claude-gravity-mode-map (make-sparse-keymap)
   "Keymap for `claude-gravity-mode'.")
+(set-keymap-parent claude-gravity-mode-map magit-section-mode-map)
+(define-key claude-gravity-mode-map (kbd "g") 'claude-gravity-refresh)
+(define-key claude-gravity-mode-map (kbd "c") 'claude-gravity-comment-at-point)
+(define-key claude-gravity-mode-map (kbd "P") 'claude-gravity-show-plan)
+(define-key claude-gravity-mode-map (kbd "?") 'claude-gravity-menu)
+(define-key claude-gravity-mode-map (kbd "TAB") 'magit-section-toggle)
+(define-key claude-gravity-mode-map (kbd "<return>") 'claude-gravity-visit-or-toggle)
+(define-key claude-gravity-mode-map (kbd "D") 'claude-gravity-cleanup-sessions)
 
 (define-derived-mode claude-gravity-mode magit-section-mode "ClaudeGravity"
-  "Major mode for Claude Code Gravity interface.
+  "Major mode for Claude Code Gravity overview.
 
 \\{claude-gravity-mode-map}")
 
-(defun claude-gravity-refresh ()
-  "Refresh the status buffer."
+(define-derived-mode claude-gravity-session-mode claude-gravity-mode "ClaudeGravity:Session"
+  "Major mode for a single Claude Code session buffer.")
+
+(defun claude-gravity-visit-or-toggle ()
+  "If on a session entry, open it.  Otherwise toggle the section."
   (interactive)
-  (message "Refreshing Claude Gravity...")
-  (claude-gravity-setup-buffer)
-  (message "Refreshing Claude Gravity...done"))
+  (let ((section (magit-current-section)))
+    (if (and section (eq (magit-section-type section) 'session-entry))
+        (claude-gravity-open-session (magit-section-value section))
+      (magit-section-toggle section))))
+
+(defun claude-gravity-refresh ()
+  "Refresh the current buffer."
+  (interactive)
+  (if claude-gravity--buffer-session-id
+      ;; Per-session buffer
+      (let ((session (claude-gravity--get-session claude-gravity--buffer-session-id)))
+        (when session
+          (claude-gravity--render-session-buffer session)))
+    ;; Overview buffer
+    (claude-gravity--render-overview)))
 
 ;;; Commands
 
@@ -306,10 +593,29 @@
   "Interactions with Claude Code."
   ["Actions"
    ("c" "Comment" claude-gravity-comment-at-point)
-   ("r" "Refresh" claude-gravity-refresh)
-   ("n" "Next Step" claude-gravity-next-step)]
+   ("g" "Refresh" claude-gravity-refresh)
+   ("P" "Show Plan" claude-gravity-show-plan)]
+  ["Sessions"
+   ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)]
   ["Manage"
    ("q" "Quit" bury-buffer)])
+
+(defun claude-gravity-cleanup-sessions ()
+  "Remove all ended sessions from the registry."
+  (interactive)
+  (let ((to-remove nil))
+    (maphash (lambda (id session)
+               (when (eq (plist-get session :status) 'ended)
+                 (push id to-remove)))
+             claude-gravity--sessions)
+    (dolist (id to-remove)
+      (let ((session (gethash id claude-gravity--sessions)))
+        (when session
+          (let ((buf (get-buffer (claude-gravity--session-buffer-name session))))
+            (when buf (kill-buffer buf)))))
+      (remhash id claude-gravity--sessions))
+    (message "Removed %d ended session(s)" (length to-remove))
+    (claude-gravity--render-overview)))
 
 (defun claude-gravity-next-step ()
   "Mock action: Tell Claude to proceed to next step."
@@ -318,21 +624,15 @@
 
 ;;;###autoload
 (defun claude-gravity-status ()
-  "Show the Claude Code status buffer."
+  "Show the Claude Code overview buffer."
   (interactive)
   (claude-gravity-setup-buffer))
 
 (defun claude-gravity-setup-buffer ()
+  "Create and display the overview buffer."
   (with-current-buffer (get-buffer-create claude-gravity-buffer-name)
     (claude-gravity-mode)
-    (let ((inhibit-read-only t)
-          (plan (claude-gravity-get-state)))
-      (erase-buffer)
-      (magit-insert-section (root)
-        (claude-gravity-insert-header plan)
-        (claude-gravity-insert-tools plan)
-        (claude-gravity-insert-steps plan)
-        (claude-gravity-insert-memory plan)))
+    (claude-gravity--render-overview)
     (switch-to-buffer (current-buffer))))
 
 ;;; Socket Server
@@ -345,19 +645,28 @@
   "The current Claude Gravity server process.")
 
 (defun claude-gravity--server-filter (proc string)
-  "Process incoming JSON events from PROC in STRING."
-  (let ((lines (split-string string "\n" t)))
-    (dolist (line lines)
-      (condition-case err
-          (let* ((json-object-type 'alist)
-                 (data (json-read-from-string line)))
-            (message "Claude Gravity received: %s" data)
-            (let ((event (alist-get 'event data))
-                  (payload (alist-get 'data data)))
-              (when event
-                (claude-gravity-handle-event event payload))))
-        (error
-         (message "Claude Gravity JSON error: %s" err))))))
+  "Process incoming JSON events from PROC in STRING.
+Accumulates partial data per connection until complete lines arrive."
+  (let ((buf (concat (or (process-get proc 'claude-gravity--buffer) "") string)))
+    ;; Process all complete lines (terminated by newline)
+    (while (string-match "\n" buf)
+      (let ((line (substring buf 0 (match-beginning 0))))
+        (setq buf (substring buf (match-end 0)))
+        (when (> (length line) 0)
+          (condition-case err
+              (let* ((json-object-type 'alist)
+                     (data (json-read-from-string line)))
+                (message "Claude Gravity received: %s" (alist-get 'event data))
+                (let ((event (alist-get 'event data))
+                      (session-id (alist-get 'session_id data))
+                      (cwd (alist-get 'cwd data))
+                      (payload (alist-get 'data data)))
+                  (when event
+                    (claude-gravity-handle-event event session-id cwd payload))))
+            (error
+             (message "Claude Gravity JSON error: %s" err))))))
+    ;; Store any remaining partial data
+    (process-put proc 'claude-gravity--buffer buf)))
 
 (defun claude-gravity-server-start ()
   "Start the Unix socket server for Claude Gravity."
