@@ -92,7 +92,8 @@ Each session plist has keys:
                            :plan nil
                            :prompts []
                            :agents []
-                           :files (make-hash-table :test 'equal))))
+                           :files (make-hash-table :test 'equal)
+                           :tasks (make-hash-table :test 'equal))))
         (puthash session-id session claude-gravity--sessions)
         session)))
 
@@ -179,6 +180,64 @@ Each session plist has keys:
                               (cons 'last-touched (current-time)))
                    files))))))
 
+;;; Task tracking
+
+(defun claude-gravity--track-task (session event tool-name tool-input tool-use-id &optional tool-response)
+  "Track task operations in SESSION from EVENT with TOOL-NAME, TOOL-INPUT, TOOL-USE-ID and TOOL-RESPONSE."
+  (let ((tasks (or (plist-get session :tasks)
+                   (let ((ht (make-hash-table :test 'equal)))
+                     (plist-put session :tasks ht)
+                     ht))))
+    (pcase event
+      ("PreToolUse"
+       (pcase tool-name
+         ("TaskCreate"
+          ;; Store with tool_use_id as temp key; we'll re-key on PostToolUse
+          (puthash (concat "_pending_" tool-use-id)
+                   (list (cons 'subject (alist-get 'subject tool-input))
+                         (cons 'description (alist-get 'description tool-input))
+                         (cons 'activeForm (alist-get 'activeForm tool-input))
+                         (cons 'status "pending"))
+                   tasks))
+         ("TaskUpdate"
+          (let* ((task-id (alist-get 'taskId tool-input))
+                 (entry (gethash task-id tasks)))
+            (when entry
+              (let ((new-status (alist-get 'status tool-input))
+                    (new-subject (alist-get 'subject tool-input))
+                    (new-desc (alist-get 'description tool-input))
+                    (new-active (alist-get 'activeForm tool-input)))
+                (when new-status (setf (alist-get 'status entry) new-status))
+                (when new-subject (setf (alist-get 'subject entry) new-subject))
+                (when new-desc (setf (alist-get 'description entry) new-desc))
+                (when new-active (setf (alist-get 'activeForm entry) new-active))
+                (puthash task-id entry tasks)))))))
+      ("PostToolUse"
+       (pcase tool-name
+         ("TaskCreate"
+          ;; Re-key from temp ID to real taskId
+          (let* ((temp-key (concat "_pending_" tool-use-id))
+                 (entry (gethash temp-key tasks))
+                 (task-id (alist-get 'taskId tool-response)))
+            (when (and entry task-id)
+              (setf (alist-get 'taskId entry) task-id)
+              (puthash task-id entry tasks)
+              (remhash temp-key tasks))))
+         ("TaskList"
+          ;; Reconcile with authoritative list
+          (let ((task-list (alist-get 'tasks tool-response)))
+            (when (and task-list (listp task-list))
+              (dolist (task task-list)
+                (let* ((task-id (alist-get 'id task))
+                       (existing (gethash task-id tasks))
+                       (new-entry (list (cons 'taskId task-id)
+                                        (cons 'subject (alist-get 'subject task))
+                                        (cons 'description (alist-get 'description task))
+                                        (cons 'status (alist-get 'status task))
+                                        (cons 'activeForm (or (alist-get 'activeForm task)
+                                                              (and existing (alist-get 'activeForm existing)))))))
+                  (puthash task-id new-entry tasks)))))))))))
+
 ;;; Agent helpers
 
 (defun claude-gravity--find-agent-by-id (agents agent-id)
@@ -249,7 +308,9 @@ Each session plist has keys:
                           (cons 'timestamp (current-time)))))
        (setf (alist-get 'tools state) (vconcat tools (vector new-tool)))
        (plist-put session :claude-status 'responding)
-       (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))))
+       (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
+       (claude-gravity--track-task session "PreToolUse" (alist-get 'tool_name data)
+                                   (alist-get 'tool_input data) (alist-get 'tool_use_id data))))
 
     ("PostToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -264,6 +325,10 @@ Each session plist has keys:
            (aset tools idx tool)))
        ;; Track file operations
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
+       ;; Track task operations
+       (claude-gravity--track-task session "PostToolUse" (alist-get 'tool_name data)
+                                   (alist-get 'tool_input data) (alist-get 'tool_use_id data)
+                                   (alist-get 'tool_response data))
        ;; Detect plan presentation
        (let ((tool-name (alist-get 'tool_name data)))
          (when (equal tool-name "ExitPlanMode")
@@ -310,6 +375,26 @@ Each session plist has keys:
 (defface claude-gravity-prompt
   '((t :foreground "cyan"))
   "Face for user prompt text."
+  :group 'claude-gravity)
+
+(defface claude-gravity-task-done
+  '((t :foreground "green"))
+  "Face for completed task checkbox."
+  :group 'claude-gravity)
+
+(defface claude-gravity-task-in-progress
+  '((t :foreground "yellow"))
+  "Face for in-progress task checkbox."
+  :group 'claude-gravity)
+
+(defface claude-gravity-task-pending
+  '((t :foreground "gray50"))
+  "Face for pending task checkbox."
+  :group 'claude-gravity)
+
+(defface claude-gravity-task-active-form
+  '((t :foreground "gray50" :slant italic))
+  "Face for task activeForm text."
   :group 'claude-gravity)
 
 (defface claude-gravity-status-responding
@@ -525,21 +610,58 @@ Each session plist has keys:
               (claude-gravity--insert-tool-detail name input result))))
         (insert "\n")))))
 
-(defun claude-gravity-insert-steps (state)
-  "Insert plan steps section from STATE."
-  (let ((steps (alist-get 'steps state)))
-    (magit-insert-section (steps)
-      (magit-insert-heading "Plan")
-      (seq-do (lambda (step)
-                (let ((desc (alist-get 'description step))
-                      (status (alist-get 'status step)))
-                  (magit-insert-section (step step)
-                    (insert (format "[%s] %s\n"
-                                    (if (equal status "done") "x"
-                                      (if (equal status "in-progress") "/" " "))
-                                    desc)))))
-              steps)
-      (insert "\n"))))
+(defun claude-gravity-insert-tasks (session)
+  "Insert tasks section for SESSION."
+  (let* ((tasks-ht (plist-get session :tasks))
+         (task-list nil)
+         (completed 0)
+         (total 0))
+    (unless tasks-ht (setq tasks-ht (make-hash-table :test 'equal)))
+    ;; Collect tasks, skipping pending temp keys
+    (maphash (lambda (key val)
+               (unless (string-prefix-p "_pending_" key)
+                 (push val task-list)
+                 (setq total (1+ total))
+                 (when (equal (alist-get 'status val) "completed")
+                   (setq completed (1+ completed)))))
+             tasks-ht)
+    (when (> total 0)
+      ;; Sort: in_progress first, then pending, then completed
+      (setq task-list
+            (sort task-list
+                  (lambda (a b)
+                    (let ((sa (alist-get 'status a))
+                          (sb (alist-get 'status b)))
+                      (< (claude-gravity--task-sort-key sa)
+                         (claude-gravity--task-sort-key sb))))))
+      (magit-insert-section (tasks nil t)
+        (magit-insert-heading
+          (format "Tasks (%d/%d)" completed total))
+        (dolist (task task-list)
+          (let* ((subject (or (alist-get 'subject task) "(no subject)"))
+                 (status (or (alist-get 'status task) "pending"))
+                 (active-form (alist-get 'activeForm task))
+                 (checkbox (pcase status
+                             ("completed"
+                              (propertize "[x]" 'face 'claude-gravity-task-done))
+                             ("in_progress"
+                              (propertize "[/]" 'face 'claude-gravity-task-in-progress))
+                             (_
+                              (propertize "[ ]" 'face 'claude-gravity-task-pending))))
+                 (suffix (if (and (equal status "in_progress") active-form)
+                             (concat "  " (propertize active-form 'face 'claude-gravity-task-active-form))
+                           "")))
+            (magit-insert-section (task task)
+              (insert (format "  %s %s%s\n" checkbox subject suffix)))))
+        (insert "\n")))))
+
+(defun claude-gravity--task-sort-key (status)
+  "Return sort key for task STATUS.  Lower = higher priority."
+  (pcase status
+    ("in_progress" 0)
+    ("pending" 1)
+    ("completed" 2)
+    (_ 3)))
 
 (defun claude-gravity-insert-prompts (session)
   "Insert prompts section for SESSION."
@@ -709,7 +831,7 @@ Each session plist has keys:
             (claude-gravity-insert-tools state)
             (claude-gravity-insert-agents session)
             (claude-gravity-insert-files session)
-            (claude-gravity-insert-steps state))
+            (claude-gravity-insert-tasks session))
           (goto-char (min pos (point-max))))))))
 
 ;;; Modes
