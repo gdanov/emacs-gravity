@@ -12,13 +12,22 @@ we allow user to open the current plan and comment/annotate it similarly to how 
 
 ## claude code plugin
 
-## claude code plugin
-
 we will produce a claude code plug-in (`emacs-bridge`) that hooks into lifecycle stages (e.g. `PostToolUse`) and pushes changes to Emacs via a Unix socket. Emacs will listen on this socket and update its UI.
 
 ## chatting with and "driving" claude code
 
 we don't want to implement full-blown claude code IDE, as we already use two pretty good ones (claude-code and claude-code-ide). We may integrate with them later
+
+# current state
+
+- Plugin hooks for 6 lifecycle events: PreToolUse, PostToolUse, Stop, UserPromptSubmit, SubagentStart, SubagentStop
+- Multi-session support with per-session buffers, grouped by project in overview
+- Magit-section based overview and detail views with transient menus
+- File tracking (read/edit/write operations per file)
+- Agent/subagent tracking with live status
+- User prompt history display
+- Plan detection (via ExitPlanMode tool) and display
+- Claude status indicator (idle/responding) per session
 
 # tech stack
 

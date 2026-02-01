@@ -10,7 +10,14 @@
       "Bash(claude --plugin-dir ./emacs-bridge -p \"read the file CLAUDE.md and tell me what it says in one sentence\" --dangerously-skip-permissions)",
       "Bash(claude --plugin-dir:*)",
       "Bash(npm run build:*)",
-      "Bash(:)"
+      "Bash(:)",
+      "Bash(python3:*)",
+      "Bash(chmod:*)",
+      "Bash(SOCK=\"/Users/gdanov/work/playground/emacs-gravity/claude-gravity.sock\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/hooks/UserPromptSubmit)",
+      "Bash(echo:*)"
     ]
   }
 }

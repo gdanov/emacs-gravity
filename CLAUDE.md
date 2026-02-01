@@ -10,7 +10,7 @@ Emacs UI for Claude Code, inspired by Google's AntiGravity and Cursor. Provides 
 
 ```
 Claude Code
-    ↓ (PreToolUse / PostToolUse hooks)
+    ↓ (hooks: PreToolUse, PostToolUse, Stop, UserPromptSubmit, SubagentStart, SubagentStop)
 emacs-bridge (Node.js)
     ↓ (JSON over Unix domain socket)
 claude-gravity.el (Emacs)
@@ -41,7 +41,18 @@ For the Emacs Lisp code we use the `emacs` MCP to re-evaluate code.
 
 ## Hook System
 
-Hook scripts in `emacs-bridge/hooks/` are registered via `hooks.json`. Each hook is a shell script that pipes stdin to the Node.js bridge with the event name as an argument. Currently handles `PreToolUse` and `PostToolUse`.
+Hook scripts in `emacs-bridge/hooks/` are registered via `hooks.json`. Each hook is a shell script that pipes stdin to the Node.js bridge with the event name as an argument. Handles `PreToolUse`, `PostToolUse`, `Stop`, `UserPromptSubmit`, `SubagentStart`, and `SubagentStop`.
+
+## UI Sections
+
+The Emacs UI (magit-section based) displays:
+- **Overview buffer**: All sessions grouped by project, with status (idle/responding)
+- **Session detail buffer**: Per-session view with prompts, tools, agents, files, plan
+- **File tracking**: Tracks read/edit/write operations per file
+- **Agent tracking**: Shows subagent status (running/done)
+- **Prompt history**: Recent user prompts
+
+Multi-session support: each Claude Code session gets its own buffer, identified by session ID.
 
 ## Debugging & testing
 
