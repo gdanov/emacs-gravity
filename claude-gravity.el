@@ -835,7 +835,8 @@ Each session plist has keys:
                                    (or status-label "")
                                    n-tools)))))))
                projects)))
-          (goto-char (min pos (point-max))))))))
+          (goto-char (min pos (point-max)))
+          (claude-gravity--apply-visibility))))))
 
 ;;; Per-Session Buffer
 
@@ -857,6 +858,18 @@ Each session plist has keys:
         (claude-gravity--render-session-buffer session)
         (pop-to-buffer (current-buffer))))))
 
+(defun claude-gravity--apply-visibility ()
+  "Apply overlay-based hiding for sections marked hidden.
+magit-section caches visibility but relies on paint hooks to apply
+overlays.  Since we render from timers, we must apply them manually."
+  (when magit-root-section
+    (cl-labels ((walk (section)
+                  (when (oref section hidden)
+                    (magit-section-hide section))
+                  (dolist (child (oref section children))
+                    (walk child))))
+      (walk magit-root-section))))
+
 (defun claude-gravity--render-session-buffer (session)
   "Render the magit-section UI for SESSION into its buffer."
   (let* ((buf-name (claude-gravity--session-buffer-name session))
@@ -874,7 +887,8 @@ Each session plist has keys:
             (claude-gravity-insert-agents session)
             (claude-gravity-insert-files session)
             (claude-gravity-insert-tasks session))
-          (goto-char (min pos (point-max))))))))
+          (goto-char (min pos (point-max)))
+          (claude-gravity--apply-visibility))))))
 
 ;;; Modes
 
