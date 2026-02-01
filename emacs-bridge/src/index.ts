@@ -3,17 +3,32 @@ import { readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
+import { appendFileSync } from "fs";
+
+// Debug logging
+function log(msg: string) {
+  try {
+    const timestamp = new Date().toISOString();
+    appendFileSync("/tmp/emacs-bridge.log", `[${timestamp}] ${msg}\n`);
+  } catch (e) {
+    // ignore logging errors
+  }
+}
+
 // Helper to send data to Emacs socket
 async function sendToEmacs(eventName: string, payload: any) {
+  log(`Sending event: ${eventName}`);
   const socketPath = join(
     homedir(),
     "work/playground/emacs-gravity/claude-gravity.sock",
   );
+  log(`Socket path: ${socketPath}`);
 
   return new Promise<void>((resolve, reject) => {
     const client = createConnection(socketPath);
 
     client.on("connect", () => {
+      log("Connected to socket");
       const message =
         JSON.stringify({ event: eventName, data: payload }) + "\n";
       client.write(message);
@@ -21,17 +36,20 @@ async function sendToEmacs(eventName: string, payload: any) {
     });
 
     client.on("error", (err) => {
+      log(`Socket error: ${err.message}`);
       // Fail silently to avoid blocking Claude if Emacs is down
       resolve();
     });
 
     client.on("close", () => {
+      log("Connection closed");
       resolve();
     });
   });
 }
 
 async function main() {
+  log(`Process started: ${process.argv.join(" ")}`);
   try {
     const eventName = process.argv[2]; // e.g., "PreToolUse"
 
@@ -46,6 +64,8 @@ async function main() {
     } catch (e) {
       // Ignore stdin read errors (e.g. if no input provided)
     }
+
+    log(`Payload: ${JSON.stringify(inputData)}`);
 
     // Send to Emacs
     await sendToEmacs(eventName, inputData);

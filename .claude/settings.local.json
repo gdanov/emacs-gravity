@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity log --oneline -10)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity diff --stat)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity diff claude-gravity.el)",
+      "mcp__emacs__eval-elisp",
+      "Bash(pgrep:*)",
+      "Bash(claude --plugin ./emacs-bridge -p \"read the file CLAUDE.md and tell me what it says in one sentence\":*)",
+      "Bash(claude --plugin-dir ./emacs-bridge -p \"read the file CLAUDE.md and tell me what it says in one sentence\" --dangerously-skip-permissions)",
+      "Bash(claude --plugin-dir:*)",
+      "Bash(npm run build:*)",
+      "Bash(:)"
+    ]
+  }
+}

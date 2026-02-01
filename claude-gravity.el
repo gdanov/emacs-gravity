@@ -15,6 +15,7 @@
 (require 'magit-section)
 (require 'transient)
 (require 'json)
+(require 'seq)
 
 (defgroup claude-gravity nil
   "Claude Code interface."
@@ -46,57 +47,233 @@
 
 ;;; Data Models (Mock)
 
-(defvar claude-gravity--mock-plan
-  '((goal . "Refactor database schema")
-    (status . "planning")
-    (steps . [((id . 1) (description . "Analyze dependencies") (status . "done"))
-              ((id . 2) (description . "Draft migration script") (status . "in-progress"))
-              ((id . 3) (description . "Run tests") (status . "todo"))])
-    (memory . ((files . ["db/schema.sql" "models/user.js"])
-               (notes . "Remember to back up the DB!")))))
+;;; State
 
-;;; Utils
+(defvar claude-gravity--state
+  '((tools . [])
+    (chat . []))
+  "Current state of the Claude Code session.")
 
 (defun claude-gravity-get-state ()
-  "Retrieve current state (mock)."
-  claude-gravity--mock-plan)
+  "Retrieve current state."
+  claude-gravity--state)
+
+(defun claude-gravity-handle-event (event data)
+  "Handle an incoming EVENT with DATA."
+  (message "Handling event: %s" event)
+  (pcase event
+    ("PreToolUse"
+     (let* ((tools (alist-get 'tools claude-gravity--state))
+            (new-tool `((name . ,(alist-get 'tool_name data))
+                        (input . ,(alist-get 'tool_input data))
+                        (status . "running")
+                        (timestamp . ,(current-time)))))
+       (setf (alist-get 'tools claude-gravity--state)
+             (vconcat tools (vector new-tool)))))
+    ("PostToolUse"
+     (let* ((tools (alist-get 'tools claude-gravity--state))
+            (len (length tools)))
+       (when (> len 0)
+         (let* ((last-idx (1- len))
+                (tool (aref tools last-idx)))
+           (when (equal (alist-get 'status tool) "running")
+             (setf (alist-get 'status tool) "done")
+             (setf (alist-get 'result tool) (alist-get 'tool_response data))
+             (aset tools last-idx tool)))))))
+  (claude-gravity-refresh))
+
+;;; Faces
+
+(defface claude-gravity-tool-done
+  '((t :foreground "green"))
+  "Face for completed tool status indicator."
+  :group 'claude-gravity)
+
+(defface claude-gravity-tool-running
+  '((t :foreground "yellow"))
+  "Face for running tool status indicator."
+  :group 'claude-gravity)
+
+(defface claude-gravity-tool-name
+  '((t :weight bold))
+  "Face for tool name."
+  :group 'claude-gravity)
+
+(defface claude-gravity-detail-label
+  '((t :foreground "gray50"))
+  "Face for detail labels in expanded tool view."
+  :group 'claude-gravity)
+
+(defface claude-gravity-stderr
+  '((t :foreground "red"))
+  "Face for stderr output."
+  :group 'claude-gravity)
+
+;;; Tool display helpers
+
+(defun claude-gravity--truncate (str max-len)
+  "Truncate STR to MAX-LEN chars, adding ellipsis if needed."
+  (if (and str (> (length str) max-len))
+      (concat (substring str 0 (- max-len 1)) "\u2026")
+    (or str "")))
+
+(defun claude-gravity--shorten-path (path)
+  "Shorten PATH to project-relative or basename."
+  (if (null path) ""
+    (let ((name (file-name-nondirectory path)))
+      (if (string-empty-p name) path name))))
+
+(defun claude-gravity--tool-summary (name input)
+  "Produce a short one-line summary for tool NAME with INPUT alist."
+  (pcase name
+    ("Bash"
+     (let* ((cmd (or (alist-get 'command input) ""))
+            (parts (split-string cmd " " t))
+            (prog (file-name-nondirectory (or (car parts) "")))
+            (args (string-join (cdr parts) " ")))
+       (claude-gravity--truncate (concat prog " " args) 60)))
+    ("Read"
+     (claude-gravity--shorten-path (alist-get 'file_path input)))
+    ((or "Edit" "Write")
+     (claude-gravity--shorten-path (alist-get 'file_path input)))
+    ((or "Grep" "Glob")
+     (let ((pattern (alist-get 'pattern input)))
+       (if pattern (format "\"%s\"" (claude-gravity--truncate pattern 40)) "")))
+    (_
+     (let ((first-val (cdar input)))
+       (if (stringp first-val)
+           (claude-gravity--truncate first-val 50)
+         "")))))
+
+(defun claude-gravity--tool-description (input)
+  "Return the description field from INPUT if present."
+  (alist-get 'description input))
+
+(defun claude-gravity--insert-tool-detail (name input result)
+  "Insert expanded detail for tool NAME with INPUT and RESULT."
+  (pcase name
+    ("Bash"
+     (let ((cmd (alist-get 'command input)))
+       (when cmd
+         (insert (propertize "    Command: " 'face 'claude-gravity-detail-label))
+         (insert cmd "\n"))))
+    ("Read"
+     (let ((path (alist-get 'file_path input)))
+       (when path
+         (insert (propertize "    File: " 'face 'claude-gravity-detail-label))
+         (insert path "\n"))))
+    ((or "Edit" "Write")
+     (let ((path (alist-get 'file_path input)))
+       (when path
+         (insert (propertize "    File: " 'face 'claude-gravity-detail-label))
+         (insert path "\n"))))
+    ((or "Grep" "Glob")
+     (let ((pattern (alist-get 'pattern input))
+           (path (alist-get 'path input)))
+       (when pattern
+         (insert (propertize "    Pattern: " 'face 'claude-gravity-detail-label))
+         (insert pattern "\n"))
+       (when path
+         (insert (propertize "    Path: " 'face 'claude-gravity-detail-label))
+         (insert path "\n")))))
+  ;; Result section
+  (when result
+    (let ((stdout (alist-get 'stdout result))
+          (stderr (alist-get 'stderr result))
+          (file-data (alist-get 'file result)))
+      ;; Bash-style stdout
+      (when (and stdout (not (string-empty-p stdout)))
+        (let* ((lines (split-string stdout "\n" t))
+               (nlines (length lines))
+               (preview (seq-take lines 8)))
+          (insert (propertize (format "    Output (%d lines):\n" nlines)
+                              'face 'claude-gravity-detail-label))
+          (dolist (line preview)
+            (insert "      " (claude-gravity--truncate line 80) "\n"))
+          (when (> nlines 8)
+            (insert (propertize "      ...\n" 'face 'claude-gravity-detail-label)))))
+      ;; Read-style file content
+      (when file-data
+        (let* ((content (alist-get 'content file-data))
+               (num-lines (alist-get 'numLines file-data))
+               (total-lines (alist-get 'totalLines file-data)))
+          (when content
+            (let* ((lines (split-string content "\n"))
+                   (preview (seq-take lines 6)))
+              (insert (propertize (format "    Content (%d/%d lines):\n"
+                                         (or num-lines (length lines))
+                                         (or total-lines (length lines)))
+                                  'face 'claude-gravity-detail-label))
+              (dolist (line preview)
+                (insert "      " (claude-gravity--truncate line 80) "\n"))
+              (when (> (length lines) 6)
+                (insert (propertize "      ...\n" 'face 'claude-gravity-detail-label)))))))
+      ;; Stderr
+      (when (and stderr (not (string-empty-p stderr)))
+        (insert (propertize "    Stderr:\n" 'face 'claude-gravity-stderr))
+        (dolist (line (seq-take (split-string stderr "\n" t) 4))
+          (insert (propertize (concat "      " line "\n") 'face 'claude-gravity-stderr)))))))
 
 ;;; Sections
 
 (defun claude-gravity-insert-header (plan)
   (magit-insert-section (header)
     (magit-insert-heading "Claude Code Gravity")
-    (magit-insert-section-body
-      (insert (format "Goal: %s\n" (alist-get 'goal plan)))
-      (insert (format "Status: %s\n" (alist-get 'status plan)))
-      (insert "\n"))))
+    (insert (format "Tools Executed: %d\n" (length (alist-get 'tools plan))))
+    (insert "\n")))
+
+(defun claude-gravity-insert-tools (plan)
+  (let ((tools (alist-get 'tools plan)))
+    (when (> (length tools) 0)
+      (magit-insert-section (tools)
+        (magit-insert-heading "Tool Usage")
+        (dolist (item (append tools nil))
+          (let* ((name (alist-get 'name item))
+                 (status (alist-get 'status item))
+                 (input (alist-get 'input item))
+                 (result (alist-get 'result item))
+                 (done-p (equal status "done"))
+                 (indicator (propertize (if done-p "[x]" "[/]")
+                                        'face (if done-p
+                                                   'claude-gravity-tool-done
+                                                 'claude-gravity-tool-running)))
+                 (tool-face (propertize (or name "?") 'face 'claude-gravity-tool-name))
+                 (summary (claude-gravity--tool-summary name input))
+                 (desc (claude-gravity--tool-description input)))
+            (magit-insert-section (tool item t)
+              (magit-insert-heading
+                (format "%s %s  %s%s"
+                        indicator
+                        tool-face
+                        summary
+                        (if desc (format "  (%s)" desc) "")))
+              (claude-gravity--insert-tool-detail name input result))))
+        (insert "\n")))))
 
 (defun claude-gravity-insert-steps (plan)
   (let ((steps (alist-get 'steps plan)))
     (magit-insert-section (steps)
       (magit-insert-heading "Plan")
-      (magit-insert-section-body
-        (seq-do (lambda (step)
-                  (let ((desc (alist-get 'description step))
-                        (status (alist-get 'status step)))
-                    (magit-insert-section (step step)
-                      (insert (format "[%s] %s\n" 
-                                      (if (equal status "done") "x" 
-                                        (if (equal status "in-progress") "/" " "))
-                                      desc)))))
-                steps)
-        (insert "\n")))))
+      (seq-do (lambda (step)
+                (let ((desc (alist-get 'description step))
+                      (status (alist-get 'status step)))
+                  (magit-insert-section (step step)
+                    (insert (format "[%s] %s\n"
+                                    (if (equal status "done") "x"
+                                      (if (equal status "in-progress") "/" " "))
+                                    desc)))))
+              steps)
+      (insert "\n"))))
 
 (defun claude-gravity-insert-memory (plan)
   (let* ((mem (alist-get 'memory plan))
          (files (alist-get 'files mem)))
     (magit-insert-section (memory)
       (magit-insert-heading "Working Memory")
-      (magit-insert-section-body
-        (when files
-          (insert "Files:\n")
-          (seq-do (lambda (f) (insert (format " - %s\n" f))) files))
-        (insert "\n")))))
+      (when files
+        (insert "Files:\n")
+        (seq-do (lambda (f) (insert (format " - %s\n" f))) files))
+      (insert "\n"))))
 
 ;;; Mode
 
@@ -113,8 +290,7 @@
 (define-derived-mode claude-gravity-mode magit-section-mode "ClaudeGravity"
   "Major mode for Claude Code Gravity interface.
 
-\\{claude-gravity-mode-map}"
-  (magit-section-mode))
+\\{claude-gravity-mode-map}")
 
 (defun claude-gravity-refresh ()
   "Refresh the status buffer."
@@ -154,9 +330,9 @@
       (erase-buffer)
       (magit-insert-section (root)
         (claude-gravity-insert-header plan)
+        (claude-gravity-insert-tools plan)
         (claude-gravity-insert-steps plan)
         (claude-gravity-insert-memory plan)))
-    (magit-section-show-level-2)
     (switch-to-buffer (current-buffer))))
 
 ;;; Socket Server
@@ -176,11 +352,10 @@
           (let* ((json-object-type 'alist)
                  (data (json-read-from-string line)))
             (message "Claude Gravity received: %s" data)
-            ;; TODO: Dispatch to handler based on event type
-            (when-let ((plan (alist-get 'plan data)))
-              ;; Update state if plan is present
-              (setq claude-gravity--mock-plan plan)
-              (claude-gravity-refresh)))
+            (let ((event (alist-get 'event data))
+                  (payload (alist-get 'data data)))
+              (when event
+                (claude-gravity-handle-event event payload))))
         (error
          (message "Claude Gravity JSON error: %s" err))))))
 
