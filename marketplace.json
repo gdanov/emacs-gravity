@@ -1,0 +1,14 @@
+{
+  "name": "local-emacs-marketplace",
+  "owner": {
+    "name": "gdanov",
+    "email": "gdanov@example.com"
+  },
+  "plugins": [
+    {
+      "name": "emacs-bridge",
+      "description": "Bridge to Emacs via Unix Socket",
+      "source": "./emacs-bridge"
+    }
+  ]
+}

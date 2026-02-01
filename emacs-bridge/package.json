@@ -1,0 +1,15 @@
+{
+  "name": "emacs-bridge",
+  "version": "1.0.0",
+  "description": "Claude Code plugin to push events to Emacs via Unix socket",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@types/node": "^20.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
