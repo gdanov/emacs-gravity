@@ -272,8 +272,11 @@ Each session plist has keys:
      (let* ((session (claude-gravity--ensure-session session-id cwd))
             (prompt-text (alist-get 'prompt data)))
        (when prompt-text
-         (plist-put session :prompts
-                    (vconcat (plist-get session :prompts) (vector prompt-text)))
+         (let ((entry (list (cons 'text prompt-text)
+                            (cons 'submitted (current-time))
+                            (cons 'elapsed nil))))
+           (plist-put session :prompts
+                      (vconcat (plist-get session :prompts) (vector entry))))
          (plist-put session :current-turn
                     (1+ (or (plist-get session :current-turn) 0))))
        (plist-put session :claude-status 'responding)))
@@ -281,7 +284,18 @@ Each session plist has keys:
     ("Stop"
      (let ((session (claude-gravity--get-session session-id)))
        (when session
-         (plist-put session :claude-status 'idle))))
+         (plist-put session :claude-status 'idle)
+         ;; Compute elapsed time for the last prompt
+         (let* ((prompts (plist-get session :prompts))
+                (len (length prompts)))
+           (when (> len 0)
+             (let ((last-prompt (aref prompts (1- len))))
+               (when (and (listp last-prompt)
+                          (not (alist-get 'elapsed last-prompt))
+                          (alist-get 'submitted last-prompt))
+                 (setf (alist-get 'elapsed last-prompt)
+                       (float-time (time-subtract (current-time)
+                                                  (alist-get 'submitted last-prompt)))))))))))
 
     ("SubagentStart"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -425,6 +439,15 @@ Each session plist has keys:
   (if (and str (> (length str) max-len))
       (concat (substring str 0 (- max-len 1)) "\u2026")
     (or str "")))
+
+(defun claude-gravity--format-elapsed (seconds)
+  "Format SECONDS as a human-readable duration string."
+  (if (null seconds) "--"
+    (let ((secs (truncate seconds)))
+      (cond
+       ((< secs 60) (format "%ds" secs))
+       ((< secs 3600) (format "%dm%02ds" (/ secs 60) (% secs 60)))
+       (t (format "%dh%02dm" (/ secs 3600) (% (/ secs 60) 60)))))))
 
 (defun claude-gravity--shorten-path (path)
   "Shorten PATH to project-relative or basename."
@@ -612,7 +635,7 @@ Each session plist has keys:
             (let ((turn-tools (gethash i groups))
                   (prompt-text (when (and prompts (> (length prompts) 0)
                                          (> i 0) (<= i (length prompts)))
-                                 (aref prompts (1- i)))))
+                                 (claude-gravity--prompt-text (aref prompts (1- i))))))
               (when turn-tools
                 (let* ((count (length turn-tools))
                        (is-current (= i current-turn))
@@ -702,20 +725,40 @@ Each session plist has keys:
     ("completed" 2)
     (_ 3)))
 
+(defun claude-gravity--prompt-text (prompt-entry)
+  "Extract text from PROMPT-ENTRY (alist or legacy string)."
+  (if (listp prompt-entry)
+      (or (alist-get 'text prompt-entry) "")
+    (or prompt-entry "")))
+
 (defun claude-gravity-insert-prompts (session)
   "Insert prompts section for SESSION."
   (let ((prompts (plist-get session :prompts)))
     (when (and prompts (> (length prompts) 0))
-      (magit-insert-section (prompts nil t)
-        (magit-insert-heading
-          (format "Prompts (%d)" (length prompts)))
-        (let* ((all (append prompts nil))
-               (shown (last all 10)))
-          (dolist (p shown)
-            (magit-insert-section (prompt p)
-              (insert (propertize "  > " 'face 'claude-gravity-prompt)
-                      (claude-gravity--truncate p 80) "\n"))))
-        (insert "\n")))))
+      (let* ((all (append prompts nil))
+             (shown (last all 10))
+             (last-idx (1- (length all))))
+        (magit-insert-section (prompts nil t)
+          (magit-insert-heading
+            (format "Prompts (%d)" (length prompts)))
+          (let ((idx (- (length all) (length shown))))
+            (dolist (p shown)
+              (let* ((text (claude-gravity--prompt-text p))
+                     (elapsed (when (listp p) (alist-get 'elapsed p)))
+                     (elapsed-str (claude-gravity--format-elapsed elapsed))
+                     (first-line (car (split-string text "\n" t)))
+                     (is-last (= idx last-idx))
+                     (heading (format "%s  %s  %s"
+                                      (propertize ">" 'face 'claude-gravity-prompt)
+                                      (claude-gravity--truncate (or first-line "") 70)
+                                      (propertize elapsed-str 'face 'claude-gravity-detail-label))))
+                (magit-insert-section (prompt idx (not is-last))
+                  (magit-insert-heading heading)
+                  (let ((lines (split-string text "\n")))
+                    (dolist (line lines)
+                      (insert "    " line "\n"))))
+              (setq idx (1+ idx)))))
+          (insert "\n"))))))
 
 (defun claude-gravity-insert-agents (session)
   "Insert agents section for SESSION."
