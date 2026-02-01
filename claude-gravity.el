@@ -87,8 +87,12 @@ Each session plist has keys:
                                      (directory-file-name (or cwd "")))
                            :state (list (cons 'tools []) (cons 'chat []))
                            :status 'active
+                           :claude-status 'idle
                            :start-time (current-time)
-                           :plan nil)))
+                           :plan nil
+                           :prompts []
+                           :agents []
+                           :files (make-hash-table :test 'equal))))
         (puthash session-id session claude-gravity--sessions)
         session)))
 
@@ -153,6 +157,38 @@ Each session plist has keys:
         (setq idx i)))
     idx))
 
+;;; File tracking
+
+(defun claude-gravity--track-file (session tool-name tool-input)
+  "Track file from TOOL-NAME with TOOL-INPUT in SESSION's :files hash table."
+  (let ((files (plist-get session :files))
+        (path nil)
+        (op nil))
+    (pcase tool-name
+      ("Read"  (setq path (alist-get 'file_path tool-input) op "read"))
+      ("Edit"  (setq path (alist-get 'file_path tool-input) op "edit"))
+      ("Write" (setq path (alist-get 'file_path tool-input) op "write")))
+    (when (and path op files)
+      (let ((entry (gethash path files)))
+        (if entry
+            (progn
+              (unless (member op (alist-get 'ops entry))
+                (setf (alist-get 'ops entry) (cons op (alist-get 'ops entry))))
+              (setf (alist-get 'last-touched entry) (current-time)))
+          (puthash path (list (cons 'ops (list op))
+                              (cons 'last-touched (current-time)))
+                   files))))))
+
+;;; Agent helpers
+
+(defun claude-gravity--find-agent-by-id (agents agent-id)
+  "Find index of agent in AGENTS vector matching AGENT-ID."
+  (let ((idx nil))
+    (dotimes (i (length agents))
+      (when (equal (alist-get 'agent_id (aref agents i)) agent-id)
+        (setq idx i)))
+    idx))
+
 ;;; Event handling
 
 (defun claude-gravity-handle-event (event session-id cwd data)
@@ -170,6 +206,38 @@ Each session plist has keys:
        (when session
          (plist-put session :status 'ended))))
 
+    ("UserPromptSubmit"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (prompt-text (alist-get 'prompt data)))
+       (when prompt-text
+         (plist-put session :prompts
+                    (vconcat (plist-get session :prompts) (vector prompt-text))))
+       (plist-put session :claude-status 'responding)))
+
+    ("Stop"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (plist-put session :claude-status 'idle))))
+
+    ("SubagentStart"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (agents (plist-get session :agents))
+            (new-agent (list (cons 'agent_id (alist-get 'agent_id data))
+                             (cons 'type (alist-get 'agent_type data))
+                             (cons 'status "running")
+                             (cons 'timestamp (current-time)))))
+       (plist-put session :agents (vconcat agents (vector new-agent)))))
+
+    ("SubagentStop"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (agents (plist-get session :agents))
+            (agent-id (alist-get 'agent_id data))
+            (idx (claude-gravity--find-agent-by-id agents agent-id)))
+       (when idx
+         (let ((agent (aref agents idx)))
+           (setf (alist-get 'status agent) "done")
+           (aset agents idx agent)))))
+
     ("PreToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
             (state (plist-get session :state))
@@ -179,7 +247,9 @@ Each session plist has keys:
                           (cons 'input (alist-get 'tool_input data))
                           (cons 'status "running")
                           (cons 'timestamp (current-time)))))
-       (setf (alist-get 'tools state) (vconcat tools (vector new-tool)))))
+       (setf (alist-get 'tools state) (vconcat tools (vector new-tool)))
+       (plist-put session :claude-status 'responding)
+       (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))))
 
     ("PostToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -192,6 +262,8 @@ Each session plist has keys:
            (setf (alist-get 'status tool) "done")
            (setf (alist-get 'result tool) (alist-get 'tool_response data))
            (aset tools idx tool)))
+       ;; Track file operations
+       (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
        ;; Detect plan presentation
        (let ((tool-name (alist-get 'tool_name data)))
          (when (equal tool-name "ExitPlanMode")
@@ -233,6 +305,26 @@ Each session plist has keys:
 (defface claude-gravity-session-ended
   '((t :foreground "gray50"))
   "Face for ended session indicator."
+  :group 'claude-gravity)
+
+(defface claude-gravity-prompt
+  '((t :foreground "cyan"))
+  "Face for user prompt text."
+  :group 'claude-gravity)
+
+(defface claude-gravity-status-responding
+  '((t :foreground "yellow"))
+  "Face for responding status."
+  :group 'claude-gravity)
+
+(defface claude-gravity-status-idle
+  '((t :foreground "green"))
+  "Face for idle status."
+  :group 'claude-gravity)
+
+(defface claude-gravity-file-ops
+  '((t :foreground "gray60"))
+  "Face for file operation labels."
   :group 'claude-gravity)
 
 ;;; Tool display helpers
@@ -449,16 +541,79 @@ Each session plist has keys:
               steps)
       (insert "\n"))))
 
-(defun claude-gravity-insert-memory (state)
-  "Insert working memory section from STATE."
-  (let* ((mem (alist-get 'memory state))
-         (files (alist-get 'files mem)))
-    (magit-insert-section (memory)
-      (magit-insert-heading "Working Memory")
-      (when files
-        (insert "Files:\n")
-        (seq-do (lambda (f) (insert (format " - %s\n" f))) files))
-      (insert "\n"))))
+(defun claude-gravity-insert-prompts (session)
+  "Insert prompts section for SESSION."
+  (let ((prompts (plist-get session :prompts)))
+    (when (and prompts (> (length prompts) 0))
+      (magit-insert-section (prompts nil t)
+        (magit-insert-heading
+          (format "Prompts (%d)" (length prompts)))
+        (let* ((all (append prompts nil))
+               (shown (last all 10)))
+          (dolist (p shown)
+            (magit-insert-section (prompt p)
+              (insert (propertize "  > " 'face 'claude-gravity-prompt)
+                      (claude-gravity--truncate p 80) "\n"))))
+        (insert "\n")))))
+
+(defun claude-gravity-insert-agents (session)
+  "Insert agents section for SESSION."
+  (let ((agents (plist-get session :agents)))
+    (when (and agents (> (length agents) 0))
+      (magit-insert-section (agents nil t)
+        (magit-insert-heading
+          (format "Agents (%d)" (length agents)))
+        (dolist (agent (append agents nil))
+          (let* ((agent-type (alist-get 'type agent))
+                 (agent-id (alist-get 'agent_id agent))
+                 (status (alist-get 'status agent))
+                 (done-p (equal status "done"))
+                 (indicator (propertize (if done-p "[x]" "[/]")
+                                        'face (if done-p
+                                                   'claude-gravity-tool-done
+                                                 'claude-gravity-tool-running)))
+                 (short-id (if (and agent-id (> (length agent-id) 8))
+                               (substring agent-id 0 8)
+                             (or agent-id "?"))))
+            (magit-insert-section (agent agent)
+              (insert (format "  %s %s  (%s)\n"
+                              indicator
+                              (propertize (or agent-type "?") 'face 'claude-gravity-tool-name)
+                              (propertize short-id 'face 'claude-gravity-detail-label))))))
+        (insert "\n")))))
+
+(defun claude-gravity-insert-files (session)
+  "Insert files section for SESSION."
+  (let ((files-ht (plist-get session :files)))
+    (when (and files-ht (> (hash-table-count files-ht) 0))
+      (let ((file-list nil))
+        ;; Collect into list for sorting
+        (maphash (lambda (path entry)
+                   (push (list path
+                               (alist-get 'ops entry)
+                               (alist-get 'last-touched entry))
+                         file-list))
+                 files-ht)
+        ;; Sort by last-touched, most recent first
+        (setq file-list (sort file-list
+                              (lambda (a b)
+                                (time-less-p (nth 2 b) (nth 2 a)))))
+        (magit-insert-section (files nil t)
+          (magit-insert-heading
+            (format "Files (%d)" (length file-list)))
+          (dolist (entry file-list)
+            (let* ((path (nth 0 entry))
+                   (ops (nth 1 entry))
+                   (basename (file-name-nondirectory path))
+                   (ops-str (string-join (reverse ops) ", ")))
+              (magit-insert-section (file-entry path t)
+                (magit-insert-heading
+                  (format "  %-30s %s"
+                          (propertize basename 'face 'claude-gravity-tool-name)
+                          (propertize ops-str 'face 'claude-gravity-file-ops)))
+                (insert (propertize (format "    %s\n" path)
+                                    'face 'claude-gravity-detail-label)))))
+          (insert "\n"))))))
 
 ;;; Overview Buffer
 
@@ -501,14 +656,23 @@ Each session plist has keys:
                      (let* ((sid (plist-get session :session-id))
                             (label (claude-gravity--session-label session))
                             (status (plist-get session :status))
+                            (claude-st (plist-get session :claude-status))
                             (tools (alist-get 'tools (plist-get session :state)))
                             (n-tools (length tools))
                             (indicator (if (eq status 'active)
                                            (propertize "●" 'face 'claude-gravity-tool-running)
-                                         (propertize "○" 'face 'claude-gravity-session-ended))))
+                                         (propertize "○" 'face 'claude-gravity-session-ended)))
+                            (status-label
+                             (when (eq status 'active)
+                               (if (eq claude-st 'responding)
+                                   (propertize "responding" 'face 'claude-gravity-status-responding)
+                                 (propertize "idle" 'face 'claude-gravity-status-idle)))))
                        (magit-insert-section (session-entry sid)
                          (magit-insert-heading
-                           (format "  %s %s  [%d tools]" indicator label n-tools)))))))
+                           (format "  %s %s  %s  [%d tools]"
+                                   indicator label
+                                   (or status-label "")
+                                   n-tools)))))))
                projects)))
           (goto-char (min pos (point-max))))))))
 
@@ -541,9 +705,11 @@ Each session plist has keys:
           (magit-insert-section (root)
             (claude-gravity-insert-header state)
             (claude-gravity-insert-plan-link session)
+            (claude-gravity-insert-prompts session)
             (claude-gravity-insert-tools state)
-            (claude-gravity-insert-steps state)
-            (claude-gravity-insert-memory state))
+            (claude-gravity-insert-agents session)
+            (claude-gravity-insert-files session)
+            (claude-gravity-insert-steps state))
           (goto-char (min pos (point-max))))))))
 
 ;;; Modes
