@@ -20,15 +20,33 @@ we don't want to implement full-blown claude code IDE, as we already use two pre
 
 # current state
 
-- Plugin hooks for 6 lifecycle events: PreToolUse, PostToolUse, Stop, UserPromptSubmit, SubagentStart, SubagentStop
+## features 
+
+- Plugin hooks for 8 lifecycle events: PreToolUse, PostToolUse, Stop, UserPromptSubmit, SubagentStart, SubagentStop, SessionStart, SessionEnd
 - Multi-session support with per-session buffers, grouped by project in overview
+- Track session state (idle, responding, ended) with PID-based liveness detection
+- Dead session detection: PID checks, staleness timeout (>5min), cleanup commands (D/d/R/X)
 - Magit-section based overview and detail views with transient menus
 - File tracking (read/edit/write operations per file)
 - Agent/subagent tracking with live status
-- User prompt history display
-- Plan detection (via ExitPlanMode tool) and display
-- Claude status indicator (idle/responding) per session
+- Task tracking (TaskCreate/TaskUpdate/TaskList) with status indicators
+- User prompt history display with elapsed time per turn
+- Plan detection (via ExitPlanMode tool) and display in side buffer (markdown mode)
+- Claude status indicator (idle/responding) per session with idle time in overview
+- AskUserQuestion tool handled like prompt (with answer tracking)
+- Tool usage grouped by prompt (turn-based)
+- Tool permission signatures displayed (e.g. Bash(command), Edit(/path))
+- Allow-pattern management: suggest patterns, copy to kill ring (A), write to settings.local.json (a)
+- Comment system (overlay-based, mock/non-persistent)
+- Debounced per-session rendering (0.1s timer)
 
 # tech stack
 
 we like emacs magit package and want to use similar UI paradigms and libraries. We are open to use org-mode, but not very keen.
+
+# ideas, pending features to discuss
+
+- show tools that asked for permissions (partially done: pattern generation + settings integration works, but no explicit "permission requested" indicator in UI)
+- show more (what?) details and state for agents (currently only: type, status, short ID)
+- show Edit tools diff (ideally color coded) — not started
+- show the summary that claude shows after planning when asking to exit planning mode

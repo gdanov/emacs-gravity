@@ -100,7 +100,26 @@ Each session plist has keys:
                            :tasks (make-hash-table :test 'equal)
                            :current-turn 0)))
         (puthash session-id session claude-gravity--sessions)
+        (claude-gravity--load-allow-patterns session)
         session)))
+
+(defun claude-gravity--load-allow-patterns (session)
+  "Load allow patterns from .claude/settings.local.json for SESSION.
+Stores the patterns list on SESSION's :allow-patterns property."
+  (let* ((cwd (plist-get session :cwd))
+         (settings-path (expand-file-name ".claude/settings.local.json" cwd)))
+    (if (and cwd (not (string-empty-p cwd)) (file-exists-p settings-path))
+        (condition-case err
+            (let* ((json-object-type 'alist)
+                   (json-array-type 'list)
+                   (data (json-read-file settings-path))
+                   (perms (alist-get 'permissions data))
+                   (allow (alist-get 'allow perms)))
+              (plist-put session :allow-patterns (or allow nil)))
+          (error
+           (message "Claude Gravity: failed to read allow patterns: %s" err)
+           (plist-put session :allow-patterns nil)))
+      (plist-put session :allow-patterns nil))))
 
 (defun claude-gravity-get-state ()
   "Return state for the current session buffer, or first active session."
@@ -480,6 +499,11 @@ Optional PID is the Claude Code process ID."
   "Face for AskUserQuestion prompt indicators."
   :group 'claude-gravity)
 
+(defface claude-gravity-tool-signature
+  '((t :foreground "gray50" :slant italic))
+  "Face for tool permission signature text."
+  :group 'claude-gravity)
+
 ;;; Tool display helpers
 
 (defun claude-gravity--extract-ask-answer (response)
@@ -549,6 +573,32 @@ Optional PID is the Claude Code process ID."
 (defun claude-gravity--tool-description (input)
   "Return the description field from INPUT if present."
   (alist-get 'description input))
+
+(defun claude-gravity--tool-signature (name input)
+  "Build the permission-format signature string for tool NAME with INPUT.
+Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
+  (pcase name
+    ("Bash"
+     (let ((cmd (or (alist-get 'command input) "")))
+       (format "Bash(%s)" cmd)))
+    ((or "Edit" "Write")
+     (let ((path (or (alist-get 'file_path input) "")))
+       (format "%s(%s)" name path)))
+    ("Read"
+     (let ((path (or (alist-get 'file_path input) "")))
+       (format "Read(%s)" path)))
+    ("WebFetch"
+     (let* ((url (or (alist-get 'url input) ""))
+            (host (when (string-match "https?://\\([^/]+\\)" url)
+                    (match-string 1 url))))
+       (if host
+           (format "WebFetch(domain:%s)" host)
+         (format "WebFetch(%s)" url))))
+    ((or "Grep" "Glob")
+     (let ((pattern (or (alist-get 'pattern input) "")))
+       (format "%s(%s)" name pattern)))
+    (_
+     name)))
 
 (defun claude-gravity--insert-tool-detail (name input result)
   "Insert expanded detail for tool NAME with INPUT and RESULT."
@@ -751,6 +801,9 @@ Optional PID is the Claude Code process ID."
                 tool-face
                 summary
                 (if desc (format "  (%s)" desc) "")))
+      ;; Show permission-format signature in detail
+      (let ((sig (claude-gravity--tool-signature name input)))
+        (insert (propertize (format "    %s\n" sig) 'face 'claude-gravity-tool-signature)))
       (claude-gravity--insert-tool-detail name input result))))
 
 (defun claude-gravity-insert-tasks (session)
@@ -912,6 +965,18 @@ Optional PID is the Claude Code process ID."
                                     'face 'claude-gravity-detail-label)))))
           (insert "\n"))))))
 
+(defun claude-gravity-insert-allow-patterns (session)
+  "Insert allow patterns section for SESSION."
+  (let ((patterns (plist-get session :allow-patterns)))
+    (when patterns
+      (magit-insert-section (allow-patterns nil t)
+        (magit-insert-heading
+          (format "Allow Patterns (%d)" (length patterns)))
+        (dolist (pat patterns)
+          (magit-insert-section (allow-pattern pat)
+            (insert (format "  %s\n" (propertize pat 'face 'claude-gravity-detail-label)))))
+        (insert "\n")))))
+
 ;;; Overview Buffer
 
 (defun claude-gravity--render-overview ()
@@ -1031,7 +1096,8 @@ overlays.  Since we render from timers, we must apply them manually."
             (claude-gravity-insert-tools session)
             (claude-gravity-insert-agents session)
             (claude-gravity-insert-files session)
-            (claude-gravity-insert-tasks session))
+            (claude-gravity-insert-tasks session)
+            (claude-gravity-insert-allow-patterns session))
           (goto-char (min pos (point-max)))
           (claude-gravity--apply-visibility))))))
 
@@ -1050,6 +1116,8 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "R") 'claude-gravity-reset-status)
 (define-key claude-gravity-mode-map (kbd "X") 'claude-gravity-detect-dead-sessions)
 (define-key claude-gravity-mode-map (kbd "d") 'claude-gravity-delete-session)
+(define-key claude-gravity-mode-map (kbd "A") 'claude-gravity-add-allow-pattern)
+(define-key claude-gravity-mode-map (kbd "a") 'claude-gravity-add-allow-pattern-to-settings)
 
 (define-derived-mode claude-gravity-mode magit-section-mode "ClaudeGravity"
   "Major mode for Claude Code Gravity overview.
@@ -1078,6 +1146,109 @@ overlays.  Since we render from timers, we must apply them manually."
     ;; Overview buffer
     (claude-gravity--render-overview)))
 
+;;; Permission pattern commands
+
+(defun claude-gravity--suggest-patterns (name input)
+  "Generate candidate allow patterns for tool NAME with INPUT.
+Returns a list from most specific to most general, with nils removed."
+  (delq nil
+        (pcase name
+          ("Bash"
+           (let* ((cmd (or (alist-get 'command input) ""))
+                  (parts (split-string cmd " " t))
+                  (prog (car parts)))
+             (list (format "Bash(%s)" cmd)
+                   (when (> (length cmd) 0) (format "Bash(%s:*)" cmd))
+                   (when prog (format "Bash(%s:*)" prog)))))
+          ((or "Edit" "Write")
+           (let* ((path (or (alist-get 'file_path input) ""))
+                  (dir (file-name-directory path)))
+             (list (format "%s(%s)" name path)
+                   (when dir (format "%s(%s*)" name dir)))))
+          ("Read"
+           (let* ((path (or (alist-get 'file_path input) ""))
+                  (dir (file-name-directory path)))
+             (list (format "Read(%s)" path)
+                   (when dir (format "Read(%s*)" dir)))))
+          ("WebFetch"
+           (let* ((url (or (alist-get 'url input) ""))
+                  (host (when (string-match "https?://\\([^/]+\\)" url)
+                          (match-string 1 url))))
+             (list (when host (format "WebFetch(domain:%s)" host))
+                   "WebFetch")))
+          ((or "Grep" "Glob")
+           (list (format "%s(%s)" name (or (alist-get 'pattern input) ""))
+                 name))
+          (_
+           (list name)))))
+
+(defun claude-gravity--tool-item-at-point ()
+  "Return the tool item alist at point, or nil."
+  (let ((section (magit-current-section)))
+    (when section
+      (let ((val (oref section value)))
+        (when (and val (listp val) (alist-get 'name val))
+          val)))))
+
+(defun claude-gravity-add-allow-pattern ()
+  "Generate allow pattern suggestions for the tool at point and copy to kill ring."
+  (interactive)
+  (let ((item (claude-gravity--tool-item-at-point)))
+    (if (not item)
+        (message "No tool at point")
+      (let* ((name (alist-get 'name item))
+             (input (alist-get 'input item))
+             (suggestions (claude-gravity--suggest-patterns name input)))
+        (if (not suggestions)
+            (message "No pattern suggestions for %s" name)
+          (let ((chosen (completing-read "Allow pattern: " suggestions nil nil
+                                         (car suggestions))))
+            (kill-new chosen)
+            (message "Copied: %s" chosen)))))))
+
+(defun claude-gravity-add-allow-pattern-to-settings ()
+  "Add an allow pattern for the tool at point to settings.local.json."
+  (interactive)
+  (let ((item (claude-gravity--tool-item-at-point)))
+    (if (not item)
+        (message "No tool at point")
+      (let* ((sid (or claude-gravity--buffer-session-id ""))
+             (session (claude-gravity--get-session sid)))
+        (if (not session)
+            (message "No session found")
+          (let* ((name (alist-get 'name item))
+                 (input (alist-get 'input item))
+                 (suggestions (claude-gravity--suggest-patterns name input)))
+            (if (not suggestions)
+                (message "No pattern suggestions for %s" name)
+              (let* ((chosen (completing-read "Allow pattern to add: " suggestions nil nil
+                                              (car suggestions)))
+                     (cwd (plist-get session :cwd))
+                     (settings-path (expand-file-name ".claude/settings.local.json" cwd)))
+                (when (y-or-n-p (format "Add \"%s\" to %s? " chosen
+                                        (file-name-nondirectory settings-path)))
+                  (let* ((json-object-type 'alist)
+                         (json-array-type 'list)
+                         (data (if (file-exists-p settings-path)
+                                   (json-read-file settings-path)
+                                 (list (cons 'permissions (list (cons 'allow nil))))))
+                         (perms (or (alist-get 'permissions data)
+                                    (list (cons 'allow nil))))
+                         (allow (or (alist-get 'allow perms) nil)))
+                    (if (member chosen allow)
+                        (message "Pattern already exists: %s" chosen)
+                      (setf (alist-get 'allow perms) (append allow (list chosen)))
+                      (setf (alist-get 'permissions data) perms)
+                      (let ((dir (file-name-directory settings-path)))
+                        (unless (file-exists-p dir)
+                          (make-directory dir t)))
+                      (with-temp-file settings-path
+                        (let ((json-encoding-pretty-print t))
+                          (insert (json-encode data))))
+                      (claude-gravity--load-allow-patterns session)
+                      (claude-gravity-refresh)
+                      (message "Added: %s" chosen))))))))))))
+
 ;;; Commands
 
 ;;;###autoload (autoload 'claude-gravity-menu "claude-gravity" nil t)
@@ -1087,6 +1258,9 @@ overlays.  Since we render from timers, we must apply them manually."
    ("c" "Comment" claude-gravity-comment-at-point)
    ("g" "Refresh" claude-gravity-refresh)
    ("P" "Show Plan" claude-gravity-show-plan)]
+  ["Permissions"
+   ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
+   ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]
   ["Sessions"
    ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
    ("R" "Reset all status to idle" claude-gravity-reset-status)
