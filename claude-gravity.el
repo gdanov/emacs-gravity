@@ -51,13 +51,15 @@
 (defvar claude-gravity--sessions (make-hash-table :test 'equal)
   "Hash table mapping session-id -> session plist.
 Each session plist has keys:
-  :session-id  - string
-  :cwd         - string (project working directory)
-  :project     - string (basename of cwd)
-  :state       - alist with (tools . []) (chat . [])
-  :status      - symbol: active or ended
-  :start-time  - time value
-  :plan        - plist (:content STRING) or nil")
+  :session-id      - string
+  :cwd             - string (project working directory)
+  :project         - string (basename of cwd)
+  :state           - alist with (tools . []) (chat . [])
+  :status          - symbol: active or ended
+  :start-time      - time value
+  :last-event-time - time value (updated on every event)
+  :pid             - integer (Claude Code process ID) or nil
+  :plan            - plist (:content STRING) or nil")
 
 (defvar-local claude-gravity--buffer-session-id nil
   "Session ID for this per-session buffer.")
@@ -89,6 +91,8 @@ Each session plist has keys:
                            :status 'active
                            :claude-status 'idle
                            :start-time (current-time)
+                           :last-event-time (current-time)
+                           :pid nil
                            :plan nil
                            :prompts []
                            :agents []
@@ -253,12 +257,19 @@ Each session plist has keys:
 
 ;;; Event handling
 
-(defun claude-gravity-handle-event (event session-id cwd data)
-  "Handle EVENT for SESSION-ID (with CWD) carrying DATA."
+(defun claude-gravity-handle-event (event session-id cwd data &optional pid)
+  "Handle EVENT for SESSION-ID (with CWD) carrying DATA.
+Optional PID is the Claude Code process ID."
   (unless session-id
     (setq session-id "legacy")
     (setq cwd (or cwd "")))
   (message "Handling event: %s for session: %s" event session-id)
+  ;; Update PID and last-event-time on every event
+  (let ((existing (claude-gravity--get-session session-id)))
+    (when existing
+      (plist-put existing :last-event-time (current-time))
+      (when (and pid (numberp pid) (> pid 0))
+        (plist-put existing :pid pid))))
   (pcase event
     ("SessionStart"
      (claude-gravity--ensure-session session-id cwd))
@@ -948,11 +959,20 @@ Each session plist has keys:
                             (indicator (if (eq status 'active)
                                            (propertize "●" 'face 'claude-gravity-tool-running)
                                          (propertize "○" 'face 'claude-gravity-session-ended)))
+                            (last-event (plist-get session :last-event-time))
+                            (idle-time (when (and last-event (eq claude-st 'idle))
+                                         (float-time (time-subtract (current-time) last-event))))
+                            (idle-str (when idle-time
+                                        (cond
+                                         ((< idle-time 60) "")
+                                         ((< idle-time 3600) (format " %dm" (truncate (/ idle-time 60))))
+                                         (t (format " %dh" (truncate (/ idle-time 3600)))))))
                             (status-label
                              (when (eq status 'active)
                                (if (eq claude-st 'responding)
                                    (propertize "responding" 'face 'claude-gravity-status-responding)
-                                 (propertize "idle" 'face 'claude-gravity-status-idle)))))
+                                 (propertize (concat "idle" (or idle-str ""))
+                                             'face 'claude-gravity-status-idle)))))
                        (magit-insert-section (session-entry sid)
                          (magit-insert-heading
                            (format "  %s %s  %s  [%d tools]"
@@ -1028,6 +1048,8 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "<return>") 'claude-gravity-visit-or-toggle)
 (define-key claude-gravity-mode-map (kbd "D") 'claude-gravity-cleanup-sessions)
 (define-key claude-gravity-mode-map (kbd "R") 'claude-gravity-reset-status)
+(define-key claude-gravity-mode-map (kbd "X") 'claude-gravity-detect-dead-sessions)
+(define-key claude-gravity-mode-map (kbd "d") 'claude-gravity-delete-session)
 
 (define-derived-mode claude-gravity-mode magit-section-mode "ClaudeGravity"
   "Major mode for Claude Code Gravity overview.
@@ -1067,7 +1089,9 @@ overlays.  Since we render from timers, we must apply them manually."
    ("P" "Show Plan" claude-gravity-show-plan)]
   ["Sessions"
    ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
-   ("R" "Reset all status to idle" claude-gravity-reset-status)]
+   ("R" "Reset all status to idle" claude-gravity-reset-status)
+   ("X" "Detect dead sessions" claude-gravity-detect-dead-sessions)
+   ("d" "Delete session at point" claude-gravity-delete-session)]
   ["Manage"
    ("q" "Quit" bury-buffer)])
 
@@ -1100,6 +1124,58 @@ overlays.  Since we render from timers, we must apply them manually."
              claude-gravity--sessions)
     (message "Reset %d session(s) to idle" count)
     (claude-gravity--render-overview)))
+
+(defun claude-gravity--process-alive-p (pid)
+  "Return non-nil if process PID is alive."
+  (condition-case nil
+      (progn (signal-process pid 0) t)
+    (error nil)))
+
+(defun claude-gravity-detect-dead-sessions ()
+  "Detect and mark dead sessions as ended.
+Checks PID liveness when available, falls back to last-event-time staleness."
+  (interactive)
+  (let ((count 0))
+    (maphash
+     (lambda (_id session)
+       (when (eq (plist-get session :status) 'active)
+         (let ((pid (plist-get session :pid))
+               (last-event (plist-get session :last-event-time)))
+           (cond
+            ;; PID known: check if process is alive
+            ((and pid (numberp pid) (> pid 0))
+             (unless (claude-gravity--process-alive-p pid)
+               (plist-put session :status 'ended)
+               (cl-incf count)))
+            ;; No PID, has last-event: use staleness (>5 min since last event)
+            ((and last-event
+                  (> (float-time (time-subtract (current-time) last-event)) 300))
+             (plist-put session :status 'ended)
+             (cl-incf count))
+            ;; No PID, no last-event: legacy session with no way to verify
+            ((null last-event)
+             (plist-put session :status 'ended)
+             (cl-incf count))))))
+     claude-gravity--sessions)
+    (message "Marked %d dead session(s) as ended" count)
+    (claude-gravity--render-overview)))
+
+(defun claude-gravity-delete-session ()
+  "Delete the session at point from the registry."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (when section
+      (let ((sid (and (eq (oref section type) 'session-entry)
+                      (oref section value))))
+        (if (not sid)
+            (message "No session at point")
+          (let ((session (gethash sid claude-gravity--sessions)))
+            (when session
+              (let ((buf (get-buffer (claude-gravity--session-buffer-name session))))
+                (when buf (kill-buffer buf)))))
+          (remhash sid claude-gravity--sessions)
+          (message "Deleted session %s" (claude-gravity--session-short-id sid))
+          (claude-gravity--render-overview))))))
 
 (defun claude-gravity-next-step ()
   "Mock action: Tell Claude to proceed to next step."
@@ -1144,9 +1220,10 @@ Accumulates partial data per connection until complete lines arrive."
                 (let ((event (alist-get 'event data))
                       (session-id (alist-get 'session_id data))
                       (cwd (alist-get 'cwd data))
+                      (pid (alist-get 'pid data))
                       (payload (alist-get 'data data)))
                   (when event
-                    (claude-gravity-handle-event event session-id cwd payload))))
+                    (claude-gravity-handle-event event session-id cwd payload pid))))
             (error
              (message "Claude Gravity JSON error: %s" err))))))
     ;; Store any remaining partial data

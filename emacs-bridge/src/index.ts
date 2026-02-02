@@ -22,7 +22,7 @@ function getSocketPath(): string {
 }
 
 // Helper to send data to Emacs socket
-async function sendToEmacs(eventName: string, sessionId: string, cwd: string, payload: any) {
+async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pid: number | null, payload: any) {
   log(`Sending event: ${eventName} session: ${sessionId}`);
   const socketPath = getSocketPath();
   log(`Socket path: ${socketPath}`);
@@ -33,7 +33,7 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pa
     client.on("connect", () => {
       log("Connected to socket");
       const message =
-        JSON.stringify({ event: eventName, session_id: sessionId, cwd: cwd, data: payload }) + "\n";
+        JSON.stringify({ event: eventName, session_id: sessionId, cwd: cwd, pid: pid, data: payload }) + "\n";
       client.write(message);
       client.end();
     });
@@ -73,9 +73,10 @@ async function main() {
     // Extract session identifiers from hook input
     const sessionId = (inputData as any).session_id || "unknown";
     const cwd = (inputData as any).cwd || "";
+    const pid = parseInt(process.env.CLAUDE_PID || "0", 10) || null;
 
     // Send to Emacs
-    await sendToEmacs(eventName, sessionId, cwd, inputData);
+    await sendToEmacs(eventName, sessionId, cwd, pid, inputData);
 
     // Always output valid JSON to stdout as expected by Claude Code
     console.log(JSON.stringify({}));

@@ -1,2 +1,2 @@
 #!/bin/sh
-node "$(dirname "$0")/../dist/index.js" UserPromptSubmit
+CLAUDE_PID=$PPID node "$(dirname "$0")/../dist/index.js" UserPromptSubmit

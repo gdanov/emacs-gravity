@@ -19,7 +19,11 @@
       "Bash(/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/hooks/UserPromptSubmit)",
       "Bash(echo:*)",
       "Bash(claude --version:*)",
-      "WebFetch(domain:oraios.github.io)"
+      "WebFetch(domain:oraios.github.io)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity/emacs-bridge status)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity/emacs-bridge diff)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity/emacs-bridge log --oneline -3)",
+      "WebSearch"
     ]
   }
 }
