@@ -50,4 +50,7 @@ we like emacs magit package and want to use similar UI paradigms and libraries. 
 - show tools that asked for permissions (partially done: pattern generation + settings integration works, but no explicit "permission requested" indicator in UI)
 - show more (what?) details and state for agents (currently only: type, status, short ID)
 - show Edit tools diff (ideally color coded) — not started
-- ~~show the summary that claude shows after planning when asking to exit planning mode~~ (done: inline preview + allowedPrompts + file path)
+- (done: inline preview + allowedPrompts + file path) 
+  - `ExitPlanMode` tool does not show the suggested plan. I want it to show the suggested plan. see the plannotator plugin for example
+- `AskUserQuestion` tool is treated as new prompt in the prompts section, but not as a new turn in the Tool Usage section. Let's fix that and also experiment with having the tool usage be sub-section of the prompt 
+- show replies in conversation, for example when I ask claude in planning mode to analyze somthing, it answers and we're still in planning mode (and there's no explicit plan)
