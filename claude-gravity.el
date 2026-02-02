@@ -457,13 +457,13 @@ Optional PID is the Claude Code process ID."
              (when plan-content
                (plist-put session :plan (list :content plan-content
                                               :file-path file-path
-                                              :allowed-prompts (append allowed-prompts nil))))))))))
+                                              :allowed-prompts (append allowed-prompts nil)))))))))
 
     ("Notification"
      (let* ((session (claude-gravity--get-session session-id))
             (msg (or (alist-get 'message data) "")))
        (when (and session (string-match-p "\\(?:reset\\|clear\\)" msg))
-         (claude-gravity--reset-session session))))
+         (claude-gravity--reset-session session)))))
 
   (claude-gravity--schedule-refresh)
   (when session-id
