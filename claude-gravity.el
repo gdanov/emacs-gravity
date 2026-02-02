@@ -862,22 +862,51 @@ Returns a hash table mapping turn -> list of task alists."
       "")))
 
 (defun claude-gravity--insert-turn-children (tools agents tasks)
-  "Insert tool, agent, and task subsections for a turn."
+  "Insert tool, agent, and task subsections for a turn.
+Running tools/agents are shown prominently; all items appear in History."
   ;; Tools subsection
   (when (and tools (> (length tools) 0))
-    (magit-insert-section (turn-tools nil t)
-      (magit-insert-heading
-        (format "Tools (%d)" (length tools)))
-      (dolist (item tools)
-        (claude-gravity--insert-tool-item item))))
+    (let ((running (cl-remove-if (lambda (t) (equal (alist-get 'status t) "done")) tools)))
+      (magit-insert-section (turn-tools nil t)
+        (magit-insert-heading
+          (format "Tools (%d)" (length tools)))
+        (if running
+            (progn
+              ;; Show running tools at top level
+              (dolist (item running)
+                (claude-gravity--insert-tool-item item))
+              ;; All tools in collapsed History
+              (magit-insert-section (tool-history nil t)
+                (magit-insert-heading
+                  (propertize (format "History (%d)" (length tools))
+                              'face 'claude-gravity-detail-label))
+                (dolist (item tools)
+                  (claude-gravity--insert-tool-item item))))
+          ;; All done — flat list, no History wrapper
+          (dolist (item tools)
+            (claude-gravity--insert-tool-item item))))))
   ;; Agents subsection
   (when (and agents (> (length agents) 0))
-    (magit-insert-section (turn-agents nil t)
-      (magit-insert-heading
-        (format "Agents (%d)" (length agents)))
-      (dolist (agent agents)
-        (claude-gravity--insert-agent-item agent))))
-  ;; Tasks subsection
+    (let ((running (cl-remove-if (lambda (a) (equal (alist-get 'status a) "done")) agents)))
+      (magit-insert-section (turn-agents nil t)
+        (magit-insert-heading
+          (format "Agents (%d)" (length agents)))
+        (if running
+            (progn
+              ;; Show running agents at top level
+              (dolist (agent running)
+                (claude-gravity--insert-agent-item agent))
+              ;; All agents in collapsed History
+              (magit-insert-section (agent-history nil t)
+                (magit-insert-heading
+                  (propertize (format "History (%d)" (length agents))
+                              'face 'claude-gravity-detail-label))
+                (dolist (agent agents)
+                  (claude-gravity--insert-agent-item agent))))
+          ;; All done — flat list
+          (dolist (agent agents)
+            (claude-gravity--insert-agent-item agent))))))
+  ;; Tasks subsection (unchanged — already sorted by status priority)
   (when (and tasks (> (length tasks) 0))
     (let ((sorted (sort (copy-sequence tasks)
                         (lambda (a b)
