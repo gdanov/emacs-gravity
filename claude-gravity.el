@@ -333,7 +333,8 @@ Optional PID is the Claude Code process ID."
             (new-agent (list (cons 'agent_id (alist-get 'agent_id data))
                              (cons 'type (alist-get 'agent_type data))
                              (cons 'status "running")
-                             (cons 'timestamp (current-time)))))
+                             (cons 'timestamp (current-time))
+                             (cons 'turn (or (plist-get session :current-turn) 0)))))
        (plist-put session :agents (vconcat agents (vector new-agent)))))
 
     ("SubagentStop"
@@ -344,6 +345,13 @@ Optional PID is the Claude Code process ID."
        (when idx
          (let ((agent (aref agents idx)))
            (setf (alist-get 'status agent) "done")
+           (let ((ts (alist-get 'timestamp agent)))
+             (when ts
+               (setf (alist-get 'duration agent)
+                     (float-time (time-subtract (current-time) ts)))))
+           (let ((tp (alist-get 'agent_transcript_path data)))
+             (when tp
+               (setf (alist-get 'transcript_path agent) tp)))
            (aset agents idx agent)))))
 
     ("PreToolUse"
@@ -958,31 +966,186 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
               (setq idx (1+ idx)))))
           (insert "\n")))))
 
+(defun claude-gravity--parse-agent-transcript (path)
+  "Parse agent transcript JSONL at PATH.
+Returns alist with prompt, model, and tool-count.
+The JSONL format uses top-level `type` (user/assistant) and nests
+the message under `message` with `role`, `content`, and `model`."
+  (when (and path (file-exists-p path))
+    (condition-case err
+        (let ((prompt nil)
+              (model nil)
+              (tool-count 0))
+          (with-temp-buffer
+            (insert-file-contents path)
+            (goto-char (point-min))
+            (while (not (eobp))
+              (let ((line (buffer-substring-no-properties
+                           (line-beginning-position) (line-end-position))))
+                (when (> (length line) 0)
+                  (condition-case nil
+                      (let* ((json-object-type 'alist)
+                             (json-array-type 'vector)
+                             (obj (json-read-from-string line))
+                             (entry-type (alist-get 'type obj))
+                             (msg (alist-get 'message obj))
+                             (content (when msg (alist-get 'content msg))))
+                        ;; Extract prompt from first user entry
+                        (when (and (equal entry-type "user") (not prompt))
+                          (cond
+                           ((and msg (stringp content))
+                            (setq prompt (car (split-string content "\n" t))))
+                           ((and msg (vectorp content))
+                            (dotimes (i (length content))
+                              (let ((block (aref content i)))
+                                (when (and (not prompt)
+                                           (equal (alist-get 'type block) "text"))
+                                  (setq prompt (car (split-string
+                                                     (alist-get 'text block) "\n" t)))))))))
+                        ;; Extract model from first assistant entry
+                        (when (and (equal entry-type "assistant") msg (not model))
+                          (setq model (alist-get 'model msg)))
+                        ;; Count tool_use blocks in assistant messages
+                        (when (and (equal entry-type "assistant") msg (vectorp content))
+                          (dotimes (i (length content))
+                            (let ((block (aref content i)))
+                              (when (equal (alist-get 'type block) "tool_use")
+                                (cl-incf tool-count))))))
+                    (error nil))))
+              (forward-line 1)))
+          (list (cons 'prompt (or prompt ""))
+                (cons 'model (or model ""))
+                (cons 'tool-count tool-count)))
+      (error
+       (message "Claude Gravity: failed to parse transcript %s: %s" path err)
+       nil))))
+
+(defun claude-gravity-view-agent-transcript ()
+  "Parse and display transcript for the agent at point."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (when section
+      (let ((val (oref section value)))
+        (when (and val (listp val) (alist-get 'agent_id val))
+          (let ((tp (alist-get 'transcript_path val)))
+            (if (not tp)
+                (message "No transcript path for this agent")
+              (if (alist-get 'transcript_parsed val)
+                  ;; Already parsed, just refresh
+                  (claude-gravity-refresh)
+                ;; Parse and store
+                (let ((info (claude-gravity--parse-agent-transcript tp)))
+                  (when info
+                    (setf (alist-get 'transcript_prompt val)
+                          (alist-get 'prompt info))
+                    (setf (alist-get 'transcript_model val)
+                          (alist-get 'model info))
+                    (setf (alist-get 'transcript_tool_count val)
+                          (alist-get 'tool-count info))
+                    (setf (alist-get 'transcript_parsed val) t))
+                  (claude-gravity-refresh))))))))))
+
+(defun claude-gravity-open-agent-transcript ()
+  "Open the raw transcript JSONL file for the agent at point."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (when section
+      (let ((val (oref section value)))
+        (when (and val (listp val) (alist-get 'agent_id val))
+          (let ((tp (alist-get 'transcript_path val)))
+            (if (and tp (file-exists-p tp))
+                (find-file tp)
+              (message "No transcript file available"))))))))
+
 (defun claude-gravity-insert-agents (session)
-  "Insert agents section for SESSION."
-  (let ((agents (plist-get session :agents)))
+  "Insert agents section for SESSION, grouped by turn."
+  (let ((agents (plist-get session :agents))
+        (prompts (plist-get session :prompts))
+        (current-turn (or (plist-get session :current-turn) 0)))
     (when (and agents (> (length agents) 0))
-      (magit-insert-section (agents nil t)
-        (magit-insert-heading
-          (format "Agents (%d)" (length agents)))
+      ;; Group agents by turn
+      (let ((groups (make-hash-table :test 'equal))
+            (max-turn 0))
         (dolist (agent (append agents nil))
-          (let* ((agent-type (alist-get 'type agent))
-                 (agent-id (alist-get 'agent_id agent))
-                 (status (alist-get 'status agent))
-                 (done-p (equal status "done"))
-                 (indicator (propertize (if done-p "[x]" "[/]")
-                                        'face (if done-p
-                                                   'claude-gravity-tool-done
-                                                 'claude-gravity-tool-running)))
-                 (short-id (if (and agent-id (> (length agent-id) 8))
-                               (substring agent-id 0 8)
-                             (or agent-id "?"))))
-            (magit-insert-section (agent agent)
-              (insert (format "  %s %s  (%s)\n"
-                              indicator
-                              (propertize (or agent-type "?") 'face 'claude-gravity-tool-name)
-                              (propertize short-id 'face 'claude-gravity-detail-label))))))
-        (insert "\n")))))
+          (let ((turn (or (alist-get 'turn agent) 0)))
+            (when (> turn max-turn) (setq max-turn turn))
+            (puthash turn (append (gethash turn groups) (list agent)) groups)))
+        (magit-insert-section (agents nil t)
+          (magit-insert-heading
+            (format "Agents (%d)" (length agents)))
+          (dotimes (i (1+ max-turn))
+            (let ((turn-agents (gethash i groups))
+                  (prompt-text (when (and prompts (> (length prompts) 0)
+                                          (> i 0) (<= i (length prompts)))
+                                (claude-gravity--prompt-text (aref prompts (1- i))))))
+              (when turn-agents
+                (let* ((count (length turn-agents))
+                       (is-current (= i current-turn))
+                       (heading (if (and prompt-text (> (length prompt-text) 0))
+                                    (format "Turn %d: \"%s\" (%d agents)"
+                                            i (claude-gravity--truncate prompt-text 50) count)
+                                  (format "Turn %d (%d agents)" i count))))
+                  (magit-insert-section (agent-turn i (not is-current))
+                    (magit-insert-heading heading)
+                    (dolist (agent turn-agents)
+                      (claude-gravity--insert-agent-item agent)))))))
+          (insert "\n"))))))
+
+(defun claude-gravity--insert-agent-item (agent)
+  "Insert a single AGENT as a magit-section with expandable detail."
+  (let* ((agent-type (alist-get 'type agent))
+         (agent-id (alist-get 'agent_id agent))
+         (status (alist-get 'status agent))
+         (duration (alist-get 'duration agent))
+         (done-p (equal status "done"))
+         (indicator (propertize (if done-p "[x]" "[/]")
+                                'face (if done-p
+                                           'claude-gravity-tool-done
+                                         'claude-gravity-tool-running)))
+         (short-id (if (and agent-id (> (length agent-id) 7))
+                       (substring agent-id 0 7)
+                     (or agent-id "?")))
+         (duration-str (if (and done-p duration)
+                           (format "  %s" (claude-gravity--format-duration duration))
+                         "")))
+    (magit-insert-section (agent agent t)
+      (magit-insert-heading
+        (format "%s %s  (%s)%s"
+                indicator
+                (propertize (or agent-type "?") 'face 'claude-gravity-tool-name)
+                (propertize short-id 'face 'claude-gravity-detail-label)
+                duration-str))
+      ;; Expanded detail
+      (let ((tp (alist-get 'transcript_path agent))
+            (parsed (alist-get 'transcript_parsed agent)))
+        (when parsed
+          (let ((prompt (alist-get 'transcript_prompt agent))
+                (model (alist-get 'transcript_model agent))
+                (tc (alist-get 'transcript_tool_count agent)))
+            (when (and prompt (not (string-empty-p prompt)))
+              (insert (propertize "    Task: " 'face 'claude-gravity-detail-label))
+              (insert (claude-gravity--truncate prompt 70) "\n"))
+            (when (and model (not (string-empty-p model)))
+              (insert (propertize "    Model: " 'face 'claude-gravity-detail-label))
+              (insert model "\n"))
+            (when (and tc (> tc 0))
+              (insert (propertize "    Tools: " 'face 'claude-gravity-detail-label))
+              (insert (format "%d" tc) "\n"))))
+        (when tp
+          (insert (propertize "    Transcript: " 'face 'claude-gravity-detail-label))
+          (insert (propertize tp 'face 'claude-gravity-detail-label) "\n"))
+        (unless parsed
+          (when tp
+            (insert (propertize "    RET to parse transcript\n" 'face 'claude-gravity-detail-label))))))))
+
+(defun claude-gravity--format-duration (seconds)
+  "Format SECONDS as a compact duration string like 12.3s or 1m23s."
+  (cond
+   ((< seconds 60) (format "%.1fs" seconds))
+   ((< seconds 3600) (format "%dm%02ds" (truncate (/ seconds 60))
+                              (truncate (mod seconds 60))))
+   (t (format "%dh%02dm" (truncate (/ seconds 3600))
+              (truncate (/ (mod seconds 3600) 60))))))
 
 (defun claude-gravity-insert-files (session)
   "Insert files section for SESSION."
@@ -1177,16 +1340,24 @@ overlays.  Since we render from timers, we must apply them manually."
 
 \\{claude-gravity-mode-map}")
 
+(define-key claude-gravity-mode-map (kbd "T") 'claude-gravity-view-agent-transcript)
+(define-key claude-gravity-mode-map (kbd "V") 'claude-gravity-open-agent-transcript)
+
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "ClaudeGravity:Session"
   "Major mode for a single Claude Code session buffer.")
 
 (defun claude-gravity-visit-or-toggle ()
-  "If on a session entry, open it.  Otherwise toggle the section."
+  "If on a session entry, open it.  On an agent, parse transcript.  Otherwise toggle."
   (interactive)
   (let ((section (magit-current-section)))
-    (if (and section (eq (oref section type) 'session-entry))
-        (claude-gravity-open-session (oref section value))
-      (magit-section-toggle section))))
+    (cond
+     ((and section (eq (oref section type) 'session-entry))
+      (claude-gravity-open-session (oref section value)))
+     ((and section (eq (oref section type) 'agent)
+           (let ((val (oref section value)))
+             (and val (listp val) (alist-get 'agent_id val))))
+      (claude-gravity-view-agent-transcript))
+     (t (magit-section-toggle section)))))
 
 (defun claude-gravity-refresh ()
   "Refresh the current buffer."
@@ -1311,7 +1482,9 @@ Returns a list from most specific to most general, with nils removed."
    ("c" "Comment" claude-gravity-comment-at-point)
    ("g" "Refresh" claude-gravity-refresh)
    ("P" "Show Plan" claude-gravity-show-plan)
-   ("F" "Open plan file" claude-gravity-open-plan-file)]
+   ("F" "Open plan file" claude-gravity-open-plan-file)
+   ("T" "Parse agent transcript" claude-gravity-view-agent-transcript)
+   ("V" "Open agent transcript file" claude-gravity-open-agent-transcript)]
   ["Permissions"
    ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
    ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]
