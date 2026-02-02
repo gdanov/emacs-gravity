@@ -22,6 +22,12 @@
   "Claude Code interface."
   :group 'tools)
 
+(defconst claude-gravity--indent-body 2
+  "Indentation (in spaces) for section body content.")
+
+(defconst claude-gravity--indent-continuation 4
+  "Indentation (in spaces) for wrapped/continuation lines after a label.")
+
 (defvar claude-gravity-buffer-name "*Claude Gravity*"
   "Name of the overview buffer.")
 
@@ -568,6 +574,28 @@ Optional PID is the Claude Code process ID."
       (concat (substring str 0 (- max-len 1)) "\u2026")
     (or str "")))
 
+(defun claude-gravity--insert-wrapped (text indent &optional face)
+  "Insert TEXT with word-wrap, indented by INDENT spaces.
+Each paragraph is filled to fit the window width.  Optional FACE
+is applied to the inserted text."
+  (when (and text (not (string-empty-p text)))
+    (let* ((prefix (make-string indent ?\s))
+           (start (point))
+           (fill-column (max 40 (- (or (window-width) 80) 2)))
+           (fill-prefix prefix))
+      (dolist (para (split-string text "\n"))
+        (let ((para-start (point)))
+          (insert prefix para "\n")
+          (when (> (length para) (- fill-column indent))
+            (fill-region para-start (point)))))
+      (when face
+        (add-face-text-property start (point) face)))))
+
+(defun claude-gravity--insert-label (text &optional indent)
+  "Insert TEXT as a detail label with INDENT spaces (default `indent-body')."
+  (insert (make-string (or indent claude-gravity--indent-body) ?\s)
+          (propertize text 'face 'claude-gravity-detail-label)))
+
 (defun claude-gravity--format-elapsed (seconds)
   "Format SECONDS as a human-readable duration string."
   (if (null seconds) "--"
@@ -647,27 +675,27 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
     ("Bash"
      (let ((cmd (alist-get 'command input)))
        (when cmd
-         (insert (propertize "    Command: " 'face 'claude-gravity-detail-label))
-         (insert cmd "\n"))))
+         (claude-gravity--insert-label "Command: " 6)
+         (claude-gravity--insert-wrapped cmd 8))))
     ("Read"
      (let ((path (alist-get 'file_path input)))
        (when path
-         (insert (propertize "    File: " 'face 'claude-gravity-detail-label))
-         (insert path "\n"))))
+         (claude-gravity--insert-label "File: " 6)
+         (claude-gravity--insert-wrapped path 8))))
     ((or "Edit" "Write")
      (let ((path (alist-get 'file_path input)))
        (when path
-         (insert (propertize "    File: " 'face 'claude-gravity-detail-label))
-         (insert path "\n"))))
+         (claude-gravity--insert-label "File: " 6)
+         (claude-gravity--insert-wrapped path 8))))
     ((or "Grep" "Glob")
      (let ((pattern (alist-get 'pattern input))
            (path (alist-get 'path input)))
        (when pattern
-         (insert (propertize "    Pattern: " 'face 'claude-gravity-detail-label))
-         (insert pattern "\n"))
+         (claude-gravity--insert-label "Pattern: " 6)
+         (claude-gravity--insert-wrapped pattern 8))
        (when path
-         (insert (propertize "    Path: " 'face 'claude-gravity-detail-label))
-         (insert path "\n"))))
+         (claude-gravity--insert-label "Path: " 6)
+         (claude-gravity--insert-wrapped path 8))))
     ("AskUserQuestion"
      (let* ((questions (alist-get 'questions input))
             (first-q (and (vectorp questions) (> (length questions) 0)
@@ -675,11 +703,11 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
             (q-text (and first-q (alist-get 'question first-q)))
             (answer (claude-gravity--extract-ask-answer result)))
        (when q-text
-         (insert (propertize "    Question: " 'face 'claude-gravity-detail-label))
-         (insert q-text "\n"))
+         (claude-gravity--insert-label "Question: " 6)
+         (claude-gravity--insert-wrapped q-text 8))
        (when answer
-         (insert (propertize "    Answer: " 'face 'claude-gravity-detail-label))
-         (insert (propertize answer 'face 'claude-gravity-question) "\n")))))
+         (claude-gravity--insert-label "Answer: " 6)
+         (claude-gravity--insert-wrapped answer 8 'claude-gravity-question)))))
   ;; Result section
   (when result
     ;; Normalize MCP-style vector results [((type . "text") (text . "..."))]
@@ -694,13 +722,13 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
       (when (and stdout (not (string-empty-p stdout)))
         (let* ((lines (split-string stdout "\n" t))
                (nlines (length lines))
-               (preview (seq-take lines 8)))
-          (insert (propertize (format "    Output (%d lines):\n" nlines)
-                              'face 'claude-gravity-detail-label))
+               (preview (seq-take lines 8))
+               (cont-prefix (make-string 8 ?\s)))
+          (claude-gravity--insert-label (format "Output (%d lines):\n" nlines) 6)
           (dolist (line preview)
-            (insert "      " (claude-gravity--truncate line 80) "\n"))
+            (insert cont-prefix (claude-gravity--truncate line 80) "\n"))
           (when (> nlines 8)
-            (insert (propertize "      ...\n" 'face 'claude-gravity-detail-label)))))
+            (insert (propertize (concat cont-prefix "...\n") 'face 'claude-gravity-detail-label)))))
       ;; Read-style file content
       (when file-data
         (let* ((content (alist-get 'content file-data))
@@ -708,20 +736,21 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
                (total-lines (alist-get 'totalLines file-data)))
           (when content
             (let* ((lines (split-string content "\n"))
-                   (preview (seq-take lines 6)))
-              (insert (propertize (format "    Content (%d/%d lines):\n"
-                                         (or num-lines (length lines))
-                                         (or total-lines (length lines)))
-                                  'face 'claude-gravity-detail-label))
+                   (preview (seq-take lines 6))
+                   (cont-prefix (make-string 8 ?\s)))
+              (claude-gravity--insert-label (format "Content (%d/%d lines):\n"
+                                                    (or num-lines (length lines))
+                                                    (or total-lines (length lines))) 6)
               (dolist (line preview)
-                (insert "      " (claude-gravity--truncate line 80) "\n"))
+                (insert cont-prefix (claude-gravity--truncate line 80) "\n"))
               (when (> (length lines) 6)
-                (insert (propertize "      ...\n" 'face 'claude-gravity-detail-label)))))))
+                (insert (propertize (concat cont-prefix "...\n") 'face 'claude-gravity-detail-label)))))))
       ;; Stderr
       (when (and stderr (not (string-empty-p stderr)))
-        (insert (propertize "    Stderr:\n" 'face 'claude-gravity-stderr))
-        (dolist (line (seq-take (split-string stderr "\n" t) 4))
-          (insert (propertize (concat "      " line "\n") 'face 'claude-gravity-stderr)))))))
+        (insert (make-string 6 ?\s)
+                (propertize "Stderr:\n" 'face 'claude-gravity-stderr))
+        (let ((stderr-preview (string-join (seq-take (split-string stderr "\n" t) 4) "\n")))
+          (claude-gravity--insert-wrapped stderr-preview 8 'claude-gravity-stderr))))))
 
 ;;; Plan display
 
@@ -744,6 +773,7 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
             (goto-char (point-min)))
           (when (fboundp 'markdown-mode)
             (markdown-mode))
+          (visual-line-mode 1)
           (setq buffer-read-only t)
           (set-buffer-modified-p nil))
         (display-buffer buf '(display-buffer-in-side-window
@@ -810,20 +840,22 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
         (magit-insert-section (plan nil t)
           (magit-insert-heading
             (propertize "Plan" 'face 'claude-gravity-tool-name))
-          (dolist (line preview-lines)
-            (insert (format "  %s\n" line)))
+          (claude-gravity--insert-wrapped
+           (string-join preview-lines "\n") claude-gravity--indent-body)
           (when truncated
-            (insert (propertize "  ...\n" 'face 'claude-gravity-detail-label)))
+            (insert (propertize (concat (make-string claude-gravity--indent-body ?\s) "...\n")
+                                'face 'claude-gravity-detail-label)))
           (when allowed-prompts
-            (insert (format "  %s %s\n"
-                            (propertize "Permissions:" 'face 'claude-gravity-detail-label)
-                            (claude-gravity--format-allowed-prompts allowed-prompts))))
+            (claude-gravity--insert-label "Permissions: ")
+            (claude-gravity--insert-wrapped
+             (claude-gravity--format-allowed-prompts allowed-prompts) claude-gravity--indent-continuation))
           (when file-path
-            (insert (format "  %s %s  %s\n"
-                            (propertize "File:" 'face 'claude-gravity-detail-label)
-                            file-path
-                            (propertize "(F to open)" 'face 'claude-gravity-detail-label))))
-          (insert (propertize "  P to view full plan\n" 'face 'claude-gravity-detail-label))
+            (claude-gravity--insert-label "File: ")
+            (claude-gravity--insert-wrapped
+             (concat file-path "  " (propertize "(F to open)" 'face 'claude-gravity-detail-label))
+             claude-gravity--indent-continuation))
+          (insert (propertize (concat (make-string claude-gravity--indent-body ?\s) "P to view full plan\n")
+                              'face 'claude-gravity-detail-label))
           (insert "\n"))))))
 
 ;;; Section renderers (used by per-session buffers)
@@ -869,7 +901,7 @@ Running tools/agents are shown prominently; all items appear in History."
     (let ((running (cl-remove-if (lambda (t) (equal (alist-get 'status t) "done")) tools)))
       (magit-insert-section (turn-tools nil t)
         (magit-insert-heading
-          (format "Tools (%d)" (length tools)))
+          (format "  Tools (%d)" (length tools)))
         (if running
             (progn
               ;; Show running tools at top level
@@ -878,7 +910,7 @@ Running tools/agents are shown prominently; all items appear in History."
               ;; All tools in collapsed History
               (magit-insert-section (tool-history nil t)
                 (magit-insert-heading
-                  (propertize (format "History (%d)" (length tools))
+                  (propertize (format "  History (%d)" (length tools))
                               'face 'claude-gravity-detail-label))
                 (dolist (item tools)
                   (claude-gravity--insert-tool-item item))))
@@ -890,7 +922,7 @@ Running tools/agents are shown prominently; all items appear in History."
     (let ((running (cl-remove-if (lambda (a) (equal (alist-get 'status a) "done")) agents)))
       (magit-insert-section (turn-agents nil t)
         (magit-insert-heading
-          (format "Agents (%d)" (length agents)))
+          (format "  Agents (%d)" (length agents)))
         (if running
             (progn
               ;; Show running agents at top level
@@ -899,7 +931,7 @@ Running tools/agents are shown prominently; all items appear in History."
               ;; All agents in collapsed History
               (magit-insert-section (agent-history nil t)
                 (magit-insert-heading
-                  (propertize (format "History (%d)" (length agents))
+                  (propertize (format "  History (%d)" (length agents))
                               'face 'claude-gravity-detail-label))
                 (dolist (agent agents)
                   (claude-gravity--insert-agent-item agent))))
@@ -916,7 +948,7 @@ Running tools/agents are shown prominently; all items appear in History."
             (total (length sorted)))
         (magit-insert-section (turn-tasks nil t)
           (magit-insert-heading
-            (format "Tasks (%d/%d)" completed total))
+            (format "  Tasks (%d/%d)" completed total))
           (dolist (task sorted)
             (claude-gravity--insert-task-item task)))))))
 
@@ -936,7 +968,7 @@ Running tools/agents are shown prominently; all items appear in History."
                      (concat "  " (propertize active-form 'face 'claude-gravity-task-active-form))
                    "")))
     (magit-insert-section (task task)
-      (insert (format "  %s %s%s\n" checkbox subject suffix)))))
+      (insert (format "    %s %s%s\n" checkbox subject suffix)))))
 
 (defun claude-gravity-insert-turns (session)
   "Insert unified turns section for SESSION.
@@ -1016,13 +1048,11 @@ Each turn groups its prompt, tools, agents, and tasks together."
                 (magit-insert-heading heading)
                 ;; Full prompt text in body
                 (when (and prompt-text (> (length prompt-text) 60))
-                  (let ((lines (split-string prompt-text "\n")))
-                    (dolist (line lines)
-                      (insert "    " line "\n"))))
+                  (claude-gravity--insert-wrapped prompt-text 4))
                 ;; Answer for questions
                 (when (and is-question answer)
-                  (insert (propertize "    Answer: " 'face 'claude-gravity-detail-label))
-                  (insert (propertize answer 'face 'claude-gravity-question) "\n"))
+                  (claude-gravity--insert-label "Answer: " 4)
+                  (claude-gravity--insert-wrapped answer 6 'claude-gravity-question))
                 ;; Children: tools, agents, tasks
                 (claude-gravity--insert-turn-children turn-tools turn-agents turn-tasks)))))
         (insert "\n")))))
@@ -1043,14 +1073,14 @@ Each turn groups its prompt, tools, agents, and tasks together."
          (desc (claude-gravity--tool-description input)))
     (magit-insert-section (tool item t)
       (magit-insert-heading
-        (format "%s %s  %s%s"
+        (format "    %s %s  %s%s"
                 indicator
                 tool-face
                 summary
                 (if desc (format "  (%s)" desc) "")))
       ;; Show permission-format signature in detail
       (let ((sig (claude-gravity--tool-signature name input)))
-        (insert (propertize (format "    %s\n" sig) 'face 'claude-gravity-tool-signature)))
+        (claude-gravity--insert-wrapped sig 6 'claude-gravity-tool-signature))
       (claude-gravity--insert-tool-detail name input result))))
 
 
@@ -1191,7 +1221,7 @@ the message under `message` with `role`, `content`, and `model`."
                          "")))
     (magit-insert-section (agent agent t)
       (magit-insert-heading
-        (format "%s %s  (%s)%s"
+        (format "    %s %s  (%s)%s"
                 indicator
                 (propertize (or agent-type "?") 'face 'claude-gravity-tool-name)
                 (propertize short-id 'face 'claude-gravity-detail-label)
@@ -1204,20 +1234,20 @@ the message under `message` with `role`, `content`, and `model`."
                 (model (alist-get 'transcript_model agent))
                 (tc (alist-get 'transcript_tool_count agent)))
             (when (and prompt (not (string-empty-p prompt)))
-              (insert (propertize "    Task: " 'face 'claude-gravity-detail-label))
-              (insert (claude-gravity--truncate prompt 70) "\n"))
+              (claude-gravity--insert-label "Task: " 6)
+              (claude-gravity--insert-wrapped prompt 8))
             (when (and model (not (string-empty-p model)))
-              (insert (propertize "    Model: " 'face 'claude-gravity-detail-label))
+              (claude-gravity--insert-label "Model: " 6)
               (insert model "\n"))
             (when (and tc (> tc 0))
-              (insert (propertize "    Tools: " 'face 'claude-gravity-detail-label))
+              (claude-gravity--insert-label "Tools: " 6)
               (insert (format "%d" tc) "\n"))))
         (when tp
-          (insert (propertize "    Transcript: " 'face 'claude-gravity-detail-label))
-          (insert (propertize tp 'face 'claude-gravity-detail-label) "\n"))
+          (claude-gravity--insert-label "Transcript: " 6)
+          (claude-gravity--insert-wrapped tp 8 'claude-gravity-detail-label))
         (unless parsed
           (when tp
-            (insert (propertize "    RET to parse transcript\n" 'face 'claude-gravity-detail-label))))))))
+            (claude-gravity--insert-label "RET to parse transcript\n" 6)))))))
 
 (defun claude-gravity--format-duration (seconds)
   "Format SECONDS as a compact duration string like 12.3s or 1m23s."
@@ -1257,8 +1287,7 @@ the message under `message` with `role`, `content`, and `model`."
                   (format "  %-30s %s"
                           (propertize basename 'face 'claude-gravity-tool-name)
                           (propertize ops-str 'face 'claude-gravity-file-ops)))
-                (insert (propertize (format "    %s\n" path)
-                                    'face 'claude-gravity-detail-label)))))
+                (claude-gravity--insert-wrapped path claude-gravity--indent-body 'claude-gravity-detail-label))))
           (insert "\n"))))))
 
 (defun claude-gravity-insert-allow-patterns (session)
@@ -1416,7 +1445,8 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-derived-mode claude-gravity-mode magit-section-mode "ClaudeGravity"
   "Major mode for Claude Code Gravity overview.
 
-\\{claude-gravity-mode-map}")
+\\{claude-gravity-mode-map}"
+  (visual-line-mode 1))
 
 (define-key claude-gravity-mode-map (kbd "T") 'claude-gravity-view-agent-transcript)
 (define-key claude-gravity-mode-map (kbd "V") 'claude-gravity-open-agent-transcript)

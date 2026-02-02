@@ -54,4 +54,10 @@ we like emacs magit package and want to use similar UI paradigms and libraries. 
   - `ExitPlanMode` tool does not show the suggested plan. I want it to show the suggested plan. see the plannotator plugin for example
 - `AskUserQuestion` tool is treated as new prompt in the prompts section, but not as a new turn in the Tool Usage section. Let's fix that and also experiment with having the tool usage be sub-section of the prompt 
 - show replies in conversation, for example when I ask claude in planning mode to analyze somthing, it answers and we're still in planning mode (and there's no explicit plan)
-- wrap text such as the full prompts
+- ~~(done: visual-line-mode + insert-wrapped helper for all long content: prompts, commands, paths, questions, answers, tool signatures, stderr, plan preview, permissions)~~
+  - ~~wrap text such as the full prompts~~
+- tools/agents history is automatically expanded when there are no running tools/agents, not nice 
+- ~~(done: depth-aware indentation — top sections 0sp, sub-headings (Tools/Agents/Tasks/History) 2sp, items 4sp, body/labels 6sp, continuation/output 8sp; `insert-label` helper with optional indent arg; `indent-body`/`indent-continuation` constants for top-level contexts)~~
+  - ~~improve left padding of the different section content, so that it matches their level~~
+- session status buffer should automatically update
+- show the claude status bar info is the session status
