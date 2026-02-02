@@ -330,7 +330,23 @@ Each session plist has keys:
        (plist-put session :claude-status 'responding)
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
        (claude-gravity--track-task session "PreToolUse" (alist-get 'tool_name data)
-                                   (alist-get 'tool_input data) (alist-get 'tool_use_id data))))
+                                   (alist-get 'tool_input data) (alist-get 'tool_use_id data))
+       ;; Add AskUserQuestion as a prompt entry
+       (when (equal (alist-get 'tool_name data) "AskUserQuestion")
+         (let* ((input (alist-get 'tool_input data))
+                (questions (alist-get 'questions input))
+                (first-q (and (vectorp questions) (> (length questions) 0)
+                              (aref questions 0)))
+                (q-text (and first-q (alist-get 'question first-q))))
+           (when q-text
+             (let ((entry (list (cons 'text q-text)
+                                (cons 'type 'question)
+                                (cons 'tool_use_id (alist-get 'tool_use_id data))
+                                (cons 'submitted (current-time))
+                                (cons 'elapsed nil)
+                                (cons 'answer nil))))
+               (plist-put session :prompts
+                          (vconcat (plist-get session :prompts) (vector entry)))))))))
 
     ("PostToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -349,6 +365,22 @@ Each session plist has keys:
        (claude-gravity--track-task session "PostToolUse" (alist-get 'tool_name data)
                                    (alist-get 'tool_input data) (alist-get 'tool_use_id data)
                                    (alist-get 'tool_response data))
+       ;; Store AskUserQuestion answer in the prompt entry
+       (when (equal (alist-get 'tool_name data) "AskUserQuestion")
+         (let* ((prompts (plist-get session :prompts))
+                (tid (alist-get 'tool_use_id data))
+                (response (alist-get 'tool_response data)))
+           (when (and prompts tid)
+             (dotimes (i (length prompts))
+               (let ((p (aref prompts i)))
+                 (when (and (equal (alist-get 'type p) 'question)
+                            (equal (alist-get 'tool_use_id p) tid))
+                   (setf (alist-get 'answer p)
+                         (claude-gravity--extract-ask-answer response))
+                   (setf (alist-get 'elapsed p)
+                         (float-time (time-subtract (current-time)
+                                                    (alist-get 'submitted p))))
+                   (aset prompts i p)))))))
        ;; Detect plan presentation
        (let ((tool-name (alist-get 'tool_name data)))
          (when (equal tool-name "ExitPlanMode")
@@ -432,7 +464,27 @@ Each session plist has keys:
   "Face for file operation labels."
   :group 'claude-gravity)
 
+(defface claude-gravity-question
+  '((t :foreground "magenta"))
+  "Face for AskUserQuestion prompt indicators."
+  :group 'claude-gravity)
+
 ;;; Tool display helpers
+
+(defun claude-gravity--extract-ask-answer (response)
+  "Extract the user's answer text from AskUserQuestion RESPONSE."
+  (cond
+   ;; MCP-style vector result
+   ((vectorp response)
+    (let* ((first (and (> (length response) 0) (aref response 0)))
+           (text (and (listp first) (alist-get 'text first))))
+      text))
+   ;; Alist with stdout
+   ((and (listp response) (alist-get 'stdout response))
+    (alist-get 'stdout response))
+   ;; Plain string
+   ((stringp response) response)
+   (t nil)))
 
 (defun claude-gravity--truncate (str max-len)
   "Truncate STR to MAX-LEN chars, adding ellipsis if needed."
@@ -471,6 +523,12 @@ Each session plist has keys:
     ((or "Grep" "Glob")
      (let ((pattern (alist-get 'pattern input)))
        (if pattern (format "\"%s\"" (claude-gravity--truncate pattern 40)) "")))
+    ("AskUserQuestion"
+     (let* ((questions (alist-get 'questions input))
+            (first-q (and (vectorp questions) (> (length questions) 0)
+                          (aref questions 0)))
+            (q-text (and first-q (alist-get 'question first-q))))
+       (if q-text (claude-gravity--truncate q-text 55) "")))
     (_
      (let ((first-val (cdar input)))
        (if (stringp first-val)
@@ -507,7 +565,19 @@ Each session plist has keys:
          (insert pattern "\n"))
        (when path
          (insert (propertize "    Path: " 'face 'claude-gravity-detail-label))
-         (insert path "\n")))))
+         (insert path "\n"))))
+    ("AskUserQuestion"
+     (let* ((questions (alist-get 'questions input))
+            (first-q (and (vectorp questions) (> (length questions) 0)
+                          (aref questions 0)))
+            (q-text (and first-q (alist-get 'question first-q)))
+            (answer (claude-gravity--extract-ask-answer result)))
+       (when q-text
+         (insert (propertize "    Question: " 'face 'claude-gravity-detail-label))
+         (insert q-text "\n"))
+       (when answer
+         (insert (propertize "    Answer: " 'face 'claude-gravity-detail-label))
+         (insert (propertize answer 'face 'claude-gravity-question) "\n")))))
   ;; Result section
   (when result
     ;; Normalize MCP-style vector results [((type . "text") (text . "..."))]
@@ -744,21 +814,33 @@ Each session plist has keys:
           (let ((idx (- (length all) (length shown))))
             (dolist (p shown)
               (let* ((text (claude-gravity--prompt-text p))
+                     (is-question (eq (alist-get 'type p) 'question))
+                     (answer (when is-question (alist-get 'answer p)))
                      (elapsed (when (listp p) (alist-get 'elapsed p)))
                      (elapsed-str (claude-gravity--format-elapsed elapsed))
                      (first-line (car (split-string text "\n" t)))
                      (is-last (= idx last-idx))
-                     (heading (format "%s  %s  %s"
-                                      (propertize ">" 'face 'claude-gravity-prompt)
+                     (indicator (if is-question
+                                    (propertize "?" 'face 'claude-gravity-question)
+                                  (propertize ">" 'face 'claude-gravity-prompt)))
+                     (answer-suffix (if answer
+                                        (format "  → %s" (claude-gravity--truncate answer 40))
+                                      ""))
+                     (heading (format "%s  %s%s  %s"
+                                      indicator
                                       (claude-gravity--truncate (or first-line "") 70)
+                                      answer-suffix
                                       (propertize elapsed-str 'face 'claude-gravity-detail-label))))
                 (magit-insert-section (prompt idx (not is-last))
                   (magit-insert-heading heading)
                   (let ((lines (split-string text "\n")))
                     (dolist (line lines)
-                      (insert "    " line "\n"))))
+                      (insert "    " line "\n")))
+                  (when answer
+                    (insert (propertize "    Answer: " 'face 'claude-gravity-detail-label))
+                    (insert (propertize answer 'face 'claude-gravity-question) "\n"))))
               (setq idx (1+ idx)))))
-          (insert "\n"))))))
+          (insert "\n")))))
 
 (defun claude-gravity-insert-agents (session)
   "Insert agents section for SESSION."
@@ -945,6 +1027,7 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "TAB") 'magit-section-toggle)
 (define-key claude-gravity-mode-map (kbd "<return>") 'claude-gravity-visit-or-toggle)
 (define-key claude-gravity-mode-map (kbd "D") 'claude-gravity-cleanup-sessions)
+(define-key claude-gravity-mode-map (kbd "R") 'claude-gravity-reset-status)
 
 (define-derived-mode claude-gravity-mode magit-section-mode "ClaudeGravity"
   "Major mode for Claude Code Gravity overview.
@@ -983,7 +1066,8 @@ overlays.  Since we render from timers, we must apply them manually."
    ("g" "Refresh" claude-gravity-refresh)
    ("P" "Show Plan" claude-gravity-show-plan)]
   ["Sessions"
-   ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)]
+   ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
+   ("R" "Reset all status to idle" claude-gravity-reset-status)]
   ["Manage"
    ("q" "Quit" bury-buffer)])
 
@@ -1002,6 +1086,19 @@ overlays.  Since we render from timers, we must apply them manually."
             (when buf (kill-buffer buf)))))
       (remhash id claude-gravity--sessions))
     (message "Removed %d ended session(s)" (length to-remove))
+    (claude-gravity--render-overview)))
+
+(defun claude-gravity-reset-status ()
+  "Reset claude-status to idle for all active sessions."
+  (interactive)
+  (let ((count 0))
+    (maphash (lambda (_id session)
+               (when (and (eq (plist-get session :status) 'active)
+                          (eq (plist-get session :claude-status) 'responding))
+                 (plist-put session :claude-status 'idle)
+                 (cl-incf count)))
+             claude-gravity--sessions)
+    (message "Reset %d session(s) to idle" count)
     (claude-gravity--render-overview)))
 
 (defun claude-gravity-next-step ()

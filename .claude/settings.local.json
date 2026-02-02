@@ -17,7 +17,9 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/hooks/UserPromptSubmit)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(claude --version:*)",
+      "WebFetch(domain:oraios.github.io)"
     ]
   }
 }
