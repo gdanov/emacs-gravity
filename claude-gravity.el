@@ -103,6 +103,24 @@ Each session plist has keys:
         (claude-gravity--load-allow-patterns session)
         session)))
 
+(defun claude-gravity--reset-session (session)
+  "Reset conversational state of SESSION, preserving identity fields.
+Called when a session is restarted (e.g. via /reset or /clear)."
+  (plist-put session :state (list (cons 'tools []) (cons 'chat [])))
+  (plist-put session :claude-status 'idle)
+  (plist-put session :start-time (current-time))
+  (plist-put session :last-event-time (current-time))
+  (plist-put session :plan nil)
+  (plist-put session :prompts [])
+  (plist-put session :agents [])
+  (plist-put session :files (make-hash-table :test 'equal))
+  (plist-put session :tasks (make-hash-table :test 'equal))
+  (plist-put session :current-turn 0)
+  (plist-put session :status 'active)
+  (claude-gravity--load-allow-patterns session)
+  (message "Claude Gravity: session %s reset" (plist-get session :session-id))
+  session)
+
 (defun claude-gravity--load-allow-patterns (session)
   "Load allow patterns from .claude/settings.local.json for SESSION.
 Stores the patterns list on SESSION's :allow-patterns property."
@@ -291,6 +309,9 @@ Optional PID is the Claude Code process ID."
         (plist-put existing :pid pid))))
   (pcase event
     ("SessionStart"
+     (let ((existing (claude-gravity--get-session session-id)))
+       (when existing
+         (claude-gravity--reset-session existing)))
      (claude-gravity--ensure-session session-id cwd))
 
     ("SessionEnd"
@@ -429,6 +450,12 @@ Optional PID is the Claude Code process ID."
                (plist-put session :plan (list :content plan-content
                                               :file-path file-path
                                               :allowed-prompts (append allowed-prompts nil))))))))))
+
+    ("Notification"
+     (let* ((session (claude-gravity--get-session session-id))
+            (msg (or (alist-get 'message data) "")))
+       (when (and session (string-match-p "\\(?:reset\\|clear\\)" msg))
+         (claude-gravity--reset-session session))))
 
   (claude-gravity--schedule-refresh)
   (when session-id
