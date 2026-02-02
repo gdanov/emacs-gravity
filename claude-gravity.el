@@ -414,9 +414,13 @@ Optional PID is the Claude Code process ID."
        ;; Detect plan presentation
        (let ((tool-name (alist-get 'tool_name data)))
          (when (equal tool-name "ExitPlanMode")
-           (let ((plan-content (alist-get 'plan (alist-get 'tool_input data))))
+           (let ((plan-content (alist-get 'plan (alist-get 'tool_input data)))
+                 (file-path (alist-get 'filePath (alist-get 'tool_response data)))
+                 (allowed-prompts (alist-get 'allowedPrompts (alist-get 'tool_input data))))
              (when plan-content
-               (plist-put session :plan (list :content plan-content)))))))))
+               (plist-put session :plan (list :content plan-content
+                                              :file-path file-path
+                                              :allowed-prompts (append allowed-prompts nil))))))))))
 
   (claude-gravity--schedule-refresh)
   (when session-id
@@ -725,17 +729,65 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
     (when (and section (eq (oref section type) 'session-entry))
       (oref section value))))
 
-(defun claude-gravity-insert-plan-link (session)
-  "Insert a link to the plan for SESSION in the gravity buffer."
+(defun claude-gravity--plan-preview-lines (content n)
+  "Return first N non-empty lines from plan CONTENT."
+  (let ((lines (split-string content "\n"))
+        result)
+    (dolist (line lines)
+      (when (and (< (length result) n)
+                 (not (string-empty-p (string-trim line))))
+        (push line result)))
+    (nreverse result)))
+
+(defun claude-gravity--format-allowed-prompts (prompts)
+  "Format PROMPTS list as \"Tool(description), ...\" string."
+  (mapconcat (lambda (p)
+               (format "%s(%s)"
+                       (or (alist-get 'tool p) "?")
+                       (or (alist-get 'prompt p) "?")))
+             prompts ", "))
+
+(defun claude-gravity-open-plan-file ()
+  "Open the plan file for the current session."
+  (interactive)
+  (let* ((sid (or claude-gravity--buffer-session-id
+                  (claude-gravity--current-overview-session-id)))
+         (session (when sid (claude-gravity--get-session sid)))
+         (plan (when session (plist-get session :plan)))
+         (fpath (when plan (plist-get plan :file-path))))
+    (cond
+     ((and fpath (file-exists-p fpath)) (find-file fpath))
+     (fpath (message "Plan file not found: %s" fpath))
+     (t (message "No plan file path available")))))
+
+(defun claude-gravity-insert-plan (session)
+  "Insert plan section for SESSION with inline preview."
   (let ((plan (plist-get session :plan)))
     (when plan
       (let* ((content (plist-get plan :content))
-             (first-line (car (split-string content "\n" t))))
-        (magit-insert-section (plan-link)
+             (file-path (plist-get plan :file-path))
+             (allowed-prompts (plist-get plan :allowed-prompts))
+             (preview-lines (claude-gravity--plan-preview-lines content 8))
+             (all-lines (split-string content "\n" t "[ \t]"))
+             (truncated (> (length all-lines) (length preview-lines))))
+        (magit-insert-section (plan nil t)
           (magit-insert-heading
-            (propertize "Current Plan" 'face 'claude-gravity-tool-name))
-          (insert (format "  %s\n" (or first-line ""))
-                  (propertize "  Press 'P' to view\n\n" 'face 'claude-gravity-detail-label)))))))
+            (propertize "Plan" 'face 'claude-gravity-tool-name))
+          (dolist (line preview-lines)
+            (insert (format "  %s\n" line)))
+          (when truncated
+            (insert (propertize "  ...\n" 'face 'claude-gravity-detail-label)))
+          (when allowed-prompts
+            (insert (format "  %s %s\n"
+                            (propertize "Permissions:" 'face 'claude-gravity-detail-label)
+                            (claude-gravity--format-allowed-prompts allowed-prompts))))
+          (when file-path
+            (insert (format "  %s %s  %s\n"
+                            (propertize "File:" 'face 'claude-gravity-detail-label)
+                            file-path
+                            (propertize "(F to open)" 'face 'claude-gravity-detail-label))))
+          (insert (propertize "  P to view full plan\n" 'face 'claude-gravity-detail-label))
+          (insert "\n"))))))
 
 ;;; Section renderers (used by per-session buffers)
 
@@ -1091,7 +1143,7 @@ overlays.  Since we render from timers, we must apply them manually."
           (erase-buffer)
           (magit-insert-section (root)
             (claude-gravity-insert-header state)
-            (claude-gravity-insert-plan-link session)
+            (claude-gravity-insert-plan session)
             (claude-gravity-insert-prompts session)
             (claude-gravity-insert-tools session)
             (claude-gravity-insert-agents session)
@@ -1118,6 +1170,7 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "d") 'claude-gravity-delete-session)
 (define-key claude-gravity-mode-map (kbd "A") 'claude-gravity-add-allow-pattern)
 (define-key claude-gravity-mode-map (kbd "a") 'claude-gravity-add-allow-pattern-to-settings)
+(define-key claude-gravity-mode-map (kbd "F") 'claude-gravity-open-plan-file)
 
 (define-derived-mode claude-gravity-mode magit-section-mode "ClaudeGravity"
   "Major mode for Claude Code Gravity overview.
@@ -1257,7 +1310,8 @@ Returns a list from most specific to most general, with nils removed."
   ["Actions"
    ("c" "Comment" claude-gravity-comment-at-point)
    ("g" "Refresh" claude-gravity-refresh)
-   ("P" "Show Plan" claude-gravity-show-plan)]
+   ("P" "Show Plan" claude-gravity-show-plan)
+   ("F" "Open plan file" claude-gravity-open-plan-file)]
   ["Permissions"
    ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
    ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]

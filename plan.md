@@ -39,6 +39,7 @@ we don't want to implement full-blown claude code IDE, as we already use two pre
 - Allow-pattern management: suggest patterns, copy to kill ring (A), write to settings.local.json (a)
 - Comment system (overlay-based, mock/non-persistent)
 - Debounced per-session rendering (0.1s timer)
+- ExitPlanMode inline preview: collapsible 8-line plan preview in session buffer, allowedPrompts display, plan file path with F keybinding to open
 
 # tech stack
 
@@ -49,4 +50,4 @@ we like emacs magit package and want to use similar UI paradigms and libraries. 
 - show tools that asked for permissions (partially done: pattern generation + settings integration works, but no explicit "permission requested" indicator in UI)
 - show more (what?) details and state for agents (currently only: type, status, short ID)
 - show Edit tools diff (ideally color coded) — not started
-- show the summary that claude shows after planning when asking to exit planning mode
+- ~~show the summary that claude shows after planning when asking to exit planning mode~~ (done: inline preview + allowedPrompts + file path)
