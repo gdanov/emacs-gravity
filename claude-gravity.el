@@ -239,7 +239,8 @@ Stores the patterns list on SESSION's :allow-patterns property."
                    (list (cons 'subject (alist-get 'subject tool-input))
                          (cons 'description (alist-get 'description tool-input))
                          (cons 'activeForm (alist-get 'activeForm tool-input))
-                         (cons 'status "pending"))
+                         (cons 'status "pending")
+                         (cons 'turn (or (plist-get session :current-turn) 0)))
                    tasks))
          ("TaskUpdate"
           (let* ((task-id (alist-get 'taskId tool-input))
@@ -279,7 +280,8 @@ Stores the patterns list on SESSION's :allow-patterns property."
                                         (cons 'description (alist-get 'description task))
                                         (cons 'status (alist-get 'status task))
                                         (cons 'activeForm (or (alist-get 'activeForm task)
-                                                              (and existing (alist-get 'activeForm existing)))))))
+                                                              (and existing (alist-get 'activeForm existing))))
+                                        (cons 'turn (or (and existing (alist-get 'turn existing)) 0)))))
                   (puthash task-id new-entry tasks)))))))))))
 
 ;;; Agent helpers
@@ -833,39 +835,168 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
     (insert (format "Tools Executed: %d\n" (length (alist-get 'tools state))))
     (insert "\n")))
 
-(defun claude-gravity-insert-tools (session)
-  "Insert tool usage section from SESSION, grouped by prompt turn."
+(defun claude-gravity--tasks-by-turn (tasks-ht)
+  "Group tasks from TASKS-HT by turn number.
+Returns a hash table mapping turn -> list of task alists."
+  (let ((groups (make-hash-table :test 'equal)))
+    (when tasks-ht
+      (maphash (lambda (key val)
+                 (unless (string-prefix-p "_pending_" key)
+                   (let ((turn (or (alist-get 'turn val) 0)))
+                     (puthash turn (append (gethash turn groups) (list val)) groups))))
+               tasks-ht))
+    groups))
+
+(defun claude-gravity--turn-counts (tools agents tasks)
+  "Format count string for TOOLS, AGENTS, TASKS lists."
+  (let ((parts nil))
+    (when (and tasks (> (length tasks) 0))
+      (push (format "%dt" (length tasks)) parts))
+    (when (and agents (> (length agents) 0))
+      (push (format "%da" (length agents)) parts))
+    (when (and tools (> (length tools) 0))
+      (push (format "%d tools" (length tools)) parts))
+    (if parts
+        (propertize (format "[%s]" (string-join parts " "))
+                    'face 'claude-gravity-detail-label)
+      "")))
+
+(defun claude-gravity--insert-turn-children (tools agents tasks)
+  "Insert tool, agent, and task subsections for a turn."
+  ;; Tools subsection
+  (when (and tools (> (length tools) 0))
+    (magit-insert-section (turn-tools nil t)
+      (magit-insert-heading
+        (format "Tools (%d)" (length tools)))
+      (dolist (item tools)
+        (claude-gravity--insert-tool-item item))))
+  ;; Agents subsection
+  (when (and agents (> (length agents) 0))
+    (magit-insert-section (turn-agents nil t)
+      (magit-insert-heading
+        (format "Agents (%d)" (length agents)))
+      (dolist (agent agents)
+        (claude-gravity--insert-agent-item agent))))
+  ;; Tasks subsection
+  (when (and tasks (> (length tasks) 0))
+    (let ((sorted (sort (copy-sequence tasks)
+                        (lambda (a b)
+                          (< (claude-gravity--task-sort-key (alist-get 'status a))
+                             (claude-gravity--task-sort-key (alist-get 'status b)))))))
+      (let ((completed (cl-count-if (lambda (tk) (equal (alist-get 'status tk) "completed")) sorted))
+            (total (length sorted)))
+        (magit-insert-section (turn-tasks nil t)
+          (magit-insert-heading
+            (format "Tasks (%d/%d)" completed total))
+          (dolist (task sorted)
+            (claude-gravity--insert-task-item task)))))))
+
+(defun claude-gravity--insert-task-item (task)
+  "Insert a single TASK as a magit-section."
+  (let* ((subject (or (alist-get 'subject task) "(no subject)"))
+         (status (or (alist-get 'status task) "pending"))
+         (active-form (alist-get 'activeForm task))
+         (checkbox (pcase status
+                     ("completed"
+                      (propertize "[x]" 'face 'claude-gravity-task-done))
+                     ("in_progress"
+                      (propertize "[/]" 'face 'claude-gravity-task-in-progress))
+                     (_
+                      (propertize "[ ]" 'face 'claude-gravity-task-pending))))
+         (suffix (if (and (equal status "in_progress") active-form)
+                     (concat "  " (propertize active-form 'face 'claude-gravity-task-active-form))
+                   "")))
+    (magit-insert-section (task task)
+      (insert (format "  %s %s%s\n" checkbox subject suffix)))))
+
+(defun claude-gravity-insert-turns (session)
+  "Insert unified turns section for SESSION.
+Each turn groups its prompt, tools, agents, and tasks together."
   (let* ((state (plist-get session :state))
          (tools (alist-get 'tools state))
          (prompts (plist-get session :prompts))
-         (current-turn (or (plist-get session :current-turn) 0)))
-    (when (> (length tools) 0)
-      ;; Group tools by turn
-      (let ((groups (make-hash-table :test 'equal))
-            (max-turn 0))
-        (dolist (item (append tools nil))
-          (let ((turn (or (alist-get 'turn item) 0)))
-            (when (> turn max-turn) (setq max-turn turn))
-            (puthash turn (append (gethash turn groups) (list item)) groups)))
-        (magit-insert-section (tools)
-          (magit-insert-heading "Tool Usage")
-          (dotimes (i (1+ max-turn))
-            (let ((turn-tools (gethash i groups))
-                  (prompt-text (when (and prompts (> (length prompts) 0)
-                                         (> i 0) (<= i (length prompts)))
-                                 (claude-gravity--prompt-text (aref prompts (1- i))))))
-              (when turn-tools
-                (let* ((count (length turn-tools))
-                       (is-current (= i current-turn))
-                       (heading (if (and prompt-text (> (length prompt-text) 0))
-                                    (format "Turn %d: \"%s\" (%d tools)"
-                                            i (claude-gravity--truncate prompt-text 50) count)
-                                  (format "Turn %d (%d tools)" i count))))
-                  (magit-insert-section (tool-turn i (not is-current))
-                    (magit-insert-heading heading)
-                    (dolist (item turn-tools)
-                      (claude-gravity--insert-tool-item item)))))))
-          (insert "\n"))))))
+         (agents (plist-get session :agents))
+         (tasks-ht (plist-get session :tasks))
+         (current-turn (or (plist-get session :current-turn) 0))
+         (tool-groups (make-hash-table :test 'equal))
+         (agent-groups (make-hash-table :test 'equal))
+         (task-groups (claude-gravity--tasks-by-turn tasks-ht))
+         (max-turn current-turn))
+    ;; Build tool groups
+    (dolist (item (append tools nil))
+      (let ((turn (or (alist-get 'turn item) 0)))
+        (when (> turn max-turn) (setq max-turn turn))
+        (puthash turn (append (gethash turn tool-groups) (list item)) tool-groups)))
+    ;; Build agent groups
+    (dolist (agent (append (or agents []) nil))
+      (let ((turn (or (alist-get 'turn agent) 0)))
+        (when (> turn max-turn) (setq max-turn turn))
+        (puthash turn (append (gethash turn agent-groups) (list agent)) agent-groups)))
+    ;; Check max-turn from task groups
+    (maphash (lambda (turn _)
+               (when (and (numberp turn) (> turn max-turn))
+                 (setq max-turn turn)))
+             task-groups)
+    ;; Only render if there is any content
+    (when (> max-turn 0)
+      (magit-insert-section (turns nil t)
+        (magit-insert-heading
+          (format "Turns (%d)" current-turn))
+        ;; Turn 0: pre-prompt activity
+        (let ((t0-tools (gethash 0 tool-groups))
+              (t0-agents (gethash 0 agent-groups))
+              (t0-tasks (gethash 0 task-groups)))
+          (when (or t0-tools t0-agents t0-tasks)
+            (magit-insert-section (turn 0 t)
+              (magit-insert-heading
+                (propertize "Pre-prompt activity" 'face 'claude-gravity-detail-label))
+              (claude-gravity--insert-turn-children t0-tools t0-agents t0-tasks))))
+        ;; Turns 1..max-turn
+        (dotimes (j max-turn)
+          (let* ((i (1+ j))
+                 (prompt-entry (when (and prompts (> (length prompts) 0)
+                                          (<= i (length prompts)))
+                                 (aref prompts (1- i))))
+                 (turn-tools (gethash i tool-groups))
+                 (turn-agents (gethash i agent-groups))
+                 (turn-tasks (gethash i task-groups))
+                 (is-current (= i current-turn))
+                 (prompt-text (when prompt-entry
+                                (claude-gravity--prompt-text prompt-entry)))
+                 (is-question (when (listp prompt-entry)
+                                (eq (alist-get 'type prompt-entry) 'question)))
+                 (elapsed (when (listp prompt-entry)
+                            (alist-get 'elapsed prompt-entry)))
+                 (elapsed-str (claude-gravity--format-elapsed elapsed))
+                 (indicator (if is-question
+                                (propertize "?" 'face 'claude-gravity-question)
+                              (propertize ">" 'face 'claude-gravity-prompt)))
+                 (counts (claude-gravity--turn-counts turn-tools turn-agents turn-tasks))
+                 (answer (when is-question (alist-get 'answer prompt-entry)))
+                 (answer-suffix (if answer
+                                    (format "  → %s" (claude-gravity--truncate answer 40))
+                                  ""))
+                 (heading (format "%s  %s%s  %s  %s"
+                                  indicator
+                                  (claude-gravity--truncate (or prompt-text "(no prompt)") 60)
+                                  answer-suffix
+                                  counts
+                                  (propertize elapsed-str 'face 'claude-gravity-detail-label))))
+            (when (or turn-tools turn-agents turn-tasks prompt-entry)
+              (magit-insert-section (turn i (not is-current))
+                (magit-insert-heading heading)
+                ;; Full prompt text in body
+                (when (and prompt-text (> (length prompt-text) 60))
+                  (let ((lines (split-string prompt-text "\n")))
+                    (dolist (line lines)
+                      (insert "    " line "\n"))))
+                ;; Answer for questions
+                (when (and is-question answer)
+                  (insert (propertize "    Answer: " 'face 'claude-gravity-detail-label))
+                  (insert (propertize answer 'face 'claude-gravity-question) "\n"))
+                ;; Children: tools, agents, tasks
+                (claude-gravity--insert-turn-children turn-tools turn-agents turn-tasks)))))
+        (insert "\n")))))
 
 (defun claude-gravity--insert-tool-item (item)
   "Insert a single tool ITEM as a magit-section."
@@ -893,50 +1024,6 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
         (insert (propertize (format "    %s\n" sig) 'face 'claude-gravity-tool-signature)))
       (claude-gravity--insert-tool-detail name input result))))
 
-(defun claude-gravity-insert-tasks (session)
-  "Insert tasks section for SESSION."
-  (let* ((tasks-ht (plist-get session :tasks))
-         (task-list nil)
-         (completed 0)
-         (total 0))
-    (unless tasks-ht (setq tasks-ht (make-hash-table :test 'equal)))
-    ;; Collect tasks, skipping pending temp keys
-    (maphash (lambda (key val)
-               (unless (string-prefix-p "_pending_" key)
-                 (push val task-list)
-                 (setq total (1+ total))
-                 (when (equal (alist-get 'status val) "completed")
-                   (setq completed (1+ completed)))))
-             tasks-ht)
-    (when (> total 0)
-      ;; Sort: in_progress first, then pending, then completed
-      (setq task-list
-            (sort task-list
-                  (lambda (a b)
-                    (let ((sa (alist-get 'status a))
-                          (sb (alist-get 'status b)))
-                      (< (claude-gravity--task-sort-key sa)
-                         (claude-gravity--task-sort-key sb))))))
-      (magit-insert-section (tasks nil t)
-        (magit-insert-heading
-          (format "Tasks (%d/%d)" completed total))
-        (dolist (task task-list)
-          (let* ((subject (or (alist-get 'subject task) "(no subject)"))
-                 (status (or (alist-get 'status task) "pending"))
-                 (active-form (alist-get 'activeForm task))
-                 (checkbox (pcase status
-                             ("completed"
-                              (propertize "[x]" 'face 'claude-gravity-task-done))
-                             ("in_progress"
-                              (propertize "[/]" 'face 'claude-gravity-task-in-progress))
-                             (_
-                              (propertize "[ ]" 'face 'claude-gravity-task-pending))))
-                 (suffix (if (and (equal status "in_progress") active-form)
-                             (concat "  " (propertize active-form 'face 'claude-gravity-task-active-form))
-                           "")))
-            (magit-insert-section (task task)
-              (insert (format "  %s %s%s\n" checkbox subject suffix)))))
-        (insert "\n")))))
 
 (defun claude-gravity--task-sort-key (status)
   "Return sort key for task STATUS.  Lower = higher priority."
@@ -952,46 +1039,6 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
       (or (alist-get 'text prompt-entry) "")
     (or prompt-entry "")))
 
-(defun claude-gravity-insert-prompts (session)
-  "Insert prompts section for SESSION."
-  (let ((prompts (plist-get session :prompts)))
-    (when (and prompts (> (length prompts) 0))
-      (let* ((all (append prompts nil))
-             (shown (last all 10))
-             (last-idx (1- (length all))))
-        (magit-insert-section (prompts nil t)
-          (magit-insert-heading
-            (format "Prompts (%d)" (length prompts)))
-          (let ((idx (- (length all) (length shown))))
-            (dolist (p shown)
-              (let* ((text (claude-gravity--prompt-text p))
-                     (is-question (eq (alist-get 'type p) 'question))
-                     (answer (when is-question (alist-get 'answer p)))
-                     (elapsed (when (listp p) (alist-get 'elapsed p)))
-                     (elapsed-str (claude-gravity--format-elapsed elapsed))
-                     (first-line (car (split-string text "\n" t)))
-                     (is-last (= idx last-idx))
-                     (indicator (if is-question
-                                    (propertize "?" 'face 'claude-gravity-question)
-                                  (propertize ">" 'face 'claude-gravity-prompt)))
-                     (answer-suffix (if answer
-                                        (format "  → %s" (claude-gravity--truncate answer 40))
-                                      ""))
-                     (heading (format "%s  %s%s  %s"
-                                      indicator
-                                      (claude-gravity--truncate (or first-line "") 70)
-                                      answer-suffix
-                                      (propertize elapsed-str 'face 'claude-gravity-detail-label))))
-                (magit-insert-section (prompt idx (not is-last))
-                  (magit-insert-heading heading)
-                  (let ((lines (split-string text "\n")))
-                    (dolist (line lines)
-                      (insert "    " line "\n")))
-                  (when answer
-                    (insert (propertize "    Answer: " 'face 'claude-gravity-detail-label))
-                    (insert (propertize answer 'face 'claude-gravity-question) "\n"))))
-              (setq idx (1+ idx)))))
-          (insert "\n")))))
 
 (defun claude-gravity--parse-agent-transcript (path)
   "Parse agent transcript JSONL at PATH.
@@ -1080,7 +1127,7 @@ the message under `message` with `role`, `content`, and `model`."
                           (alist-get 'tool-count info))
                     (setf (alist-get 'transcript_parsed agent) t)
                     (aset agents idx agent))
-                  (claude-gravity-refresh)))))))))))
+                  (claude-gravity-refresh))))))))))
 
 
 (defun claude-gravity-open-agent-transcript ()
@@ -1095,39 +1142,6 @@ the message under `message` with `role`, `content`, and `model`."
                 (find-file tp)
               (message "No transcript file available"))))))))
 
-(defun claude-gravity-insert-agents (session)
-  "Insert agents section for SESSION, grouped by turn."
-  (let ((agents (plist-get session :agents))
-        (prompts (plist-get session :prompts))
-        (current-turn (or (plist-get session :current-turn) 0)))
-    (when (and agents (> (length agents) 0))
-      ;; Group agents by turn
-      (let ((groups (make-hash-table :test 'equal))
-            (max-turn 0))
-        (dolist (agent (append agents nil))
-          (let ((turn (or (alist-get 'turn agent) 0)))
-            (when (> turn max-turn) (setq max-turn turn))
-            (puthash turn (append (gethash turn groups) (list agent)) groups)))
-        (magit-insert-section (agents nil t)
-          (magit-insert-heading
-            (format "Agents (%d)" (length agents)))
-          (dotimes (i (1+ max-turn))
-            (let ((turn-agents (gethash i groups))
-                  (prompt-text (when (and prompts (> (length prompts) 0)
-                                          (> i 0) (<= i (length prompts)))
-                                (claude-gravity--prompt-text (aref prompts (1- i))))))
-              (when turn-agents
-                (let* ((count (length turn-agents))
-                       (is-current (= i current-turn))
-                       (heading (if (and prompt-text (> (length prompt-text) 0))
-                                    (format "Turn %d: \"%s\" (%d agents)"
-                                            i (claude-gravity--truncate prompt-text 50) count)
-                                  (format "Turn %d (%d agents)" i count))))
-                  (magit-insert-section (agent-turn i (not is-current))
-                    (magit-insert-heading heading)
-                    (dolist (agent turn-agents)
-                      (claude-gravity--insert-agent-item agent)))))))
-          (insert "\n"))))))
 
 (defun claude-gravity--insert-agent-item (agent)
   "Insert a single AGENT as a magit-section with expandable detail."
@@ -1345,11 +1359,8 @@ overlays.  Since we render from timers, we must apply them manually."
           (magit-insert-section (root)
             (claude-gravity-insert-header state)
             (claude-gravity-insert-plan session)
-            (claude-gravity-insert-prompts session)
-            (claude-gravity-insert-tools session)
-            (claude-gravity-insert-agents session)
+            (claude-gravity-insert-turns session)
             (claude-gravity-insert-files session)
-            (claude-gravity-insert-tasks session)
             (claude-gravity-insert-allow-patterns session))
           (goto-char (min pos (point-max)))
           (claude-gravity--apply-visibility))))))
