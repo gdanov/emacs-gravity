@@ -28,7 +28,7 @@ we don't want to implement full-blown claude code IDE, as we already use two pre
 - Dead session detection: PID checks, staleness timeout (>5min), cleanup commands (D/d/R/X)
 - Magit-section based overview and detail views with transient menus
 - File tracking (read/edit/write operations per file)
-- Agent/subagent tracking with live status
+- Agent/subagent tracking with live status, duration, transcript parsing (task, model, tool count via RET)
 - Task tracking (TaskCreate/TaskUpdate/TaskList) with status indicators
 - User prompt history display with elapsed time per turn
 - Plan detection (via ExitPlanMode tool) and display in side buffer (markdown mode)
@@ -48,9 +48,10 @@ we like emacs magit package and want to use similar UI paradigms and libraries. 
 # ideas, pending features to discuss
 
 - show tools that asked for permissions (partially done: pattern generation + settings integration works, but no explicit "permission requested" indicator in UI)
-- show more (what?) details and state for agents (currently only: type, status, short ID)
+- show more (what?) details and state for agents (currently: type, status, short ID, duration, transcript parsing with task/model/tool count)
 - show Edit tools diff (ideally color coded) — not started
 - (done: inline preview + allowedPrompts + file path) 
   - `ExitPlanMode` tool does not show the suggested plan. I want it to show the suggested plan. see the plannotator plugin for example
 - `AskUserQuestion` tool is treated as new prompt in the prompts section, but not as a new turn in the Tool Usage section. Let's fix that and also experiment with having the tool usage be sub-section of the prompt 
 - show replies in conversation, for example when I ask claude in planning mode to analyze somthing, it answers and we're still in planning mode (and there's no explicit plan)
+- wrap text such as the full prompts

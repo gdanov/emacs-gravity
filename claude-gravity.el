@@ -1054,23 +1054,34 @@ the message under `message` with `role`, `content`, and `model`."
     (when section
       (let ((val (oref section value)))
         (when (and val (listp val) (alist-get 'agent_id val))
-          (let ((tp (alist-get 'transcript_path val)))
+          (let ((tp (alist-get 'transcript_path val))
+                (agent-id (alist-get 'agent_id val)))
             (if (not tp)
                 (message "No transcript path for this agent")
               (if (alist-get 'transcript_parsed val)
                   ;; Already parsed, just refresh
                   (claude-gravity-refresh)
-                ;; Parse and store
-                (let ((info (claude-gravity--parse-agent-transcript tp)))
-                  (when info
-                    (setf (alist-get 'transcript_prompt val)
+                ;; Parse and store into the session's agent alist directly.
+                ;; We must look up the agent in session data because setf on
+                ;; alist-get with new keys only rebinds the local variable.
+                (let* ((session (claude-gravity--get-session
+                                 claude-gravity--buffer-session-id))
+                       (agents (when session (plist-get session :agents)))
+                       (idx (when agents
+                              (claude-gravity--find-agent-by-id agents agent-id)))
+                       (agent (when idx (aref agents idx)))
+                       (info (claude-gravity--parse-agent-transcript tp)))
+                  (when (and agent info)
+                    (setf (alist-get 'transcript_prompt agent)
                           (alist-get 'prompt info))
-                    (setf (alist-get 'transcript_model val)
+                    (setf (alist-get 'transcript_model agent)
                           (alist-get 'model info))
-                    (setf (alist-get 'transcript_tool_count val)
+                    (setf (alist-get 'transcript_tool_count agent)
                           (alist-get 'tool-count info))
-                    (setf (alist-get 'transcript_parsed val) t))
-                  (claude-gravity-refresh))))))))))
+                    (setf (alist-get 'transcript_parsed agent) t)
+                    (aset agents idx agent))
+                  (claude-gravity-refresh)))))))))))
+
 
 (defun claude-gravity-open-agent-transcript ()
   "Open the raw transcript JSONL file for the agent at point."
