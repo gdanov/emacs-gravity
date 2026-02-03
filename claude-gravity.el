@@ -1040,57 +1040,93 @@ Called before each tool item in the rendering loop."
     (when (and atext (not (string-empty-p atext)))
       (claude-gravity--insert-wrapped-with-margin atext nil 'claude-gravity-assistant-text))))
 
+(defun claude-gravity--group-response-cycles (tools)
+  "Group TOOLS into response cycles based on assistant text boundaries.
+A new cycle starts at each tool with non-nil assistant_text or
+assistant_thinking (after dedup).  Returns a list of tool-lists."
+  (let ((cycles nil)
+        (current nil))
+    (dolist (item tools)
+      (let ((atext (alist-get 'assistant_text item))
+            (athink (alist-get 'assistant_thinking item)))
+        (when (and current
+                   (or (and atext (not (string-empty-p atext)))
+                       (and athink (not (string-empty-p athink)))))
+          ;; New assistant text = new response cycle
+          (push (nreverse current) cycles)
+          (setq current nil))
+        (push item current)))
+    (when current
+      (push (nreverse current) cycles))
+    (nreverse cycles)))
+
+(defun claude-gravity--build-agent-lookup (agents)
+  "Build lookup table from AGENTS for correlating with Task tool calls.
+Returns a hash table mapping \"TURN:TYPE\" to a list of agent entries.
+Multiple agents with the same turn+type are returned in order."
+  (let ((ht (make-hash-table :test 'equal)))
+    (dolist (agent (append (or agents []) nil))
+      (let* ((turn (or (alist-get 'turn agent) 0))
+             (atype (or (alist-get 'type agent) ""))
+             (key (format "%d:%s" turn atype)))
+        (puthash key (append (gethash key ht) (list agent)) ht)))
+    ht))
+
+(defun claude-gravity--pop-matching-agent (lookup turn subagent-type)
+  "Pop and return the first matching agent from LOOKUP for TURN and SUBAGENT-TYPE."
+  (when (and turn subagent-type)
+    (let* ((key (format "%d:%s" turn subagent-type))
+           (agents (gethash key lookup)))
+      (when agents
+        (puthash key (cdr agents) lookup)
+        (car agents)))))
+
+(defun claude-gravity--response-cycle-heading (cycle)
+  "Return a short heading string for a response CYCLE (list of tools).
+Uses the first tool's assistant_text, truncated to 60 chars."
+  (let* ((first-tool (car cycle))
+         (atext (alist-get 'assistant_text first-tool))
+         (athink (alist-get 'assistant_thinking first-tool))
+         (text (or atext athink)))
+    (if (and text (not (string-empty-p text)))
+        (let* ((first-line (car (split-string text "\n" t)))
+               (trimmed (string-trim first-line)))
+          (claude-gravity--truncate trimmed 70))
+      (format "%d tool%s" (length cycle) (if (= (length cycle) 1) "" "s")))))
+
 (defun claude-gravity--insert-turn-children (tools agents tasks)
-  "Insert tool, agent, and task subsections for a turn.
-Running tools/agents are shown prominently; all items appear in History."
+  "Insert response cycles, inline agent annotations, and tasks for a turn.
+Tools are grouped into response cycles (each assistant message + its tool calls)."
+  ;; Filter out AskUserQuestion (shown as prompt entries, not tool items)
+  (setq tools (cl-remove-if (lambda (item) (equal (alist-get 'name item) "AskUserQuestion")) tools))
   ;; Dedup assistant text across parallel tool calls
   (when tools (claude-gravity--dedup-assistant-text tools))
-  ;; Tools subsection
-  (when (and tools (> (length tools) 0))
-    (let ((running (cl-remove-if (lambda (t) (equal (alist-get 'status t) "done")) tools)))
-      (magit-insert-section (turn-tools nil t)
-        (magit-insert-heading
-          (format "%sTools (%d)" (claude-gravity--indent) (length tools)))
-        (if running
-            (progn
-              ;; Show running tools at top level
-              (dolist (item running)
-                (claude-gravity--insert-tool-context item)
-                (claude-gravity--insert-tool-item item))
-              ;; All tools in collapsed History
-              (magit-insert-section (tool-history nil t)
-                (magit-insert-heading
-                  (propertize (format "%sHistory (%d)" (claude-gravity--indent) (length tools))
-                              'face 'claude-gravity-detail-label))
-                (dolist (item tools)
-                  (claude-gravity--insert-tool-context item)
-                  (claude-gravity--insert-tool-item item))))
-          ;; All done — flat list, no History wrapper
-          (dolist (item tools)
-            (claude-gravity--insert-tool-context item)
-            (claude-gravity--insert-tool-item item))))))
-  ;; Agents subsection
-  (when (and agents (> (length agents) 0))
-    (let ((running (cl-remove-if (lambda (a) (equal (alist-get 'status a) "done")) agents)))
-      (magit-insert-section (turn-agents nil t)
-        (magit-insert-heading
-          (format "%sAgents (%d)" (claude-gravity--indent) (length agents)))
-        (if running
-            (progn
-              ;; Show running agents at top level
-              (dolist (agent running)
-                (claude-gravity--insert-agent-item agent))
-              ;; All agents in collapsed History
-              (magit-insert-section (agent-history nil t)
-                (magit-insert-heading
-                  (propertize (format "%sHistory (%d)" (claude-gravity--indent) (length agents))
-                              'face 'claude-gravity-detail-label))
-                (dolist (agent agents)
-                  (claude-gravity--insert-agent-item agent))))
-          ;; All done — flat list
-          (dolist (agent agents)
-            (claude-gravity--insert-agent-item agent))))))
-  ;; Tasks subsection (unchanged — already sorted by status priority)
+  ;; Build agent lookup for inline annotation
+  (let ((agent-lookup (claude-gravity--build-agent-lookup agents)))
+    ;; Render tools as response cycles
+    (when (and tools (> (length tools) 0))
+      (let* ((cycles (claude-gravity--group-response-cycles tools))
+             (n-cycles (length cycles))
+             (cycle-idx 0))
+        (dolist (cycle cycles)
+          (let* ((is-last (= cycle-idx (1- n-cycles)))
+                 (all-done (cl-every (lambda (item) (equal (alist-get 'status item) "done")) cycle))
+                 (should-collapse (and (not is-last) all-done))
+                 (heading (claude-gravity--response-cycle-heading cycle)))
+            ;; Response cycle as a collapsible section
+            (magit-insert-section (response-cycle cycle-idx should-collapse)
+              (magit-insert-heading
+                (format "%s%s"
+                        (claude-gravity--indent)
+                        (propertize (concat "┊ " heading) 'face 'claude-gravity-assistant-text)))
+              ;; Insert each tool (context only for first tool since heading covers it)
+              (dolist (item cycle)
+                (claude-gravity--insert-tool-item item agent-lookup)))
+            ;; Separator between cycles (not after the last)
+            (unless is-last
+              (claude-gravity--turn-separator)))
+          (cl-incf cycle-idx)))))
+  ;; Tasks subsection at the end
   (when (and tasks (> (length tasks) 0))
     (let ((sorted (sort (copy-sequence tasks)
                         (lambda (a b)
@@ -1135,11 +1171,12 @@ Each turn groups its prompt, tools, agents, and tasks together."
          (agent-groups (make-hash-table :test 'equal))
          (task-groups (claude-gravity--tasks-by-turn tasks-ht))
          (max-turn current-turn))
-    ;; Build tool groups
+    ;; Build tool groups (excluding AskUserQuestion, shown as prompt entries)
     (dolist (item (append tools nil))
-      (let ((turn (or (alist-get 'turn item) 0)))
-        (when (> turn max-turn) (setq max-turn turn))
-        (puthash turn (append (gethash turn tool-groups) (list item)) tool-groups)))
+      (unless (equal (alist-get 'name item) "AskUserQuestion")
+        (let ((turn (or (alist-get 'turn item) 0)))
+          (when (> turn max-turn) (setq max-turn turn))
+          (puthash turn (append (gethash turn tool-groups) (list item)) tool-groups))))
     ;; Build agent groups
     (dolist (agent (append (or agents []) nil))
       (let ((turn (or (alist-get 'turn agent) 0)))
@@ -1228,8 +1265,9 @@ Each turn groups its prompt, tools, agents, and tasks together."
                     (claude-gravity--insert-wrapped-with-margin stop-text nil 'claude-gravity-assistant-text))))))))
         (insert "\n")))))
 
-(defun claude-gravity--insert-tool-item (item)
-  "Insert a single tool ITEM as a magit-section."
+(defun claude-gravity--insert-tool-item (item &optional agent-lookup)
+  "Insert a single tool ITEM as a magit-section.
+When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info."
   (let* ((name (alist-get 'name item))
          (status (alist-get 'status item))
          (input (alist-get 'input item))
@@ -1241,20 +1279,65 @@ Each turn groups its prompt, tools, agents, and tasks together."
                                          'claude-gravity-tool-running)))
          (tool-face (propertize (or name "?") 'face 'claude-gravity-tool-name))
          (summary (claude-gravity--tool-summary name input))
-         (desc (claude-gravity--tool-description input)))
+         (desc (claude-gravity--tool-description input))
+         ;; Agent annotation for Task tools
+         (agent (when (and agent-lookup (equal name "Task"))
+                  (claude-gravity--pop-matching-agent
+                   agent-lookup
+                   (alist-get 'turn item)
+                   (alist-get 'subagent_type input))))
+         (agent-suffix
+          (if agent
+              (let* ((atype (alist-get 'type agent))
+                     (aid (alist-get 'agent_id agent))
+                     (short-id (if (and aid (> (length aid) 7))
+                                   (substring aid 0 7)
+                                 (or aid "?")))
+                     (adur (alist-get 'duration agent))
+                     (astatus (alist-get 'status agent))
+                     (dur-str (if (and (equal astatus "done") adur)
+                                  (format " %s" (claude-gravity--format-duration adur))
+                                "")))
+                (format "  %s %s (%s)%s"
+                        (propertize "→" 'face 'claude-gravity-detail-label)
+                        (propertize (or atype "?") 'face 'claude-gravity-tool-name)
+                        (propertize short-id 'face 'claude-gravity-detail-label)
+                        dur-str))
+            "")))
     (let ((section-start (point)))
       (magit-insert-section (tool item t)
         (magit-insert-heading
-          (format "%s%s %s  %s%s"
+          (format "%s%s %s  %s%s%s"
                   (claude-gravity--indent)
                   indicator
                   tool-face
                   summary
-                  (if desc (format "  (%s)" desc) "")))
+                  (if desc (format "  (%s)" desc) "")
+                  agent-suffix))
         ;; Show permission-format signature in detail
         (let ((sig (claude-gravity--tool-signature name input)))
           (claude-gravity--insert-wrapped sig nil 'claude-gravity-tool-signature))
-        (claude-gravity--insert-tool-detail name input result))
+        (claude-gravity--insert-tool-detail name input result)
+        ;; Agent detail (transcript, model, etc.) in expanded view
+        (when agent
+          (let ((tp (alist-get 'transcript_path agent))
+                (parsed (alist-get 'transcript_parsed agent)))
+            (when parsed
+              (let ((prompt (alist-get 'transcript_prompt agent))
+                    (model (alist-get 'transcript_model agent))
+                    (tc (alist-get 'transcript_tool_count agent)))
+                (when (and prompt (not (string-empty-p prompt)))
+                  (claude-gravity--insert-label "Agent task: ")
+                  (claude-gravity--insert-wrapped prompt nil))
+                (when (and model (not (string-empty-p model)))
+                  (claude-gravity--insert-label "Model: ")
+                  (insert model "\n"))
+                (when (and tc (> tc 0))
+                  (claude-gravity--insert-label "Agent tools: ")
+                  (insert (format "%d" tc) "\n"))))
+            (when tp
+              (claude-gravity--insert-label "Transcript: ")
+              (claude-gravity--insert-wrapped tp nil 'claude-gravity-detail-label)))))
       ;; Apply background tint to running tools
       (unless done-p
         (add-face-text-property section-start (point) 'claude-gravity-running-bg)))))
