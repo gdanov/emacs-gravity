@@ -33,7 +33,22 @@
       "Bash(sort:*)",
       "Bash(gh issue view:*)",
       "Bash(npm install:*)",
-      "Bash(npx vitest:*)"
+      "Bash(npx vitest:*)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity status)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity diff claude-gravity.el emacs-bridge/src/index.ts)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity log --oneline -5)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity add claude-gravity.el emacs-bridge/src/index.ts test/claude-gravity-test.el)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity log --oneline -3)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity add claude-gravity.el)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity commit -m \"$\\(cat <<''EOF''\nFix duplicated section headings in magit-section UI\n\nsection-divider was inserting text directly AND magit-insert-heading\nwas inserting the same title, producing doubled headers. Changed\nsection-divider to return a string and pass it to magit-insert-heading.\nFixes Plan, Turns, Files, and Allow Patterns sections.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity commit -m \"$\\(cat <<''EOF''\nAdd tail command, two-line tool headings, and full thinking text\n\n- Add `claude-gravity-tail` \\(bound to `t`\\): collapses all sections\n  and focuses on the tail of the latest turn''s last response cycle\n- Tool items with descriptions now show description as primary heading\n  with tool name and summary on an indented second line\n- Remove 300-char truncation from assistant thinking text\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity diff --staged)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity commit -m \"$\\(cat <<''EOF''\nAdd color hierarchy to session buffer UI\n\nColored faces for visual distinction: purple \\(#d0a0ff\\) for thinking,\nwarm orange \\(#ffbb66\\) for final replies, sage green \\(#88cc88\\) for tool\ndescriptions, gray45 for tool signatures. Disable font-lock-mode to\nprevent face stripping. Propertize turn headings \\(prompt, counts, elapsed\\).\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity add .claude/settings.local.json plan.md)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity commit -m \"$\\(cat <<''EOF''\nUpdate local settings and color hierarchy plan notes\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ],
+    "additionalDirectories": [
+      "/Users/gdanov/.emacs.d"
     ]
   }
 }
