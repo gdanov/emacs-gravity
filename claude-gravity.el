@@ -659,19 +659,18 @@ Optional PID is the Claude Code process ID."
 ;;; Divider helpers
 
 (defun claude-gravity--section-divider (title)
-  "Insert a section divider line with TITLE embedded.
-Produces: ── Title ──────────────────────"
+  "Return a section divider string with TITLE embedded.
+Produces: ── Title ──────────────────────
+Use as the argument to `magit-insert-heading'."
   (let* ((prefix "── ")
          (suffix " ")
-         (label (concat prefix (propertize title 'face 'claude-gravity-section-heading) suffix))
          (label-len (+ (length prefix) (length title) (length suffix)))
          (width (max 40 (- (or (window-width) 80) 2)))
          (remaining (max 3 (- width label-len)))
          (line (make-string remaining ?─)))
-    (insert (propertize prefix 'face 'claude-gravity-divider)
+    (concat (propertize prefix 'face 'claude-gravity-divider)
             (propertize title 'face 'claude-gravity-section-heading)
-            (propertize (concat suffix line) 'face 'claude-gravity-divider)
-            "\n")))
+            (propertize (concat suffix line) 'face 'claude-gravity-divider))))
 
 (defun claude-gravity--turn-separator ()
   "Insert a thin dashed separator between turns."
@@ -990,9 +989,8 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
              (all-lines (split-string content "\n" t "[ \t]"))
              (truncated (> (length all-lines) (length preview-lines))))
         (magit-insert-section (plan nil t)
-          (claude-gravity--section-divider "Plan")
           (magit-insert-heading
-            (propertize "Plan" 'face 'claude-gravity-section-heading))
+            (claude-gravity--section-divider "Plan"))
           (claude-gravity--insert-wrapped
            (string-join preview-lines "\n") nil)
           (when truncated
@@ -1234,9 +1232,8 @@ Each turn groups its prompt, tools, agents, and tasks together."
     ;; Only render if there is any content
     (when (> max-turn 0)
       (magit-insert-section (turns nil t)
-        (claude-gravity--section-divider (format "Turns (%d)" current-turn))
         (magit-insert-heading
-          (format "Turns (%d)" current-turn))
+          (claude-gravity--section-divider (format "Turns (%d)" current-turn)))
         ;; Turn 0: pre-prompt activity
         (let ((t0-tools (gethash 0 tool-groups))
               (t0-agents (gethash 0 agent-groups))
@@ -1588,9 +1585,8 @@ the message under `message` with `role`, `content`, and `model`."
                               (lambda (a b)
                                 (time-less-p (nth 2 b) (nth 2 a)))))
         (magit-insert-section (files nil t)
-          (claude-gravity--section-divider (format "Files (%d)" (length file-list)))
           (magit-insert-heading
-            (format "Files (%d)" (length file-list)))
+            (claude-gravity--section-divider (format "Files (%d)" (length file-list))))
           (dolist (entry file-list)
             (let* ((path (nth 0 entry))
                    (ops (nth 1 entry))
@@ -1610,9 +1606,8 @@ the message under `message` with `role`, `content`, and `model`."
   (let ((patterns (plist-get session :allow-patterns)))
     (when patterns
       (magit-insert-section (allow-patterns nil t)
-        (claude-gravity--section-divider (format "Allow Patterns (%d)" (length patterns)))
         (magit-insert-heading
-          (format "Allow Patterns (%d)" (length patterns)))
+          (claude-gravity--section-divider (format "Allow Patterns (%d)" (length patterns))))
         (dolist (pat patterns)
           (magit-insert-section (allow-pattern pat)
             (insert (format "%s%s\n" (claude-gravity--indent) (propertize pat 'face 'claude-gravity-detail-label)))))
