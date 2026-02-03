@@ -1073,7 +1073,7 @@ Called before each tool item in the rendering loop."
         (atext (alist-get 'assistant_text item)))
     (when (and athink (not (string-empty-p athink)))
       (claude-gravity--insert-wrapped-with-margin
-       (claude-gravity--truncate athink 300) nil 'claude-gravity-thinking))
+       athink nil 'claude-gravity-thinking))
     (when (and atext (not (string-empty-p atext)))
       (claude-gravity--insert-wrapped-with-margin atext nil 'claude-gravity-assistant-text))))
 
@@ -1306,7 +1306,7 @@ Each turn groups its prompt, tools, agents, and tasks together."
                       (stop-text (and (listp prompt-entry) (alist-get 'stop_text prompt-entry))))
                   (when (and stop-think (not (string-empty-p stop-think)))
                     (claude-gravity--insert-wrapped-with-margin
-                     (claude-gravity--truncate stop-think 300) nil 'claude-gravity-thinking))
+                     stop-think nil 'claude-gravity-thinking))
                   (when (and stop-text (not (string-empty-p stop-text)))
                     (claude-gravity--insert-wrapped-with-margin stop-text nil 'claude-gravity-assistant-text))))))))
         (insert "\n")))))
@@ -1353,13 +1353,21 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
     (let ((section-start (point)))
       (magit-insert-section (tool item t)
         (magit-insert-heading
-          (format "%s%s %s  %s%s%s"
-                  (claude-gravity--indent)
-                  indicator
-                  tool-face
-                  summary
-                  (if desc (format "  (%s)" desc) "")
-                  agent-suffix))
+          (if desc
+              (format "%s%s %s%s\n%s%s %s"
+                      (claude-gravity--indent)
+                      indicator
+                      (propertize desc 'face 'claude-gravity-detail-label)
+                      agent-suffix
+                      (claude-gravity--indent 2)
+                      tool-face
+                      summary)
+            (format "%s%s %s  %s%s"
+                    (claude-gravity--indent)
+                    indicator
+                    tool-face
+                    summary
+                    agent-suffix)))
         ;; Show permission-format signature in detail
         (let ((sig (claude-gravity--tool-signature name input)))
           (claude-gravity--insert-wrapped sig nil 'claude-gravity-tool-signature))
@@ -1759,6 +1767,7 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "A") 'claude-gravity-add-allow-pattern)
 (define-key claude-gravity-mode-map (kbd "a") 'claude-gravity-add-allow-pattern-to-settings)
 (define-key claude-gravity-mode-map (kbd "F") 'claude-gravity-open-plan-file)
+(define-key claude-gravity-mode-map (kbd "t") 'claude-gravity-tail)
 
 (define-derived-mode claude-gravity-mode magit-section-mode "ClaudeGravity"
   "Major mode for Claude Code Gravity overview.
@@ -1907,6 +1916,7 @@ Returns a list from most specific to most general, with nils removed."
   ["Actions"
    ("c" "Comment" claude-gravity-comment-at-point)
    ("g" "Refresh" claude-gravity-refresh)
+   ("t" "Tail" claude-gravity-tail)
    ("P" "Show Plan" claude-gravity-show-plan)
    ("F" "Open plan file" claude-gravity-open-plan-file)
    ("T" "Parse agent transcript" claude-gravity-view-agent-transcript)
@@ -2004,10 +2014,43 @@ Checks PID liveness when available, falls back to last-event-time staleness."
           (message "Deleted session %s" (claude-gravity--session-short-id sid))
           (claude-gravity--render-overview))))))
 
-(defun claude-gravity-next-step ()
-  "Mock action: Tell Claude to proceed to next step."
+(defun claude-gravity-tail ()
+  "Collapse all sections and focus on the tail of the latest turn.
+Hides Plan, Files, Allow Patterns, and past turns, then expands
+the most recent turn and scrolls to its last response cycle or
+final reply text."
   (interactive)
-  (message "Sending 'Next Step' command to Claude..."))
+  (when magit-root-section
+    ;; Collapse all top-level sections
+    (dolist (child (oref magit-root-section children))
+      (magit-section-hide child))
+    ;; Find and expand the turns section
+    (let ((turns-section nil)
+          (last-turn nil))
+      (dolist (child (oref magit-root-section children))
+        (when (eq (oref child type) 'turns)
+          (setq turns-section child)))
+      (when turns-section
+        (magit-section-show turns-section)
+        ;; Hide all turns, keep track of the last one
+        (dolist (child (oref turns-section children))
+          (when (eq (oref child type) 'turn)
+            (magit-section-hide child)
+            (setq last-turn child)))
+        (when last-turn
+          (magit-section-show last-turn)
+          ;; Collapse earlier response cycles, show the last one
+          (let ((last-cycle nil))
+            (dolist (child (oref last-turn children))
+              (when (eq (oref child type) 'response-cycle)
+                (magit-section-hide child)
+                (setq last-cycle child)))
+            (when last-cycle
+              (magit-section-show last-cycle)))
+          ;; Jump to the end of the turn content, then recenter
+          ;; so the latest activity is visible at bottom of window
+          (goto-char (1- (oref last-turn end)))
+          (recenter -3))))))
 
 ;;;###autoload
 (defun claude-gravity-status ()
