@@ -121,7 +121,8 @@ Each session plist has keys:
                            :agents []
                            :files (make-hash-table :test 'equal)
                            :tasks (make-hash-table :test 'equal)
-                           :current-turn 0)))
+                           :current-turn 0
+                           :permission-mode nil)))
         (puthash session-id session claude-gravity--sessions)
         (claude-gravity--load-allow-patterns session)
         session)))
@@ -139,6 +140,7 @@ Called when a session is restarted (e.g. via /reset or /clear)."
   (plist-put session :files (make-hash-table :test 'equal))
   (plist-put session :tasks (make-hash-table :test 'equal))
   (plist-put session :current-turn 0)
+  (plist-put session :permission-mode nil)
   (plist-put session :status 'active)
   (claude-gravity--load-allow-patterns session)
   (message "Claude Gravity: session %s reset" (plist-get session :session-id))
@@ -318,6 +320,29 @@ Stores the patterns list on SESSION's :allow-patterns property."
     idx))
 
 ;;; Event handling
+;;
+;; Turn demarcation
+;; ----------------
+;; A "turn" groups a prompt with its resulting tools, agents, and tasks.
+;; Turns are advanced (current-turn incremented + prompt entry created) by:
+;;
+;;   1. UserPromptSubmit — user sends a new prompt
+;;   2. ExitPlanMode (PostToolUse) — user approves a plan, creating a
+;;      "[Plan approved]" phase-boundary prompt.  Tools after approval
+;;      belong to the new execution turn.
+;;   3. AskUserQuestion (PreToolUse) — question is shown to user, creating
+;;      a question prompt.  The answer and subsequent tools belong to
+;;      the question's turn.
+;;
+;; Each tool, agent, and task captures the current turn number at creation
+;; time.  The renderer groups items by turn and shows distinct indicators:
+;;   >  normal prompt
+;;   ?  question (AskUserQuestion)
+;;   →  phase boundary (ExitPlanMode)
+;;
+;; permission_mode (from Claude Code hook payloads) is stored on tool
+;; entries and the session for display purposes but is NOT used as a
+;; turn boundary signal.
 
 (defun claude-gravity-handle-event (event session-id cwd data &optional pid)
   "Handle EVENT for SESSION-ID (with CWD) carrying DATA.
@@ -421,9 +446,11 @@ Optional PID is the Claude Code process ID."
                           (cons 'status "running")
                           (cons 'timestamp (current-time))
                           (cons 'turn (or (plist-get session :current-turn) 0))
+                          (cons 'permission_mode (alist-get 'permission_mode data))
                           (cons 'assistant_text (alist-get 'assistant_text data))
                           (cons 'assistant_thinking (alist-get 'assistant_thinking data)))))
        (setf (alist-get 'tools state) (vconcat tools (vector new-tool)))
+       (plist-put session :permission-mode (alist-get 'permission_mode data))
        (plist-put session :claude-status 'responding)
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
        (claude-gravity--track-task session "PreToolUse" (alist-get 'tool_name data)
@@ -443,7 +470,10 @@ Optional PID is the Claude Code process ID."
                                 (cons 'elapsed nil)
                                 (cons 'answer nil))))
                (plist-put session :prompts
-                          (vconcat (plist-get session :prompts) (vector entry)))))))))
+                          (vconcat (plist-get session :prompts) (vector entry)))
+               ;; Advance turn — question is a phase boundary
+               (plist-put session :current-turn
+                          (1+ (or (plist-get session :current-turn) 0)))))))))
 
     ("PostToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -487,7 +517,16 @@ Optional PID is the Claude Code process ID."
              (when plan-content
                (plist-put session :plan (list :content plan-content
                                               :file-path file-path
-                                              :allowed-prompts (append allowed-prompts nil)))))))))
+                                              :allowed-prompts (append allowed-prompts nil)))))
+           ;; Advance turn — plan approval is a phase boundary
+           (let ((entry (list (cons 'text "[Plan approved]")
+                              (cons 'type 'phase-boundary)
+                              (cons 'submitted (current-time))
+                              (cons 'elapsed nil))))
+             (plist-put session :prompts
+                        (vconcat (plist-get session :prompts) (vector entry)))
+             (plist-put session :current-turn
+                        (1+ (or (plist-get session :current-turn) 0))))))))
 
     ("Notification"
      (let* ((session (claude-gravity--get-session session-id))
@@ -1119,9 +1158,14 @@ Tools are grouped into response cycles (each assistant message + its tool calls)
                 (format "%s%s"
                         (claude-gravity--indent)
                         (propertize (concat "┊ " heading) 'face 'claude-gravity-assistant-text)))
-              ;; Insert each tool (context only for first tool since heading covers it)
-              (dolist (item cycle)
-                (claude-gravity--insert-tool-item item agent-lookup)))
+              ;; Insert each tool with preceding assistant context
+              (let ((first-in-cycle t))
+                (dolist (item cycle)
+                  ;; Skip context for first tool — heading already shows it
+                  (unless first-in-cycle
+                    (claude-gravity--insert-tool-context item))
+                  (setq first-in-cycle nil)
+                  (claude-gravity--insert-tool-item item agent-lookup))))
             ;; Separator between cycles (not after the last)
             (unless is-last
               (claude-gravity--turn-separator)))
@@ -1217,12 +1261,17 @@ Each turn groups its prompt, tools, agents, and tasks together."
                                 (claude-gravity--prompt-text prompt-entry)))
                  (is-question (when (listp prompt-entry)
                                 (eq (alist-get 'type prompt-entry) 'question)))
+                 (is-phase-boundary (when (listp prompt-entry)
+                                      (eq (alist-get 'type prompt-entry) 'phase-boundary)))
                  (elapsed (when (listp prompt-entry)
                             (alist-get 'elapsed prompt-entry)))
                  (elapsed-str (claude-gravity--format-elapsed elapsed))
-                 (indicator (if is-question
-                                (propertize "?" 'face 'claude-gravity-question)
-                              (propertize ">" 'face 'claude-gravity-prompt)))
+                 (indicator (cond (is-phase-boundary
+                                   (propertize "→" 'face 'claude-gravity-detail-label))
+                                  (is-question
+                                   (propertize "?" 'face 'claude-gravity-question))
+                                  (t
+                                   (propertize ">" 'face 'claude-gravity-prompt))))
                  (counts (claude-gravity--turn-counts turn-tools turn-agents turn-tasks))
                  (answer (when is-question (alist-get 'answer prompt-entry)))
                  (answer-suffix (if answer

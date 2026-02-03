@@ -51,8 +51,9 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pi
   });
 }
 
-// Read the tail of a file (last maxBytes), skipping any partial first line
-function readTail(filePath: string, maxBytes: number): string {
+// Read the tail of a file (last maxBytes), skipping any partial first line.
+// If the file is smaller than maxBytes, reads the whole file.
+export function readTail(filePath: string, maxBytes: number): string {
   const stat = statSync(filePath);
   const size = stat.size;
   if (size <= maxBytes) {
@@ -67,16 +68,17 @@ function readTail(filePath: string, maxBytes: number): string {
   return firstNewline >= 0 ? text.substring(firstNewline + 1) : text;
 }
 
-// Extract assistant text and thinking that precede a tool_use with the given ID.
-// Returns { text, thinking } where either may be empty.
-function extractPrecedingContent(transcriptPath: string, toolUseId: string): { text: string; thinking: string } {
+// Extract assistant text and thinking that precede a tool_use.
+// The tool_use may not be in the transcript yet (PreToolUse fires before transcript write),
+// so we fall back to reading the most recent assistant text/thinking from the end.
+export function extractPrecedingContent(transcriptPath: string, toolUseId: string): { text: string; thinking: string } {
   const result = { text: "", thinking: "" };
   try {
-    const content = readTail(transcriptPath, 2 * 1024 * 1024);
+    const content = readTail(transcriptPath, 10 * 1024 * 1024);
     const lines = content.split("\n").filter((l) => l.length > 0);
 
-    // Find the tool_use line matching toolUseId, searching from end
-    let toolIdx = -1;
+    // Try to find the tool_use line matching toolUseId (may exist if transcript is pre-written)
+    let startIdx = -1;
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(lines[i]);
@@ -84,24 +86,32 @@ function extractPrecedingContent(transcriptPath: string, toolUseId: string): { t
         const c = obj.message?.content;
         if (!Array.isArray(c) || c.length === 0) continue;
         if (c[0].type === "tool_use" && c[0].id === toolUseId) {
-          toolIdx = i;
+          startIdx = i;
           break;
         }
       } catch {
         continue;
       }
     }
-    if (toolIdx < 0) return result;
 
-    // Walk backwards from toolIdx collecting text and thinking blocks
-    for (let i = toolIdx - 1; i >= 0; i--) {
+    // If tool_use not found (common: PreToolUse fires before transcript write),
+    // start from the end of the transcript
+    if (startIdx < 0) {
+      startIdx = lines.length;
+    }
+
+    // Walk backwards collecting the most recent text and thinking blocks
+    for (let i = startIdx - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(lines[i]);
-        if (obj.type !== "assistant") continue;
+        // Skip non-message entries (progress, file-history-snapshot, summary, etc.)
+        if (obj.type !== "assistant" && obj.type !== "user") continue;
+        if (obj.type === "user") break; // hit user message — stop
         const c = obj.message?.content;
         if (!Array.isArray(c) || c.length === 0) continue;
         const blockType = c[0].type;
-        if (blockType === "tool_use") continue; // parallel sibling, skip
+        if (blockType === "tool_use") continue; // parallel sibling or preceding tool, skip
+        if (blockType === "tool_result") break; // hit a tool result — stop
         if (blockType === "text" && !result.text) {
           const text = c[0].text || "";
           if (text && text !== "(no content)") {
@@ -128,20 +138,39 @@ function extractPrecedingContent(transcriptPath: string, toolUseId: string): { t
 
 // Extract trailing assistant text/thinking after the last tool interaction.
 // Called on Stop events to capture the conclusion text.
-function extractTrailingText(transcriptPath: string): { text: string; thinking: string } {
+export function extractTrailingText(transcriptPath: string): { text: string; thinking: string } {
   const result = { text: "", thinking: "" };
   try {
-    const content = readTail(transcriptPath, 2 * 1024 * 1024);
+    const content = readTail(transcriptPath, 10 * 1024 * 1024);
     const lines = content.split("\n").filter((l) => l.length > 0);
 
+    // Diagnostic: log the last N transcript entries so we can verify what
+    // the file actually contains when the Stop hook fires.
+    const diagCount = Math.min(10, lines.length);
+    const diagLines: string[] = [];
+    for (let i = lines.length - diagCount; i < lines.length; i++) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        const t = obj.type || "?";
+        const c = obj.message?.content;
+        const block0 = Array.isArray(c) && c.length > 0 ? c[0].type : "-";
+        const preview = block0 === "text" ? (c[0].text || "").substring(0, 60) : "";
+        diagLines.push(`[${i}] ${t}/${block0} ${preview}`);
+      } catch {
+        diagLines.push(`[${i}] (parse error)`);
+      }
+    }
+    log(`extractTrailingText: ${lines.length} lines, tail:\n  ${diagLines.join("\n  ")}`);
+
     const textParts: string[] = [];
+    let stopReason = "exhausted";
     // Walk backwards from end, collecting trailing assistant text/thinking
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(lines[i]);
         // Skip non-message entries (progress, system, summary, etc.)
         if (obj.type !== "assistant" && obj.type !== "user") continue;
-        if (obj.type === "user") break; // hit user/tool_result — stop
+        if (obj.type === "user") { stopReason = `user@${i}`; break; }
         const c = obj.message?.content;
         if (!Array.isArray(c) || c.length === 0) continue;
         const blockType = c[0].type;
@@ -154,15 +183,18 @@ function extractTrailingText(transcriptPath: string): { text: string; thinking: 
         }
         if (blockType === "thinking") {
           result.thinking = c[0].thinking || "";
+          stopReason = `thinking@${i}`;
           break; // thinking is always first
         }
         // tool_use or other — we've gone past the trailing text
+        stopReason = `${blockType}@${i}`;
         break;
       } catch {
         continue;
       }
     }
     result.text = textParts.join("\n\n");
+    log(`extractTrailingText result: ${result.text.length} chars text, ${result.thinking.length} chars thinking, stop=${stopReason}, parts=${textParts.length}`);
     return result;
   } catch (e) {
     log(`extractTrailingText error: ${e}`);
@@ -215,12 +247,24 @@ async function main() {
       }
     }
 
-    // Enrich Stop with trailing assistant text from transcript
+    // Enrich Stop with trailing assistant text from transcript.
+    // The Stop hook often fires before the final assistant text is flushed
+    // to the transcript file (race condition), so we retry with a short
+    // delay when the initial read finds nothing.
     if (eventName === "Stop") {
       const transcriptPath = (inputData as any).transcript_path;
       if (transcriptPath) {
         try {
-          const { text, thinking } = extractTrailingText(transcriptPath);
+          let { text, thinking } = extractTrailingText(transcriptPath);
+          if (!text && !thinking) {
+            const maxRetries = 3;
+            const delayMs = 150;
+            for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
+              await new Promise(r => setTimeout(r, delayMs));
+              ({ text, thinking } = extractTrailingText(transcriptPath));
+              log(`Stop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`);
+            }
+          }
           if (text) {
             (inputData as any).stop_text = text;
             log(`Extracted trailing text (${text.length} chars)`);
@@ -247,4 +291,6 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}

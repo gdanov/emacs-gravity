@@ -24,7 +24,16 @@
       "Bash(git -C /Users/gdanov/work/playground/emacs-gravity/emacs-bridge diff)",
       "Bash(git -C /Users/gdanov/work/playground/emacs-gravity/emacs-bridge log --oneline -3)",
       "WebSearch",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "Bash(git stash:*)",
+      "Bash(claude --print:*)",
+      "Bash(git status:*)",
+      "Bash(node:*)",
+      "Bash(npx tsx:*)",
+      "Bash(sort:*)",
+      "Bash(gh issue view:*)",
+      "Bash(npm install:*)",
+      "Bash(npx vitest:*)"
     ]
   }
 }
