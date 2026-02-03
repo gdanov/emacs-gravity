@@ -616,17 +616,22 @@ Optional PID is the Claude Code process ID."
   :group 'claude-gravity)
 
 (defface claude-gravity-tool-signature
-  '((t :foreground "gray50" :slant italic))
+  '((t :foreground "gray45" :slant italic))
   "Face for tool permission signature text."
   :group 'claude-gravity)
 
+(defface claude-gravity-tool-description
+  '((t :foreground "#88cc88"))
+  "Face for tool description text (the human-readable intent)."
+  :group 'claude-gravity)
+
 (defface claude-gravity-assistant-text
-  '((t :foreground "gray70" :slant italic))
+  '((t :foreground "#ffbb66"))
   "Face for assistant monologue text between tool calls."
   :group 'claude-gravity)
 
 (defface claude-gravity-thinking
-  '((t :foreground "gray50" :slant italic))
+  '((t :foreground "#d0a0ff" :slant italic))
   "Face for assistant extended thinking text."
   :group 'claude-gravity)
 
@@ -1075,7 +1080,7 @@ Called before each tool item in the rendering loop."
       (claude-gravity--insert-wrapped-with-margin
        athink nil 'claude-gravity-thinking))
     (when (and atext (not (string-empty-p atext)))
-      (claude-gravity--insert-wrapped-with-margin atext nil 'claude-gravity-assistant-text))))
+      (claude-gravity--insert-wrapped-with-margin atext nil 'claude-gravity-thinking))))
 
 (defun claude-gravity--group-response-cycles (tools)
   "Group TOOLS into response cycles based on assistant text boundaries.
@@ -1119,8 +1124,8 @@ Multiple agents with the same turn+type are returned in order."
         (car agents)))))
 
 (defun claude-gravity--response-cycle-heading (cycle)
-  "Return a short heading string for a response CYCLE (list of tools).
-Uses the first tool's assistant_text, truncated to 60 chars."
+  "Return (TEXT . FACE) for a response CYCLE heading.
+Uses the first tool's assistant_text or assistant_thinking."
   (let* ((first-tool (car cycle))
          (atext (alist-get 'assistant_text first-tool))
          (athink (alist-get 'assistant_thinking first-tool))
@@ -1128,8 +1133,9 @@ Uses the first tool's assistant_text, truncated to 60 chars."
     (if (and text (not (string-empty-p text)))
         (let* ((first-line (car (split-string text "\n" t)))
                (trimmed (string-trim first-line)))
-          (claude-gravity--truncate trimmed 70))
-      (format "%d tool%s" (length cycle) (if (= (length cycle) 1) "" "s")))))
+          (cons (claude-gravity--truncate trimmed 70) 'claude-gravity-thinking))
+      (cons (format "%d tool%s" (length cycle) (if (= (length cycle) 1) "" "s"))
+            'claude-gravity-detail-label))))
 
 (defun claude-gravity--insert-turn-children (tools agents tasks)
   "Insert response cycles, inline agent annotations, and tasks for a turn.
@@ -1149,13 +1155,15 @@ Tools are grouped into response cycles (each assistant message + its tool calls)
           (let* ((is-last (= cycle-idx (1- n-cycles)))
                  (all-done (cl-every (lambda (item) (equal (alist-get 'status item) "done")) cycle))
                  (should-collapse (and (not is-last) all-done))
-                 (heading (claude-gravity--response-cycle-heading cycle)))
+                 (heading-pair (claude-gravity--response-cycle-heading cycle))
+                 (heading (car heading-pair))
+                 (heading-face (cdr heading-pair)))
             ;; Response cycle as a collapsible section
             (magit-insert-section (response-cycle cycle-idx should-collapse)
               (magit-insert-heading
                 (format "%s%s"
                         (claude-gravity--indent)
-                        (propertize (concat "┊ " heading) 'face 'claude-gravity-assistant-text)))
+                        (propertize (concat "┊ " heading) 'face heading-face)))
               ;; Insert each tool with preceding assistant context
               (let ((first-in-cycle t))
                 (dolist (item cycle)
@@ -1274,9 +1282,14 @@ Each turn groups its prompt, tools, agents, and tasks together."
                  (answer-suffix (if answer
                                     (format "  → %s" (claude-gravity--truncate answer 40))
                                   ""))
+                 (prompt-face (cond (is-phase-boundary 'claude-gravity-detail-label)
+                                    (is-question 'claude-gravity-question)
+                                    (t 'claude-gravity-prompt)))
                  (_heading-parts (list indicator
-                                       (claude-gravity--truncate (or prompt-text "(no prompt)") 60)
-                                       answer-suffix counts
+                                       (propertize (claude-gravity--truncate (or prompt-text "(no prompt)") 60)
+                                                   'face prompt-face)
+                                       (propertize answer-suffix 'face 'claude-gravity-detail-label)
+                                       (propertize counts 'face 'claude-gravity-detail-label)
                                        (propertize elapsed-str 'face 'claude-gravity-detail-label))))
             (when (or turn-tools turn-agents turn-tasks prompt-entry)
               ;; Turn separator between turns
@@ -1357,16 +1370,16 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
               (format "%s%s %s%s\n%s%s %s"
                       (claude-gravity--indent)
                       indicator
-                      (propertize desc 'face 'claude-gravity-detail-label)
+                      (propertize desc 'face 'claude-gravity-tool-description)
                       agent-suffix
                       (claude-gravity--indent 2)
-                      tool-face
-                      summary)
+                      (propertize (or name "?") 'face 'claude-gravity-tool-signature)
+                      (propertize summary 'face 'claude-gravity-tool-signature))
             (format "%s%s %s  %s%s"
                     (claude-gravity--indent)
                     indicator
                     tool-face
-                    summary
+                    (propertize summary 'face 'claude-gravity-detail-label)
                     agent-suffix)))
         ;; Show permission-format signature in detail
         (let ((sig (claude-gravity--tool-signature name input)))
@@ -1773,6 +1786,7 @@ overlays.  Since we render from timers, we must apply them manually."
   "Major mode for Claude Code Gravity overview.
 
 \\{claude-gravity-mode-map}"
+  (font-lock-mode -1)
   (visual-line-mode 1))
 
 (define-key claude-gravity-mode-map (kbd "T") 'claude-gravity-view-agent-transcript)
