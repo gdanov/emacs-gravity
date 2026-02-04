@@ -1,6 +1,6 @@
 import { createConnection } from "net";
-import { readFileSync, appendFileSync, statSync, openSync, readSync, closeSync } from "fs";
-import { join } from "path";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, statSync, openSync, readSync, closeSync } from "fs";
+import { join, dirname, basename } from "path";
 
 // Debug logging
 function log(msg: string) {
@@ -225,6 +225,120 @@ function extractSlug(transcriptPath: string): string | null {
   return null;
 }
 
+// --- Active Agent List ---
+// Tracks which agents are currently running per session.
+// Persisted to {cwd}/.claude/emacs-bridge-agents.json so each
+// one-shot bridge invocation can read the current state.
+
+type AgentState = { [sessionId: string]: string[] };
+
+function getAgentStatePath(cwd: string): string {
+  return join(cwd, ".claude", "emacs-bridge-agents.json");
+}
+
+function readAgentState(cwd: string): AgentState {
+  try {
+    const p = getAgentStatePath(cwd);
+    if (existsSync(p)) {
+      return JSON.parse(readFileSync(p, "utf-8"));
+    }
+  } catch (e) {
+    log(`readAgentState error: ${e}`);
+  }
+  return {};
+}
+
+function writeAgentState(cwd: string, state: AgentState): void {
+  try {
+    const p = getAgentStatePath(cwd);
+    const dir = dirname(p);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(p, JSON.stringify(state), "utf-8");
+  } catch (e) {
+    log(`writeAgentState error: ${e}`);
+  }
+}
+
+function agentTranscriptPath(transcriptPath: string, sessionId: string, agentId: string): string {
+  const transcriptDir = dirname(transcriptPath);
+  const sessionBase = basename(transcriptPath, ".jsonl");
+  return join(transcriptDir, sessionBase, "subagents", `agent-${agentId}.jsonl`);
+}
+
+// Search an agent transcript for a specific tool_use_id.
+// Returns true if the tool_use_id is found in the transcript.
+function transcriptHasToolUseId(agentTranscript: string, toolUseId: string): boolean {
+  try {
+    if (!existsSync(agentTranscript)) return false;
+    const content = readTail(agentTranscript, 5 * 1024 * 1024);
+    const lines = content.split("\n").filter((l) => l.length > 0);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        if (obj.type !== "assistant") continue;
+        const c = obj.message?.content;
+        if (!Array.isArray(c)) continue;
+        for (const block of c) {
+          if (block.type === "tool_use" && block.id === toolUseId) return true;
+        }
+      } catch { continue; }
+    }
+  } catch (e) {
+    log(`transcriptHasToolUseId error: ${e}`);
+  }
+  return false;
+}
+
+// Extract all tool_use IDs from an agent transcript.
+// Called on SubagentStop for definitive attribution fix-up.
+function extractAgentToolIds(agentTranscript: string): string[] {
+  const ids: string[] = [];
+  try {
+    if (!existsSync(agentTranscript)) return ids;
+    const content = readFileSync(agentTranscript, "utf-8");
+    const lines = content.split("\n").filter((l) => l.length > 0);
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj.type !== "assistant") continue;
+        const c = obj.message?.content;
+        if (!Array.isArray(c)) continue;
+        for (const block of c) {
+          if (block.type === "tool_use" && block.id) ids.push(block.id);
+        }
+      } catch { continue; }
+    }
+  } catch (e) {
+    log(`extractAgentToolIds error: ${e}`);
+  }
+  return ids;
+}
+
+// Attribute a tool event to a specific agent.
+// Returns the agent_id or "ambiguous" or null (root tool).
+function attributeToolToAgent(
+  sessionId: string, cwd: string, transcriptPath: string | undefined,
+  toolUseId: string, activeAgents: string[]
+): { parentAgentId: string | null; candidateAgentIds?: string[] } {
+  if (activeAgents.length === 0) return { parentAgentId: null };
+  if (activeAgents.length === 1) return { parentAgentId: activeAgents[0] };
+
+  // Multiple active agents — scan transcripts
+  if (transcriptPath && toolUseId) {
+    for (const agentId of activeAgents) {
+      const atp = agentTranscriptPath(transcriptPath, sessionId, agentId);
+      if (transcriptHasToolUseId(atp, toolUseId)) {
+        log(`Attributed tool ${toolUseId} to agent ${agentId} via transcript lookup`);
+        return { parentAgentId: agentId };
+      }
+    }
+  }
+
+  // Transcript lookup failed (race condition) — mark ambiguous
+  log(`Tool ${toolUseId} ambiguous among ${activeAgents.length} agents`);
+  return { parentAgentId: "ambiguous", candidateAgentIds: [...activeAgents] };
+}
+
 async function main() {
   log(`Process started: ${process.argv.join(" ")}`);
   try {
@@ -259,12 +373,93 @@ async function main() {
       }
     }
 
-    // Enrich PreToolUse with assistant monologue text and thinking from transcript
+    // --- Agent tracking ---
+    // SubagentStart: add agent to active list
+    if (eventName === "SubagentStart") {
+      const agentId = (inputData as any).agent_id;
+      if (agentId && cwd) {
+        const state = readAgentState(cwd);
+        if (!state[sessionId]) state[sessionId] = [];
+        if (!state[sessionId].includes(agentId)) {
+          state[sessionId].push(agentId);
+        }
+        writeAgentState(cwd, state);
+        log(`Agent ${agentId} started, active list: ${state[sessionId].join(", ")}`);
+        // Inject agent transcript path
+        if (transcriptPath) {
+          (inputData as any).agent_transcript_path = agentTranscriptPath(transcriptPath, sessionId, agentId);
+        }
+      }
+    }
+
+    // SubagentStop: remove agent from active list, extract all tool IDs for fix-up
+    if (eventName === "SubagentStop") {
+      const agentId = (inputData as any).agent_id;
+      if (agentId && cwd) {
+        const state = readAgentState(cwd);
+        if (state[sessionId]) {
+          state[sessionId] = state[sessionId].filter((id: string) => id !== agentId);
+          if (state[sessionId].length === 0) delete state[sessionId];
+        }
+        writeAgentState(cwd, state);
+        log(`Agent ${agentId} stopped, active list: ${state[sessionId]?.join(", ") || "(empty)"}`);
+        // Extract all tool_use IDs from agent transcript for definitive fix-up
+        if (transcriptPath) {
+          const atp = agentTranscriptPath(transcriptPath, sessionId, agentId);
+          const toolIds = extractAgentToolIds(atp);
+          if (toolIds.length > 0) {
+            (inputData as any).agent_tool_ids = toolIds;
+            log(`Agent ${agentId} had ${toolIds.length} tool calls`);
+          }
+          (inputData as any).agent_transcript_path = atp;
+        }
+      }
+    }
+
+    // SessionEnd: clean up agent state for this session
+    if (eventName === "SessionEnd") {
+      if (cwd) {
+        const state = readAgentState(cwd);
+        if (state[sessionId]) {
+          delete state[sessionId];
+          writeAgentState(cwd, state);
+          log(`Cleaned up agent state for session ${sessionId}`);
+        }
+      }
+    }
+
+    // Tool-to-agent attribution for PreToolUse/PostToolUse
+    if (eventName === "PreToolUse" || eventName === "PostToolUse") {
+      if (cwd) {
+        const state = readAgentState(cwd);
+        const activeAgents = state[sessionId] || [];
+        if (activeAgents.length > 0) {
+          const toolUseId = (inputData as any).tool_use_id || "";
+          const { parentAgentId, candidateAgentIds } = attributeToolToAgent(
+            sessionId, cwd, transcriptPath, toolUseId, activeAgents
+          );
+          if (parentAgentId) {
+            (inputData as any).parent_agent_id = parentAgentId;
+            if (candidateAgentIds) {
+              (inputData as any).candidate_agent_ids = candidateAgentIds;
+            }
+            log(`Tool ${toolUseId} attributed to agent: ${parentAgentId}`);
+          }
+        }
+      }
+    }
+
+    // Enrich PreToolUse with assistant monologue text and thinking from transcript.
+    // For agent tools, read from the agent's transcript instead of the session transcript.
     if (eventName === "PreToolUse") {
       const toolUseId = (inputData as any).tool_use_id;
-      if (transcriptPath && toolUseId) {
+      const parentAgentId = (inputData as any).parent_agent_id;
+      const effectiveTranscript = (parentAgentId && parentAgentId !== "ambiguous" && transcriptPath)
+        ? agentTranscriptPath(transcriptPath, sessionId, parentAgentId)
+        : transcriptPath;
+      if (effectiveTranscript && toolUseId) {
         try {
-          const { text, thinking } = extractPrecedingContent(transcriptPath, toolUseId);
+          const { text, thinking } = extractPrecedingContent(effectiveTranscript, toolUseId);
           if (text) {
             (inputData as any).assistant_text = text;
             log(`Extracted assistant text (${text.length} chars) for ${toolUseId}`);

@@ -334,7 +334,72 @@ Sort order: in_progress → pending → completed
 
 ## 7. Agents (within a turn)
 
-Agents appear as tool items with extra metadata when expanded:
+Agents with live tool data render as **sub-branches** — their tools appear
+nested inside the Task tool item using the same response-cycle format as
+root tools. This provides full visibility into agent thinking and tool use.
+
+### Agent sub-branch — completed (collapsed by default)
+
+```
+    [x] Search for error handling patterns
+      Task(Explore · find error handlers)  → Explore (a8f2)  3.1s
+```
+
+When expanded, the agent's own tool history is shown:
+
+```
+    [x] Search for error handling patterns
+      Task(Explore · find error handlers)  → Explore (a8f2)  3.1s
+
+      ┊ 3 tools
+        [x] Glob  **/*.ts
+        [x] Read  /src/error-handler.ts
+        [x] Grep  catch.*Error
+```
+
+### Agent sub-branch — running (expanded by default)
+
+```
+    [/] Analyze test coverage                      [gold bg]
+      Task(Explore · check coverage)  → Explore (b3d1)
+
+      ┊ Thinking...                                (purple)
+        I need to check the test directory...
+
+      ┊ 2 tools
+        [x] Glob  **/*.test.ts
+        [/] Read  /src/tests/auth.test.ts          [gold bg]
+```
+
+### Agent sub-branch — waiting for tools
+
+```
+    [/] Explore codebase structure                 [gold bg]
+      Task(Explore · explore codebase)  → Explore (c4e2)
+      Agent running...
+```
+
+### Nested agents (agent spawns sub-agent)
+
+```
+    [x] Research authentication patterns
+      Task(general-purpose · research auth)  → general-purpose (d5f3)  45.2s
+
+      ┊ 2 tools
+        [x] Glob  **/*.ts
+        [x] Explore auth implementation
+          Task(Explore · find auth)  → Explore (e6g4)  12.1s
+
+          ┊ 3 tools
+            [x] Grep  authenticate
+            [x] Read  /src/auth/index.ts
+            [x] Read  /src/auth/middleware.ts
+```
+
+### Agent without tool data (legacy/flat view)
+
+When no live tool data is available (agent completed before bridge
+tracking was active), the flat metadata view is shown:
 
 ```
     [x] Search for error handling patterns
@@ -344,13 +409,6 @@ Agents appear as tool items with extra metadata when expanded:
       Model: sonnet
       Agent tools: 12
       Transcript: /tmp/agent-a8f2.json
-```
-
-Running agent:
-
-```
-    [/] Analyze test coverage                      [gold bg]
-      Task(Explore · check coverage)  → Explore (b3d1)
 ```
 
 ---

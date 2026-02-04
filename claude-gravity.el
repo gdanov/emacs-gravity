@@ -324,6 +324,29 @@ Stores the patterns list on SESSION's :allow-patterns property."
         (setq idx i)))
     idx))
 
+(defun claude-gravity--agent-tools-vector (session agent-id)
+  "Return the tools vector for AGENT-ID in SESSION.
+If AGENT-ID is nil, return the root tools vector.
+If the agent is not found, return nil."
+  (if (null agent-id)
+      (alist-get 'tools (plist-get session :state))
+    (let* ((agents (plist-get session :agents))
+           (idx (claude-gravity--find-agent-by-id agents agent-id)))
+      (when idx
+        (alist-get 'agent-tools (aref agents idx))))))
+
+(defun claude-gravity--set-agent-tools-vector (session agent-id new-vec)
+  "Set the tools vector for AGENT-ID in SESSION to NEW-VEC.
+If AGENT-ID is nil, set root tools."
+  (if (null agent-id)
+      (setf (alist-get 'tools (plist-get session :state)) new-vec)
+    (let* ((agents (plist-get session :agents))
+           (idx (claude-gravity--find-agent-by-id agents agent-id)))
+      (when idx
+        (let ((agent (aref agents idx)))
+          (setf (alist-get 'agent-tools agent) new-vec)
+          (aset agents idx agent))))))
+
 ;;; Event handling
 ;;
 ;; Turn demarcation
@@ -430,7 +453,9 @@ Optional PID is the Claude Code process ID."
                              (cons 'type (alist-get 'agent_type data))
                              (cons 'status "running")
                              (cons 'timestamp (current-time))
-                             (cons 'turn (or (plist-get session :current-turn) 0)))))
+                             (cons 'turn (or (plist-get session :current-turn) 0))
+                             (cons 'agent-tools [])
+                             (cons 'transcript_path (alist-get 'agent_transcript_path data)))))
        (plist-put session :agents (vconcat agents (vector new-agent)))))
 
     ("SubagentStop"
@@ -448,12 +473,40 @@ Optional PID is the Claude Code process ID."
            (let ((tp (alist-get 'agent_transcript_path data)))
              (when tp
                (setf (alist-get 'transcript_path agent) tp)))
-           (aset agents idx agent)))))
+           (aset agents idx agent)
+           ;; Fix-up: move ambiguously-attributed tools to this agent
+           (let ((agent-tool-ids (alist-get 'agent_tool_ids data)))
+             (when (and agent-tool-ids (> (length agent-tool-ids) 0))
+               (let* ((root-tools (alist-get 'tools (plist-get session :state)))
+                      (agent-tools (alist-get 'agent-tools agent))
+                      (to-move nil)
+                      (keep nil))
+                 ;; Partition root tools: move matching ones to agent
+                 (dotimes (i (length root-tools))
+                   (let* ((tool (aref root-tools i))
+                          (tid (alist-get 'tool_use_id tool)))
+                     (if (and (alist-get 'ambiguous tool)
+                              tid
+                              (seq-contains-p agent-tool-ids tid #'equal))
+                         (progn
+                           (setf (alist-get 'ambiguous tool) nil)
+                           (push tool to-move))
+                       (push tool keep))))
+                 (when to-move
+                   ;; Update root tools (remove moved ones)
+                   (setf (alist-get 'tools (plist-get session :state))
+                         (vconcat (nreverse keep)))
+                   ;; Add to agent tools
+                   (setf (alist-get 'agent-tools agent)
+                         (vconcat agent-tools (vconcat (nreverse to-move))))
+                   (aset agents idx agent)
+                   (message "Claude Gravity: moved %d tools to agent %s"
+                            (length to-move) agent-id)))))))))
 
     ("PreToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
-            (state (plist-get session :state))
-            (tools (alist-get 'tools state))
+            (parent-agent-id (alist-get 'parent_agent_id data))
+            (candidate-ids (alist-get 'candidate_agent_ids data))
             (new-tool (list (cons 'tool_use_id (alist-get 'tool_use_id data))
                           (cons 'name (alist-get 'tool_name data))
                           (cons 'input (alist-get 'tool_input data))
@@ -462,8 +515,34 @@ Optional PID is the Claude Code process ID."
                           (cons 'turn (or (plist-get session :current-turn) 0))
                           (cons 'permission_mode (alist-get 'permission_mode data))
                           (cons 'assistant_text (alist-get 'assistant_text data))
-                          (cons 'assistant_thinking (alist-get 'assistant_thinking data)))))
-       (setf (alist-get 'tools state) (vconcat tools (vector new-tool)))
+                          (cons 'assistant_thinking (alist-get 'assistant_thinking data))
+                          (cons 'parent_agent_id parent-agent-id))))
+       ;; Route tool to agent or root
+       (cond
+        ;; Definitively attributed to an agent
+        ((and parent-agent-id (not (equal parent-agent-id "ambiguous")))
+         (let ((agent-tools (claude-gravity--agent-tools-vector session parent-agent-id)))
+           (if agent-tools
+               (claude-gravity--set-agent-tools-vector
+                session parent-agent-id (vconcat agent-tools (vector new-tool)))
+             ;; Agent not found — fall back to root
+             (let ((root-tools (alist-get 'tools (plist-get session :state))))
+               (setf (alist-get 'tools (plist-get session :state))
+                     (vconcat root-tools (vector new-tool)))))))
+        ;; Ambiguous — store in root with ambiguous flag for later fix-up
+        ((equal parent-agent-id "ambiguous")
+         (setf (alist-get 'ambiguous new-tool) t)
+         (when candidate-ids
+           (setf (alist-get 'candidate-agents new-tool)
+                 (append candidate-ids nil)))
+         (let ((root-tools (alist-get 'tools (plist-get session :state))))
+           (setf (alist-get 'tools (plist-get session :state))
+                 (vconcat root-tools (vector new-tool)))))
+        ;; No agent context — root tool
+        (t
+         (let ((root-tools (alist-get 'tools (plist-get session :state))))
+           (setf (alist-get 'tools (plist-get session :state))
+                 (vconcat root-tools (vector new-tool))))))
        (plist-put session :permission-mode (alist-get 'permission_mode data))
        (plist-put session :claude-status 'responding)
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
@@ -491,15 +570,44 @@ Optional PID is the Claude Code process ID."
 
     ("PostToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
-            (state (plist-get session :state))
-            (tools (alist-get 'tools state))
+            (parent-agent-id (alist-get 'parent_agent_id data))
             (tool-use-id (alist-get 'tool_use_id data))
-            (idx (claude-gravity--find-tool-by-id tools tool-use-id)))
+            ;; Try to find tool in agent's tools first, then root
+            (target-tools nil)
+            (idx nil))
+       ;; Search for the tool in the appropriate vector
+       (when (and parent-agent-id (not (equal parent-agent-id "ambiguous")))
+         (setq target-tools (claude-gravity--agent-tools-vector session parent-agent-id))
+         (when target-tools
+           (setq idx (claude-gravity--find-tool-by-id target-tools tool-use-id))))
+       ;; If not found in agent, search root (handles ambiguous tools and backward compat)
+       (unless idx
+         (setq target-tools (alist-get 'tools (plist-get session :state)))
+         (setq idx (claude-gravity--find-tool-by-id target-tools tool-use-id))
+         ;; If tool was ambiguous and PostToolUse has definitive agent_id, move it
+         (when (and idx parent-agent-id (not (equal parent-agent-id "ambiguous")))
+           (let ((tool (aref target-tools idx)))
+             (when (alist-get 'ambiguous tool)
+               ;; Move from root to agent
+               (setf (alist-get 'ambiguous tool) nil)
+               (setf (alist-get 'status tool) "done")
+               (setf (alist-get 'result tool) (alist-get 'tool_response data))
+               (let ((agent-tools (claude-gravity--agent-tools-vector session parent-agent-id)))
+                 (when agent-tools
+                   (claude-gravity--set-agent-tools-vector
+                    session parent-agent-id (vconcat agent-tools (vector tool)))
+                   ;; Remove from root
+                   (let ((remaining nil))
+                     (dotimes (i (length target-tools))
+                       (unless (= i idx) (push (aref target-tools i) remaining)))
+                     (setf (alist-get 'tools (plist-get session :state))
+                           (vconcat (nreverse remaining))))
+                   (setq idx nil))))))) ; already handled
        (when idx
-         (let ((tool (aref tools idx)))
+         (let ((tool (aref target-tools idx)))
            (setf (alist-get 'status tool) "done")
            (setf (alist-get 'result tool) (alist-get 'tool_response data))
-           (aset tools idx tool)))
+           (aset target-tools idx tool)))
        ;; Track file operations
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
        ;; Track task operations
@@ -1363,6 +1471,130 @@ Each turn groups its prompt, tools, agents, and tasks together."
                     (claude-gravity--insert-wrapped-with-margin stop-text nil 'claude-gravity-assistant-text))))))))
         (insert "\n")))))
 
+(defun claude-gravity--insert-agent-branch (item agent agent-lookup)
+  "Insert ITEM (a Task tool) as a sub-branch with AGENT's nested tools.
+AGENT-LOOKUP is passed through for nested agent resolution.
+The agent's tools are rendered using the same response-cycle grouping
+as root tools, allowing recursive sub-branches for nested agents."
+  (let* ((name (alist-get 'name item))
+         (status (alist-get 'status item))
+         (input (alist-get 'input item))
+         (done-p (equal status "done"))
+         (agent-done-p (equal (alist-get 'status agent) "done"))
+         (indicator (propertize (if done-p "[x]" "[/]")
+                                'face (if done-p
+                                         'claude-gravity-tool-done
+                                       'claude-gravity-tool-running)))
+         (desc (claude-gravity--tool-description input))
+         (atype (alist-get 'type agent))
+         (aid (alist-get 'agent_id agent))
+         (short-id (if (and aid (> (length aid) 7))
+                       (substring aid 0 7)
+                     (or aid "?")))
+         (adur (alist-get 'duration agent))
+         (dur-str (if (and agent-done-p adur)
+                      (format "  %s" (claude-gravity--format-duration adur))
+                    ""))
+         (agent-suffix (format "  %s %s (%s)%s"
+                               (propertize "→" 'face 'claude-gravity-detail-label)
+                               (propertize (or atype "?") 'face 'claude-gravity-tool-name)
+                               (propertize short-id 'face 'claude-gravity-detail-label)
+                               dur-str))
+         (agent-tools (alist-get 'agent-tools agent))
+         (tool-list (when agent-tools (append agent-tools nil)))
+         ;; Filter AskUserQuestion from agent tools
+         (tool-list (cl-remove-if
+                     (lambda (t) (equal (alist-get 'name t) "AskUserQuestion"))
+                     tool-list))
+         ;; Collapse when agent is done
+         (collapsed (and agent-done-p (not (null tool-list)))))
+    (let ((section-start (point)))
+      (magit-insert-section (tool item collapsed)
+        (magit-insert-heading
+          (if desc
+              (format "%s%s %s\n%s%s%s"
+                      (claude-gravity--indent) indicator
+                      (propertize desc 'face 'claude-gravity-tool-description)
+                      (claude-gravity--indent 2)
+                      (propertize (claude-gravity--tool-signature name input)
+                                  'face 'claude-gravity-tool-signature)
+                      agent-suffix)
+            (format "%s%s %s  %s%s"
+                    (claude-gravity--indent) indicator
+                    (propertize (or name "?") 'face 'claude-gravity-tool-name)
+                    (propertize (claude-gravity--tool-summary name input)
+                                'face 'claude-gravity-detail-label)
+                    agent-suffix)))
+        ;; Render agent's tools as response cycles
+        (when tool-list
+          (claude-gravity--dedup-assistant-text tool-list)
+          ;; Build nested agent lookup from agents that have the same turn
+          ;; and were spawned within this agent's tools
+          (let* ((nested-agents (claude-gravity--collect-nested-agents
+                                 agent tool-list (plist-get
+                                                  (claude-gravity--get-session
+                                                   (when (boundp 'claude-gravity--buffer-session-id)
+                                                     claude-gravity--buffer-session-id))
+                                                  :agents)))
+                 (nested-lookup (claude-gravity--build-agent-lookup nested-agents))
+                 (cycles (claude-gravity--group-response-cycles tool-list))
+                 (n-cycles (length cycles))
+                 (cycle-idx 0))
+            (dolist (cycle cycles)
+              (let* ((is-last (= cycle-idx (1- n-cycles)))
+                     (all-done (cl-every (lambda (ti) (equal (alist-get 'status ti) "done")) cycle))
+                     (should-collapse (and (not is-last) all-done))
+                     (heading-pair (claude-gravity--response-cycle-heading cycle))
+                     (heading (car heading-pair))
+                     (heading-face (cdr heading-pair)))
+                (claude-gravity--insert-tool-context (car cycle))
+                (magit-insert-section (response-cycle cycle-idx should-collapse)
+                  (magit-insert-heading
+                    (format "%s%s"
+                            (claude-gravity--indent)
+                            (propertize (concat "┊ " heading) 'face heading-face)))
+                  (claude-gravity--insert-tool-item (car cycle) nested-lookup)
+                  (dolist (ti (cdr cycle))
+                    (claude-gravity--insert-tool-context ti)
+                    (claude-gravity--insert-tool-item ti nested-lookup)))
+                (unless is-last
+                  (claude-gravity--turn-separator)))
+              (cl-incf cycle-idx))))
+        ;; If no agent tools yet but agent is running, show status
+        (when (and (not tool-list) (not agent-done-p))
+          (insert (format "%s%s\n"
+                          (claude-gravity--indent)
+                          (propertize "Agent running..." 'face 'claude-gravity-detail-label)))))
+      ;; Apply background tint to running tools
+      (unless done-p
+        (add-face-text-property section-start (point) 'claude-gravity-running-bg)))))
+
+(defun claude-gravity--collect-nested-agents (parent-agent parent-tools all-agents)
+  "Collect agents that are nested within PARENT-AGENT.
+PARENT-TOOLS are the tools belonging to the parent agent.
+ALL-AGENTS is the session's full agents vector.
+Returns a list of agents whose Task tool_use_id matches a tool in parent-tools."
+  (let ((task-tool-ids nil)
+        (result nil))
+    ;; Collect tool_use_ids from Task tool calls in parent's tools
+    (dolist (tool parent-tools)
+      (when (equal (alist-get 'name tool) "Task")
+        (push (alist-get 'tool_use_id tool) task-tool-ids)))
+    ;; For now, return all agents that match by turn+type with parent's Task tools.
+    ;; This is the same heuristic as the root level — turn:type matching.
+    ;; A more precise approach would match by agent_id correlation, but
+    ;; that requires the bridge to inject which Task spawned which agent.
+    (when all-agents
+      (dolist (agent (append all-agents nil))
+        ;; Check if this agent has agent-tools (meaning it's a sub-agent with tool data)
+        (let ((atools (alist-get 'agent-tools agent)))
+          (when (and atools (> (length atools) 0)
+                     (not (equal (alist-get 'agent_id agent)
+                                 (alist-get 'agent_id parent-agent))))
+            ;; Include if its turn matches any Task tool's turn in parent
+            (push agent result)))))
+    (nreverse result)))
+
 (defun claude-gravity--insert-tool-item (item &optional agent-lookup)
   "Insert a single tool ITEM as a magit-section.
 When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info."
@@ -1383,26 +1615,30 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
                   (claude-gravity--pop-matching-agent
                    agent-lookup
                    (alist-get 'turn item)
-                   (alist-get 'subagent_type input))))
-         (agent-suffix
-          (if agent
-              (let* ((atype (alist-get 'type agent))
-                     (aid (alist-get 'agent_id agent))
-                     (short-id (if (and aid (> (length aid) 7))
-                                   (substring aid 0 7)
-                                 (or aid "?")))
-                     (adur (alist-get 'duration agent))
-                     (astatus (alist-get 'status agent))
-                     (dur-str (if (and (equal astatus "done") adur)
-                                  (format "  %s" (claude-gravity--format-duration adur))
-                                "")))
-                (format "  %s %s (%s)%s"
-                        (propertize "→" 'face 'claude-gravity-detail-label)
-                        (propertize (or atype "?") 'face 'claude-gravity-tool-name)
-                        (propertize short-id 'face 'claude-gravity-detail-label)
-                        dur-str))
-            "")))
-    (let ((section-start (point)))
+                   (alist-get 'subagent_type input)))))
+    ;; If agent has nested tools, render as sub-branch instead
+    (if (and agent (let ((at (alist-get 'agent-tools agent)))
+                     (and at (> (length at) 0))))
+        (claude-gravity--insert-agent-branch item agent agent-lookup)
+      (let* ((agent-suffix
+              (if agent
+                  (let* ((atype (alist-get 'type agent))
+                         (aid (alist-get 'agent_id agent))
+                         (short-id (if (and aid (> (length aid) 7))
+                                       (substring aid 0 7)
+                                     (or aid "?")))
+                         (adur (alist-get 'duration agent))
+                         (astatus (alist-get 'status agent))
+                         (dur-str (if (and (equal astatus "done") adur)
+                                      (format "  %s" (claude-gravity--format-duration adur))
+                                    "")))
+                    (format "  %s %s (%s)%s"
+                            (propertize "→" 'face 'claude-gravity-detail-label)
+                            (propertize (or atype "?") 'face 'claude-gravity-tool-name)
+                            (propertize short-id 'face 'claude-gravity-detail-label)
+                            dur-str))
+                ""))
+             (section-start (point)))
       (magit-insert-section (tool item t)
         (magit-insert-heading
           (if desc
@@ -1448,7 +1684,7 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
               (claude-gravity--insert-wrapped tp nil 'claude-gravity-detail-label)))))
       ;; Apply background tint to running tools
       (unless done-p
-        (add-face-text-property section-start (point) 'claude-gravity-running-bg)))))
+        (add-face-text-property section-start (point) 'claude-gravity-running-bg))))))
 
 
 (defun claude-gravity--task-sort-key (status)
