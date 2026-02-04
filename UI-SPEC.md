@@ -46,7 +46,6 @@ Status:
 ```
 
 ---
-
 ## 2. Session Detail Buffer: `*Structured Claude Session <slug>*`
 
 ### Minimal session — one turn, one tool
@@ -422,3 +421,4 @@ Navigation
   RET  Visit or toggle
   TAB  Toggle section
 ```
+
