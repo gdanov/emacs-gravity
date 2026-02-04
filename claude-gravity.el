@@ -341,7 +341,7 @@ Stores the patterns list on SESSION's :allow-patterns property."
 ;;
 ;; Each tool, agent, and task captures the current turn number at creation
 ;; time.  The renderer groups items by turn and shows distinct indicators:
-;;   >  normal prompt
+;;   ❯  normal prompt
 ;;   ?  question (AskUserQuestion)
 ;;   →  phase boundary (ExitPlanMode)
 ;;
@@ -837,8 +837,24 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
     ((or "Grep" "Glob")
      (let ((pattern (or (alist-get 'pattern input) "")))
        (format "%s(%s)" name pattern)))
+    ("Task"
+     (let ((subtype (or (alist-get 'subagent_type input) ""))
+           (desc (or (alist-get 'description input) "")))
+       (if (not (string-empty-p desc))
+           (format "Task(%s · %s)" subtype desc)
+         (format "Task(%s)" subtype))))
+    ("AskUserQuestion"
+     "AskUserQuestion")
     (_
      name)))
+
+(defun claude-gravity--insert-label-value (label value &optional face)
+  "Insert LABEL followed by VALUE on the same line.
+LABEL gets detail-label face, VALUE gets optional FACE."
+  (insert (claude-gravity--indent)
+          (propertize label 'face 'claude-gravity-detail-label)
+          (if face (propertize value face) value)
+          "\n"))
 
 (defun claude-gravity--insert-tool-detail (name input result)
   "Insert expanded detail for tool NAME with INPUT and RESULT."
@@ -846,27 +862,22 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
     ("Bash"
      (let ((cmd (alist-get 'command input)))
        (when cmd
-         (claude-gravity--insert-label "Command: ")
-         (claude-gravity--insert-wrapped cmd nil))))
+         (claude-gravity--insert-label-value "Command: " cmd))))
     ("Read"
      (let ((path (alist-get 'file_path input)))
        (when path
-         (claude-gravity--insert-label "File: ")
-         (claude-gravity--insert-wrapped path nil))))
+         (claude-gravity--insert-label-value "File: " path))))
     ((or "Edit" "Write")
      (let ((path (alist-get 'file_path input)))
        (when path
-         (claude-gravity--insert-label "File: ")
-         (claude-gravity--insert-wrapped path nil))))
+         (claude-gravity--insert-label-value "File: " path))))
     ((or "Grep" "Glob")
      (let ((pattern (alist-get 'pattern input))
            (path (alist-get 'path input)))
        (when pattern
-         (claude-gravity--insert-label "Pattern: ")
-         (claude-gravity--insert-wrapped pattern nil))
+         (claude-gravity--insert-label-value "Pattern: " pattern))
        (when path
-         (claude-gravity--insert-label "Path: ")
-         (claude-gravity--insert-wrapped path nil))))
+         (claude-gravity--insert-label-value "Path: " path))))
     ("AskUserQuestion"
      (let* ((questions (alist-get 'questions input))
             (first-q (and (vectorp questions) (> (length questions) 0)
@@ -1057,14 +1068,16 @@ Returns a hash table mapping turn -> list of task alists."
     groups))
 
 (defun claude-gravity--turn-counts (tools agents tasks)
-  "Format count string for TOOLS, AGENTS, TASKS lists."
+  "Format count string for TOOLS, AGENTS, TASKS lists.
+Format: [Nt Ma P tools] — tasks, agents, total tools."
   (let ((parts nil))
-    (when (and tasks (> (length tasks) 0))
-      (push (format "%dt" (length tasks)) parts))
-    (when (and agents (> (length agents) 0))
-      (push (format "%da" (length agents)) parts))
+    ;; Build in reverse order (push reverses), final: tasks agents tools
     (when (and tools (> (length tools) 0))
       (push (format "%d tools" (length tools)) parts))
+    (when (and agents (> (length agents) 0))
+      (push (format "%da" (length agents)) parts))
+    (when (and tasks (> (length tasks) 0))
+      (push (format "%dt" (length tasks)) parts))
     (if parts
         (propertize (format "[%s]" (string-join parts " "))
                     'face 'claude-gravity-detail-label)
@@ -1089,12 +1102,23 @@ Parallel tool calls get the same preceding content; only the first should displa
   "Insert thinking and assistant text from ITEM as standalone interlaced lines.
 Called before each tool item in the rendering loop."
   (let ((athink (alist-get 'assistant_thinking item))
-        (atext (alist-get 'assistant_text item)))
+        (atext (alist-get 'assistant_text item))
+        (indent (or (* (claude-gravity--section-depth) claude-gravity--indent-step) 0)))
+    ;; Trim leading/trailing whitespace
+    (when athink (setq athink (string-trim athink)))
+    (when atext (setq atext (string-trim atext)))
+    ;; Thinking: show "┊ Thinking..." header, then content indented below
     (when (and athink (not (string-empty-p athink)))
-      (claude-gravity--insert-wrapped-with-margin
-       athink nil 'claude-gravity-thinking))
+      (let* ((margin (propertize "┊ " 'face 'claude-gravity-margin-indicator))
+             (prefix (concat (make-string indent ?\s) margin)))
+        (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
+        ;; Content below with plain indent (no ┊)
+        (claude-gravity--insert-wrapped athink (+ indent 4) 'claude-gravity-thinking))
+      (insert "\n"))
+    ;; Assistant text: show with ┊ prefix on first line
     (when (and atext (not (string-empty-p atext)))
-      (claude-gravity--insert-wrapped-with-margin atext nil 'claude-gravity-thinking))))
+      (claude-gravity--insert-wrapped-with-margin atext nil 'claude-gravity-assistant-text)
+      (insert "\n"))))
 
 (defun claude-gravity--group-response-cycles (tools)
   "Group TOOLS into response cycles based on assistant text boundaries.
@@ -1244,8 +1268,11 @@ Each turn groups its prompt, tools, agents, and tasks together."
                (when (and (numberp turn) (> turn max-turn))
                  (setq max-turn turn)))
              task-groups)
-    ;; Only render if there is any content
-    (when (> max-turn 0)
+    ;; Render if there are any turns or pre-prompt activity
+    (when (or (> max-turn 0)
+              (gethash 0 tool-groups)
+              (gethash 0 agent-groups)
+              (gethash 0 task-groups))
       (magit-insert-section (turns nil t)
         (magit-insert-heading
           (claude-gravity--section-divider (format "Turns (%d)" current-turn)))
@@ -1256,7 +1283,9 @@ Each turn groups its prompt, tools, agents, and tasks together."
           (when (or t0-tools t0-agents t0-tasks)
             (magit-insert-section (turn 0 t)
               (magit-insert-heading
-                (propertize "Pre-prompt activity" 'face 'claude-gravity-detail-label))
+                (format "%s  %s"
+                        (propertize "Pre-prompt activity" 'face 'claude-gravity-detail-label)
+                        (claude-gravity--turn-counts t0-tools t0-agents t0-tasks)))
               (claude-gravity--insert-turn-children t0-tools t0-agents t0-tasks))))
         ;; Turns 1..max-turn
         (let ((prev-turn-rendered nil))
@@ -1283,7 +1312,7 @@ Each turn groups its prompt, tools, agents, and tasks together."
                                   (is-question
                                    (propertize "?" 'face 'claude-gravity-question))
                                   (t
-                                   (propertize ">" 'face 'claude-gravity-prompt))))
+                                   (propertize "❯" 'face 'claude-gravity-prompt))))
                  (counts (claude-gravity--turn-counts turn-tools turn-agents turn-tasks))
                  (answer (when is-question (alist-get 'answer prompt-entry)))
                  (answer-suffix (if answer
@@ -1305,13 +1334,16 @@ Each turn groups its prompt, tools, agents, and tasks together."
               (setq prev-turn-rendered t)
               ;; Full prompt text outside the collapsible section
               (when prompt-text
-                (let ((indent (claude-gravity--indent)))
-                  (insert (format "%s%s  " indent indicator))
-                  (claude-gravity--insert-wrapped prompt-text nil prompt-face)
-                  (when (and is-question answer)
-                    (insert indent "  ")
-                    (claude-gravity--insert-label "Answer: ")
-                    (claude-gravity--insert-wrapped answer nil 'claude-gravity-question))))
+                (let* ((indent (claude-gravity--indent))
+                       (cont-indent (+ (length indent) 2)))
+                  (insert (format "%s%s " indent indicator))
+                  (let ((start (point))
+                        (fill-column (max 40 (- (or (window-width) 80) 2)))
+                        (fill-prefix (make-string cont-indent ?\s)))
+                    (insert prompt-text "\n")
+                    (when (> (length prompt-text) (- fill-column cont-indent))
+                      (fill-region start (point)))
+                    (add-face-text-property start (point) prompt-face))))
               (magit-insert-section (turn i (not is-current))
                 (magit-insert-heading
                   (format "%s%s%s  %s"
@@ -1362,7 +1394,7 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
                      (adur (alist-get 'duration agent))
                      (astatus (alist-get 'status agent))
                      (dur-str (if (and (equal astatus "done") adur)
-                                  (format " %s" (claude-gravity--format-duration adur))
+                                  (format "  %s" (claude-gravity--format-duration adur))
                                 "")))
                 (format "  %s %s (%s)%s"
                         (propertize "→" 'face 'claude-gravity-detail-label)
@@ -1374,23 +1406,25 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
       (magit-insert-section (tool item t)
         (magit-insert-heading
           (if desc
-              (format "%s%s %s%s\n%s%s %s"
+              (format "%s%s %s\n%s%s%s"
                       (claude-gravity--indent)
                       indicator
                       (propertize desc 'face 'claude-gravity-tool-description)
-                      agent-suffix
                       (claude-gravity--indent 2)
-                      (propertize (or name "?") 'face 'claude-gravity-tool-signature)
-                      (propertize summary 'face 'claude-gravity-tool-signature))
+                      (propertize (claude-gravity--tool-signature name input)
+                                  'face 'claude-gravity-tool-signature)
+                      agent-suffix)
             (format "%s%s %s  %s%s"
                     (claude-gravity--indent)
                     indicator
                     tool-face
                     (propertize summary 'face 'claude-gravity-detail-label)
                     agent-suffix)))
-        ;; Show permission-format signature in detail
-        (let ((sig (claude-gravity--tool-signature name input)))
-          (claude-gravity--insert-wrapped sig nil 'claude-gravity-tool-signature))
+        ;; Show permission-format signature in detail (only for single-line tools)
+        (unless desc
+          (let ((sig (claude-gravity--tool-signature name input)))
+            (claude-gravity--insert-wrapped sig nil 'claude-gravity-tool-signature)))
+        (insert "\n")
         (claude-gravity--insert-tool-detail name input result)
         ;; Agent detail (transcript, model, etc.) in expanded view
         (when agent
@@ -1660,19 +1694,15 @@ the message under `message` with `role`, `content`, and `model`."
                    claude-gravity--sessions)
           (erase-buffer)
           (magit-insert-section (root)
-            (let* ((active-count 0)
+            (let* ((total-count (hash-table-count claude-gravity--sessions))
                    (width (max 40 (- (or (window-width) 80) 2)))
                    (top-line (make-string width ?━)))
-              (maphash (lambda (_k s)
-                         (when (eq (plist-get s :status) 'active)
-                           (cl-incf active-count)))
-                       claude-gravity--sessions)
               (magit-insert-section (header)
                 (insert (propertize top-line 'face 'claude-gravity-divider) "\n")
                 (magit-insert-heading
                   (format "%s%s"
                           (propertize "Structured Claude Sessions" 'face 'claude-gravity-header-title)
-                          (propertize (format "  ◆ %d sessions" active-count) 'face 'claude-gravity-detail-label)))
+                          (propertize (format "  ◆ %d sessions" total-count) 'face 'claude-gravity-detail-label)))
                 (insert (propertize top-line 'face 'claude-gravity-divider) "\n\n")))
             (if (= (hash-table-count claude-gravity--sessions) 0)
                 (insert (propertize "  No sessions.\n" 'face 'claude-gravity-detail-label))  ;; static text, not a section
@@ -1952,9 +1982,10 @@ Returns a list from most specific to most general, with nils removed."
    ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
    ("R" "Reset all status to idle" claude-gravity-reset-status)
    ("X" "Detect dead sessions" claude-gravity-detect-dead-sessions)
-   ("d" "Delete session at point" claude-gravity-delete-session)]
-  ["Manage"
-   ("q" "Quit" bury-buffer)])
+   ("d" "Delete session" claude-gravity-delete-session)]
+  ["Navigation"
+   ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)
+   ("TAB" "Toggle section" magit-section-toggle)])
 
 (defun claude-gravity-cleanup-sessions ()
   "Remove all ended sessions from the registry."
