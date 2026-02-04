@@ -45,7 +45,7 @@ EXTRA is additional spaces beyond the depth-based indent."
                    (or extra 0))
                ?\s))
 
-(defvar claude-gravity-buffer-name "*Claude Gravity*"
+(defvar claude-gravity-buffer-name "*Structured Claude Sessions*"
   "Name of the overview buffer.")
 
 ;;; Comments (Mock)
@@ -98,10 +98,9 @@ Each session plist has keys:
     (or session-id "?")))
 
 (defun claude-gravity--session-label (session)
-  "Return display label like \"emacs-gravity [a3f2]\"."
-  (format "%s [%s]"
-          (plist-get session :project)
-          (claude-gravity--session-short-id (plist-get session :session-id))))
+  "Return display label: slug if available, else short session-id."
+  (or (plist-get session :slug)
+      (claude-gravity--session-short-id (plist-get session :session-id))))
 
 (defun claude-gravity--ensure-session (session-id cwd)
   "Get or create session for SESSION-ID with CWD.  Returns session plist."
@@ -122,7 +121,9 @@ Each session plist has keys:
                            :files (make-hash-table :test 'equal)
                            :tasks (make-hash-table :test 'equal)
                            :current-turn 0
-                           :permission-mode nil)))
+                           :permission-mode nil
+                           :slug nil
+                           :buffer nil)))
         (puthash session-id session claude-gravity--sessions)
         (claude-gravity--load-allow-patterns session)
         session)))
@@ -141,6 +142,7 @@ Called when a session is restarted (e.g. via /reset or /clear)."
   (plist-put session :tasks (make-hash-table :test 'equal))
   (plist-put session :current-turn 0)
   (plist-put session :permission-mode nil)
+  (plist-put session :slug nil)
   (plist-put session :status 'active)
   (claude-gravity--load-allow-patterns session)
   (message "Claude Gravity: session %s reset" (plist-get session :session-id))
@@ -211,8 +213,11 @@ Stores the patterns list on SESSION's :allow-patterns property."
   "Refresh the buffer for SESSION-ID if it exists."
   (remhash session-id claude-gravity--session-refresh-timers)
   (let* ((session (claude-gravity--get-session session-id))
-         (buf-name (when session (claude-gravity--session-buffer-name session))))
-    (when (and buf-name (get-buffer buf-name))
+         (buf (when session
+                (or (let ((b (plist-get session :buffer)))
+                      (and b (buffer-live-p b) b))
+                    (get-buffer (claude-gravity--session-buffer-name session))))))
+    (when buf
       (claude-gravity--render-session-buffer session))))
 
 ;;; Tool helpers
@@ -351,12 +356,21 @@ Optional PID is the Claude Code process ID."
     (setq session-id "legacy")
     (setq cwd (or cwd "")))
   (message "Handling event: %s for session: %s" event session-id)
-  ;; Update PID and last-event-time on every event
+  ;; Update PID, last-event-time, and slug on every event
   (let ((existing (claude-gravity--get-session session-id)))
     (when existing
       (plist-put existing :last-event-time (current-time))
       (when (and pid (numberp pid) (> pid 0))
-        (plist-put existing :pid pid))))
+        (plist-put existing :pid pid))
+      ;; Store slug from transcript (arrives via bridge enrichment)
+      (let ((slug (alist-get 'slug data)))
+        (when (and slug (stringp slug) (not (plist-get existing :slug)))
+          (let ((old-buf (plist-get existing :buffer)))
+            (plist-put existing :slug slug)
+            ;; Rename session buffer if it exists
+            (when (and old-buf (buffer-live-p old-buf))
+              (with-current-buffer old-buf
+                (rename-buffer (claude-gravity--session-buffer-name existing) t))))))))
   (pcase event
     ("SessionStart"
      (let ((existing (claude-gravity--get-session session-id)))
@@ -1025,7 +1039,7 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
       (insert (propertize top-line 'face 'claude-gravity-divider) "\n")
       (magit-insert-heading
         (format "%s%s"
-                (propertize "Claude Code Gravity" 'face 'claude-gravity-header-title)
+                (propertize "Structured Claude Session" 'face 'claude-gravity-header-title)
                 (propertize (format "  ◆ %d tools" tool-count) 'face 'claude-gravity-detail-label)))
       (insert (propertize top-line 'face 'claude-gravity-divider) "\n")
       (insert "\n"))))
@@ -1125,17 +1139,9 @@ Multiple agents with the same turn+type are returned in order."
 
 (defun claude-gravity--response-cycle-heading (cycle)
   "Return (TEXT . FACE) for a response CYCLE heading.
-Uses the first tool's assistant_text or assistant_thinking."
-  (let* ((first-tool (car cycle))
-         (atext (alist-get 'assistant_text first-tool))
-         (athink (alist-get 'assistant_thinking first-tool))
-         (text (or atext athink)))
-    (if (and text (not (string-empty-p text)))
-        (let* ((first-line (car (split-string text "\n" t)))
-               (trimmed (string-trim first-line)))
-          (cons (claude-gravity--truncate trimmed 70) 'claude-gravity-thinking))
-      (cons (format "%d tool%s" (length cycle) (if (= (length cycle) 1) "" "s"))
-            'claude-gravity-detail-label))))
+Shows tool count; full assistant text is rendered in the expanded body."
+  (cons (format "%d tool%s" (length cycle) (if (= (length cycle) 1) "" "s"))
+        'claude-gravity-detail-label))
 
 (defun claude-gravity--insert-turn-children (tools agents tasks)
   "Insert response cycles, inline agent annotations, and tasks for a turn.
@@ -1158,20 +1164,21 @@ Tools are grouped into response cycles (each assistant message + its tool calls)
                  (heading-pair (claude-gravity--response-cycle-heading cycle))
                  (heading (car heading-pair))
                  (heading-face (cdr heading-pair)))
-            ;; Response cycle as a collapsible section
+            ;; Render first tool's assistant context outside the collapsible
+            ;; section so it stays visible when collapsed.
+            (claude-gravity--insert-tool-context (car cycle))
+            ;; Response cycle as a collapsible section (tools only)
             (magit-insert-section (response-cycle cycle-idx should-collapse)
               (magit-insert-heading
                 (format "%s%s"
                         (claude-gravity--indent)
                         (propertize (concat "┊ " heading) 'face heading-face)))
-              ;; Insert each tool with preceding assistant context
-              (let ((first-in-cycle t))
-                (dolist (item cycle)
-                  ;; Skip context for first tool — heading already shows it
-                  (unless first-in-cycle
-                    (claude-gravity--insert-tool-context item))
-                  (setq first-in-cycle nil)
-                  (claude-gravity--insert-tool-item item agent-lookup))))
+              ;; First tool (context already rendered above)
+              (claude-gravity--insert-tool-item (car cycle) agent-lookup)
+              ;; Remaining tools with their context
+              (dolist (item (cdr cycle))
+                (claude-gravity--insert-tool-context item)
+                (claude-gravity--insert-tool-item item agent-lookup)))
             ;; Separator between cycles (not after the last)
             (unless is-last
               (claude-gravity--turn-separator)))
@@ -1296,22 +1303,22 @@ Each turn groups its prompt, tools, agents, and tasks together."
               (when prev-turn-rendered
                 (claude-gravity--turn-separator))
               (setq prev-turn-rendered t)
+              ;; Full prompt text outside the collapsible section
+              (when prompt-text
+                (let ((indent (claude-gravity--indent)))
+                  (insert (format "%s%s  " indent indicator))
+                  (claude-gravity--insert-wrapped prompt-text nil prompt-face)
+                  (when (and is-question answer)
+                    (insert indent "  ")
+                    (claude-gravity--insert-label "Answer: ")
+                    (claude-gravity--insert-wrapped answer nil 'claude-gravity-question))))
               (magit-insert-section (turn i (not is-current))
                 (magit-insert-heading
-                  (format "%s%s  %s%s  %s  %s"
+                  (format "%s%s%s  %s"
                           (claude-gravity--indent)
-                          (nth 0 _heading-parts)
-                          (nth 1 _heading-parts)
-                          (nth 2 _heading-parts)
-                          (nth 3 _heading-parts)
-                          (nth 4 _heading-parts)))
-                ;; Full prompt text in body
-                (when (and prompt-text (> (length prompt-text) 60))
-                  (claude-gravity--insert-wrapped prompt-text nil))
-                ;; Answer for questions
-                (when (and is-question answer)
-                  (claude-gravity--insert-label "Answer: ")
-                  (claude-gravity--insert-wrapped answer nil 'claude-gravity-question))
+                          (propertize counts 'face 'claude-gravity-detail-label)
+                          (propertize answer-suffix 'face 'claude-gravity-detail-label)
+                          (propertize elapsed-str 'face 'claude-gravity-detail-label)))
                 ;; Children: tools, agents, tasks
                 (claude-gravity--insert-turn-children turn-tools turn-agents turn-tasks)
                 ;; Trailing assistant text (conclusion after last tool)
@@ -1664,7 +1671,7 @@ the message under `message` with `role`, `content`, and `model`."
                 (insert (propertize top-line 'face 'claude-gravity-divider) "\n")
                 (magit-insert-heading
                   (format "%s%s"
-                          (propertize "Claude Code Gravity" 'face 'claude-gravity-header-title)
+                          (propertize "Structured Claude Sessions" 'face 'claude-gravity-header-title)
                           (propertize (format "  ◆ %d sessions" active-count) 'face 'claude-gravity-detail-label)))
                 (insert (propertize top-line 'face 'claude-gravity-divider) "\n\n")))
             (if (= (hash-table-count claude-gravity--sessions) 0)
@@ -1716,7 +1723,7 @@ the message under `message` with `role`, `content`, and `model`."
 
 (defun claude-gravity--session-buffer-name (session)
   "Return buffer name for SESSION."
-  (format "*Claude Gravity: %s*" (claude-gravity--session-label session)))
+  (format "*Structured Claude Session %s*" (claude-gravity--session-label session)))
 
 (defun claude-gravity-open-session (session-id)
   "Open or switch to the buffer for SESSION-ID."
@@ -1729,6 +1736,7 @@ the message under `message` with `role`, `content`, and `model`."
       (with-current-buffer (get-buffer-create buf-name)
         (claude-gravity-session-mode)
         (setq claude-gravity--buffer-session-id session-id)
+        (plist-put session :buffer (current-buffer))
         (claude-gravity--render-session-buffer session)
         (pop-to-buffer (current-buffer))))))
 
@@ -1746,9 +1754,11 @@ overlays.  Since we render from timers, we must apply them manually."
 
 (defun claude-gravity--render-session-buffer (session)
   "Render the magit-section UI for SESSION into its buffer."
-  (let* ((buf-name (claude-gravity--session-buffer-name session))
-         (state (plist-get session :state)))
-    (when-let ((buf (get-buffer buf-name)))
+  (let* ((state (plist-get session :state))
+         (buf (or (let ((b (plist-get session :buffer)))
+                    (and b (buffer-live-p b) b))
+                  (get-buffer (claude-gravity--session-buffer-name session)))))
+    (when buf
       (with-current-buffer buf
         (let ((inhibit-read-only t)
               (pos (point)))
@@ -1782,8 +1792,8 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "F") 'claude-gravity-open-plan-file)
 (define-key claude-gravity-mode-map (kbd "t") 'claude-gravity-tail)
 
-(define-derived-mode claude-gravity-mode magit-section-mode "ClaudeGravity"
-  "Major mode for Claude Code Gravity overview.
+(define-derived-mode claude-gravity-mode magit-section-mode "StructuredSessions"
+  "Major mode for Structured Claude Sessions overview.
 
 \\{claude-gravity-mode-map}"
   (font-lock-mode -1)
@@ -1792,8 +1802,8 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "T") 'claude-gravity-view-agent-transcript)
 (define-key claude-gravity-mode-map (kbd "V") 'claude-gravity-open-agent-transcript)
 
-(define-derived-mode claude-gravity-session-mode claude-gravity-mode "ClaudeGravity:Session"
-  "Major mode for a single Claude Code session buffer.")
+(define-derived-mode claude-gravity-session-mode claude-gravity-mode "StructuredSession"
+  "Major mode for a single Structured Claude Session buffer.")
 
 (defun claude-gravity-visit-or-toggle ()
   "If on a session entry, open it.  On an agent, parse transcript.  Otherwise toggle."

@@ -202,6 +202,29 @@ export function extractTrailingText(transcriptPath: string): { text: string; thi
   }
 }
 
+// Extract session slug from the transcript JSONL.
+// The slug field appears on `progress` entries which may not be the first line
+// (e.g. `file-history-snapshot` often comes first), so we scan several lines.
+function extractSlug(transcriptPath: string): string | null {
+  try {
+    const fd = openSync(transcriptPath, "r");
+    const buffer = Buffer.alloc(64 * 1024);
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+    closeSync(fd);
+    if (bytesRead === 0) return null;
+    const text = buffer.toString("utf-8", 0, bytesRead);
+    const lines = text.split("\n");
+    for (const line of lines) {
+      if (!line.length) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj.slug) return obj.slug;
+      } catch { continue; }
+    }
+  } catch {}
+  return null;
+}
+
 async function main() {
   log(`Process started: ${process.argv.join(" ")}`);
   try {
@@ -226,9 +249,18 @@ async function main() {
     const cwd = (inputData as any).cwd || "";
     const pid = parseInt(process.env.CLAUDE_PID || "0", 10) || null;
 
+    // Extract session slug from transcript
+    const transcriptPath = (inputData as any).transcript_path;
+    if (transcriptPath) {
+      const slug = extractSlug(transcriptPath);
+      if (slug) {
+        (inputData as any).slug = slug;
+        log(`Extracted slug: ${slug}`);
+      }
+    }
+
     // Enrich PreToolUse with assistant monologue text and thinking from transcript
     if (eventName === "PreToolUse") {
-      const transcriptPath = (inputData as any).transcript_path;
       const toolUseId = (inputData as any).tool_use_id;
       if (transcriptPath && toolUseId) {
         try {
@@ -252,7 +284,6 @@ async function main() {
     // to the transcript file (race condition), so we retry with a short
     // delay when the initial read finds nothing.
     if (eventName === "Stop") {
-      const transcriptPath = (inputData as any).transcript_path;
       if (transcriptPath) {
         try {
           let { text, thinking } = extractTrailingText(transcriptPath);
