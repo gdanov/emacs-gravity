@@ -412,6 +412,29 @@ async function main() {
             log(`Agent ${agentId} had ${toolIds.length} tool calls`);
           }
           (inputData as any).agent_transcript_path = atp;
+          // Extract trailing text from agent transcript (agent's final summary)
+          try {
+            let { text, thinking } = extractTrailingText(atp);
+            if (!text && !thinking) {
+              const maxRetries = 5;
+              const delayMs = 250;
+              for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
+                await new Promise(r => setTimeout(r, delayMs));
+                ({ text, thinking } = extractTrailingText(atp));
+                log(`SubagentStop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`);
+              }
+            }
+            if (text) {
+              (inputData as any).agent_stop_text = text;
+              log(`Agent ${agentId} trailing text (${text.length} chars)`);
+            }
+            if (thinking) {
+              (inputData as any).agent_stop_thinking = thinking;
+              log(`Agent ${agentId} trailing thinking (${thinking.length} chars)`);
+            }
+          } catch (e) {
+            log(`Failed to extract agent trailing content: ${e}`);
+          }
         }
       }
     }
@@ -483,8 +506,8 @@ async function main() {
         try {
           let { text, thinking } = extractTrailingText(transcriptPath);
           if (!text && !thinking) {
-            const maxRetries = 3;
-            const delayMs = 150;
+            const maxRetries = 5;
+            const delayMs = 250;
             for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
               await new Promise(r => setTimeout(r, delayMs));
               ({ text, thinking } = extractTrailingText(transcriptPath));

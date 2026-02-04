@@ -45,6 +45,18 @@ EXTRA is additional spaces beyond the depth-based indent."
                    (or extra 0))
                ?\s))
 
+(defvar claude-gravity--margin-char "┊"
+  "Current margin indicator character.
+Dynamically let-bound inside agent branches to use a different character.")
+
+(defvar claude-gravity--margin-face 'claude-gravity-margin-indicator
+  "Current margin indicator face.
+Dynamically let-bound inside agent branches to use a different color.")
+
+(defvar claude-gravity--agent-depth 0
+  "Current agent nesting depth.
+Dynamically let-bound inside agent branches for nested tint selection.")
+
 (defvar claude-gravity-buffer-name "*Structured Claude Sessions*"
   "Name of the overview buffer.")
 
@@ -473,6 +485,11 @@ Optional PID is the Claude Code process ID."
            (let ((tp (alist-get 'agent_transcript_path data)))
              (when tp
                (setf (alist-get 'transcript_path agent) tp)))
+           ;; Store agent's trailing summary text
+           (let ((ast (alist-get 'agent_stop_text data))
+                 (asth (alist-get 'agent_stop_thinking data)))
+             (when ast (setf (alist-get 'stop_text agent) ast))
+             (when asth (setf (alist-get 'stop_thinking agent) asth)))
            (aset agents idx agent)
            ;; Fix-up: move ambiguously-attributed tools to this agent
            (let ((agent-tool-ids (alist-get 'agent_tool_ids data)))
@@ -778,6 +795,23 @@ Optional PID is the Claude Code process ID."
   "Subtle background highlight for running tools/agents."
   :group 'claude-gravity)
 
+(defface claude-gravity-agent-bg
+  '((((background dark)) :background "#0a1a2a")
+    (((background light)) :background "#f0f5fa"))
+  "Subtle background tint for agent sub-branch content."
+  :group 'claude-gravity)
+
+(defface claude-gravity-agent-nested-bg
+  '((((background dark)) :background "#0f2030")
+    (((background light)) :background "#e8f0f5"))
+  "Background for nested agent sub-branches (2+ levels deep)."
+  :group 'claude-gravity)
+
+(defface claude-gravity-agent-margin
+  '((t :foreground "#5599aa"))
+  "Face for margin indicator (┃) inside agent response cycles."
+  :group 'claude-gravity)
+
 (defface claude-gravity-header-title
   '((t :weight bold :foreground "white"))
   "Face for the main buffer header title."
@@ -812,7 +846,8 @@ INDENT-OR-NIL and FACE work like `claude-gravity--insert-wrapped'."
   (when (and text (not (string-empty-p text)))
     (let* ((indent (or indent-or-nil
                        (* (claude-gravity--section-depth) claude-gravity--indent-step)))
-           (margin (propertize "┊ " 'face 'claude-gravity-margin-indicator))
+           (margin (propertize (concat claude-gravity--margin-char " ")
+                              'face claude-gravity--margin-face))
            (prefix (concat (make-string indent ?\s) margin))
            (start (point))
            (fill-column (max 40 (- (or (window-width) 80) 2)))
@@ -1217,7 +1252,8 @@ Called before each tool item in the rendering loop."
     (when atext (setq atext (string-trim atext)))
     ;; Thinking: show "┊ Thinking..." header, then content indented below
     (when (and athink (not (string-empty-p athink)))
-      (let* ((margin (propertize "┊ " 'face 'claude-gravity-margin-indicator))
+      (let* ((margin (propertize (concat claude-gravity--margin-char " ")
+                                'face claude-gravity--margin-face))
              (prefix (concat (make-string indent ?\s) margin)))
         (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
         ;; Content below with plain indent (no ┊)
@@ -1302,9 +1338,11 @@ Tools are grouped into response cycles (each assistant message + its tool calls)
             ;; Response cycle as a collapsible section (tools only)
             (magit-insert-section (response-cycle cycle-idx should-collapse)
               (magit-insert-heading
-                (format "%s%s"
+                (format "%s%s%s"
                         (claude-gravity--indent)
-                        (propertize (concat "┊ " heading) 'face heading-face)))
+                        (propertize (concat claude-gravity--margin-char " ")
+                                    'face claude-gravity--margin-face)
+                        (propertize heading 'face heading-face)))
               ;; First tool (context already rendered above)
               (claude-gravity--insert-tool-item (car cycle) agent-lookup)
               ;; Remaining tools with their context
@@ -1471,9 +1509,10 @@ Each turn groups its prompt, tools, agents, and tasks together."
                     (claude-gravity--insert-wrapped-with-margin stop-text nil 'claude-gravity-assistant-text))))))))
         (insert "\n")))))
 
-(defun claude-gravity--insert-agent-branch (item agent agent-lookup)
+(defun claude-gravity--insert-agent-branch (item agent agent-lookup &optional depth)
   "Insert ITEM (a Task tool) as a sub-branch with AGENT's nested tools.
 AGENT-LOOKUP is passed through for nested agent resolution.
+DEPTH tracks nesting level (0 = first agent, 1+ = nested sub-agents).
 The agent's tools are rendered using the same response-cycle grouping
 as root tools, allowing recursive sub-branches for nested agents."
   (let* ((name (alist-get 'name item))
@@ -1525,47 +1564,69 @@ as root tools, allowing recursive sub-branches for nested agents."
                     (propertize (claude-gravity--tool-summary name input)
                                 'face 'claude-gravity-detail-label)
                     agent-suffix)))
-        ;; Render agent's tools as response cycles
-        (when tool-list
-          (claude-gravity--dedup-assistant-text tool-list)
-          ;; Build nested agent lookup from agents that have the same turn
-          ;; and were spawned within this agent's tools
-          (let* ((nested-agents (claude-gravity--collect-nested-agents
-                                 agent tool-list (plist-get
-                                                  (claude-gravity--get-session
-                                                   (when (boundp 'claude-gravity--buffer-session-id)
-                                                     claude-gravity--buffer-session-id))
-                                                  :agents)))
-                 (nested-lookup (claude-gravity--build-agent-lookup nested-agents))
-                 (cycles (claude-gravity--group-response-cycles tool-list))
-                 (n-cycles (length cycles))
-                 (cycle-idx 0))
-            (dolist (cycle cycles)
-              (let* ((is-last (= cycle-idx (1- n-cycles)))
-                     (all-done (cl-every (lambda (ti) (equal (alist-get 'status ti) "done")) cycle))
-                     (should-collapse (and (not is-last) all-done))
-                     (heading-pair (claude-gravity--response-cycle-heading cycle))
-                     (heading (car heading-pair))
-                     (heading-face (cdr heading-pair)))
-                (claude-gravity--insert-tool-context (car cycle))
-                (magit-insert-section (response-cycle cycle-idx should-collapse)
-                  (magit-insert-heading
-                    (format "%s%s"
+        ;; Render agent's tools as response cycles with agent-specific styling
+        (let ((claude-gravity--margin-char "┃")
+              (claude-gravity--margin-face 'claude-gravity-agent-margin)
+              (claude-gravity--agent-depth (1+ (or depth claude-gravity--agent-depth 0)))
+              (body-start (point)))
+          (when tool-list
+            (claude-gravity--dedup-assistant-text tool-list)
+            ;; Build nested agent lookup from agents that have the same turn
+            ;; and were spawned within this agent's tools
+            (let* ((nested-agents (claude-gravity--collect-nested-agents
+                                   agent tool-list (plist-get
+                                                    (claude-gravity--get-session
+                                                     (when (boundp 'claude-gravity--buffer-session-id)
+                                                       claude-gravity--buffer-session-id))
+                                                    :agents)))
+                   (nested-lookup (claude-gravity--build-agent-lookup nested-agents))
+                   (cycles (claude-gravity--group-response-cycles tool-list))
+                   (n-cycles (length cycles))
+                   (cycle-idx 0))
+              (dolist (cycle cycles)
+                (let* ((is-last (= cycle-idx (1- n-cycles)))
+                       (all-done (cl-every (lambda (ti) (equal (alist-get 'status ti) "done")) cycle))
+                       (should-collapse (and (not is-last) all-done))
+                       (heading-pair (claude-gravity--response-cycle-heading cycle))
+                       (heading (car heading-pair))
+                       (heading-face (cdr heading-pair)))
+                  (claude-gravity--insert-tool-context (car cycle))
+                  (magit-insert-section (response-cycle cycle-idx should-collapse)
+                    (magit-insert-heading
+                      (format "%s%s%s"
+                              (claude-gravity--indent)
+                              (propertize (concat claude-gravity--margin-char " ")
+                                          'face claude-gravity--margin-face)
+                              (propertize heading 'face heading-face)))
+                    (claude-gravity--insert-tool-item (car cycle) nested-lookup)
+                    (dolist (ti (cdr cycle))
+                      (claude-gravity--insert-tool-context ti)
+                      (claude-gravity--insert-tool-item ti nested-lookup)))
+                  (unless is-last
+                    (claude-gravity--turn-separator)))
+                (cl-incf cycle-idx))))
+          ;; Agent's trailing summary text (final result returned to parent)
+          (let ((agent-stop-think (alist-get 'stop_thinking agent))
+                (agent-stop-text (alist-get 'stop_text agent)))
+            (when (and agent-stop-think (stringp agent-stop-think)
+                       (not (string-empty-p agent-stop-think)))
+              (claude-gravity--insert-wrapped-with-margin
+               agent-stop-think nil 'claude-gravity-thinking))
+            (when (and agent-stop-text (stringp agent-stop-text)
+                       (not (string-empty-p agent-stop-text)))
+              (claude-gravity--insert-wrapped-with-margin
+               agent-stop-text nil 'claude-gravity-assistant-text)))
+          ;; If no agent tools yet but agent is running, show status
+          (when (and (not tool-list) (not agent-done-p))
+            (insert (format "%s%s\n"
                             (claude-gravity--indent)
-                            (propertize (concat "┊ " heading) 'face heading-face)))
-                  (claude-gravity--insert-tool-item (car cycle) nested-lookup)
-                  (dolist (ti (cdr cycle))
-                    (claude-gravity--insert-tool-context ti)
-                    (claude-gravity--insert-tool-item ti nested-lookup)))
-                (unless is-last
-                  (claude-gravity--turn-separator)))
-              (cl-incf cycle-idx))))
-        ;; If no agent tools yet but agent is running, show status
-        (when (and (not tool-list) (not agent-done-p))
-          (insert (format "%s%s\n"
-                          (claude-gravity--indent)
-                          (propertize "Agent running..." 'face 'claude-gravity-detail-label)))))
-      ;; Apply background tint to running tools
+                            (propertize "Agent running..." 'face 'claude-gravity-detail-label))))
+          ;; Apply agent background tint to body (after heading)
+          (add-face-text-property body-start (point)
+                                  (if (> claude-gravity--agent-depth 1)
+                                      'claude-gravity-agent-nested-bg
+                                    'claude-gravity-agent-bg))))
+      ;; Apply background tint to running tools (stacks with agent-bg)
       (unless done-p
         (add-face-text-property section-start (point) 'claude-gravity-running-bg)))))
 
