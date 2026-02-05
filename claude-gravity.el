@@ -904,6 +904,38 @@ INDENT-OR-NIL and FACE work like `claude-gravity--insert-wrapped'."
       (when face
         (add-face-text-property start (point) face)))))
 
+(defun claude-gravity--split-margin-text (text face)
+  "Split TEXT into first wrapped margin line and the rest.
+Returns (FIRST-LINE . REST-STRING) where FIRST-LINE has ┊ prefix
+and FACE applied.  REST-STRING contains remaining lines or nil.
+Uses current section depth for indentation."
+  (when (and text (stringp text) (not (string-empty-p text)))
+    (let* ((text (claude-gravity--fontify-markdown text))
+           (indent (* (claude-gravity--section-depth) claude-gravity--indent-step))
+           (margin (propertize (concat claude-gravity--margin-char " ")
+                              'face claude-gravity--margin-face))
+           (prefix (concat (make-string indent ?\s) margin))
+           (fc (max 40 (- (or (window-width) 80) 2)))
+           (rendered
+            (with-temp-buffer
+              (let ((fill-column fc)
+                    (fill-prefix prefix))
+                (dolist (para (split-string text "\n"))
+                  (let ((para-start (point)))
+                    (insert prefix para "\n")
+                    (when (> (length para) (- fc indent 2))
+                      (fill-region para-start (point))))))
+              (when face
+                (add-face-text-property (point-min) (point-max) face))
+              (buffer-string))))
+      (unless (string-empty-p rendered)
+        (let ((nl-pos (string-match "\n" rendered)))
+          (if nl-pos
+              (let ((first (substring rendered 0 nl-pos))
+                    (rest (substring rendered (1+ nl-pos))))
+                (cons first (if (string-empty-p rest) nil rest)))
+            (cons rendered nil)))))))
+
 ;;; Tool display helpers
 
 (defun claude-gravity--extract-ask-answer (response)
@@ -1420,22 +1452,49 @@ Tools are grouped into response cycles (each assistant message + its tool calls)
           (let* ((is-last (= cycle-idx (1- n-cycles)))
                  (all-done (cl-every (lambda (item) (equal (alist-get 'status item) "done")) cycle))
                  (should-collapse (and (not is-last) all-done))
-                 (heading-pair (claude-gravity--response-cycle-heading cycle))
-                 (heading (car heading-pair))
-                 (heading-face (cdr heading-pair)))
-            ;; Render first tool's assistant context outside the collapsible
-            ;; section so it stays visible when collapsed.
-            (claude-gravity--insert-tool-context (car cycle))
-            ;; Response cycle as a collapsible section (tools only)
+                 (first-item (car cycle))
+                 (athink (alist-get 'assistant_thinking first-item))
+                 (atext (alist-get 'assistant_text first-item))
+                 (athink (when athink (string-trim athink)))
+                 (atext (when atext (string-trim atext)))
+                 (split (when (and atext (not (string-empty-p atext)))
+                          (claude-gravity--split-margin-text atext 'claude-gravity-assistant-text)))
+                 (tools-label (format "%d tool%s" (length cycle)
+                                      (if (= (length cycle) 1) "" "s"))))
+            ;; Thinking stays outside the section (always visible)
+            (when (and athink (not (string-empty-p athink)))
+              (let* ((indent (or (* (claude-gravity--section-depth) claude-gravity--indent-step) 0))
+                     (margin (propertize (concat claude-gravity--margin-char " ")
+                                        'face claude-gravity--margin-face))
+                     (prefix (concat (make-string indent ?\s) margin)))
+                (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
+                (claude-gravity--insert-wrapped athink (+ indent 4) 'claude-gravity-thinking)))
+            ;; Response cycle section — heading is first line of assistant text
             (magit-insert-section (response-cycle cycle-idx should-collapse)
               (magit-insert-heading
-                (format "%s%s%s"
-                        (claude-gravity--indent)
-                        (propertize (concat claude-gravity--margin-char " ")
-                                    'face claude-gravity--margin-face)
-                        (propertize heading 'face heading-face)))
-              ;; First tool (context already rendered above)
-              (claude-gravity--insert-tool-item (car cycle) agent-lookup)
+                (if split
+                    (car split)
+                  (format "%s%s%s"
+                          (claude-gravity--indent)
+                          (propertize (concat claude-gravity--margin-char " ")
+                                      'face claude-gravity--margin-face)
+                          (propertize tools-label 'face 'claude-gravity-detail-label))))
+              ;; Body: remaining assistant text lines (visible when collapsed)
+              (when (cdr split)
+                (insert (cdr split))
+                ;; Move content marker past assistant text so it stays
+                ;; visible when the section is collapsed
+                (oset magit-insert-section--current content
+                      (if magit-section-inhibit-markers (point) (point-marker))))
+              ;; Body: tool count summary (when heading was assistant text)
+              (when split
+                (insert (format "%s%s%s\n"
+                                (claude-gravity--indent)
+                                (propertize (concat claude-gravity--margin-char " ")
+                                            'face claude-gravity--margin-face)
+                                (propertize tools-label 'face 'claude-gravity-detail-label))))
+              ;; First tool (context already rendered as heading/body above)
+              (claude-gravity--insert-tool-item first-item agent-lookup)
               ;; Remaining tools with their context
               (dolist (item (cdr cycle))
                 (claude-gravity--insert-tool-context item)
@@ -1678,18 +1737,48 @@ as root tools, allowing recursive sub-branches for nested agents."
                 (let* ((is-last (= cycle-idx (1- n-cycles)))
                        (all-done (cl-every (lambda (ti) (equal (alist-get 'status ti) "done")) cycle))
                        (should-collapse (and (not is-last) all-done))
-                       (heading-pair (claude-gravity--response-cycle-heading cycle))
-                       (heading (car heading-pair))
-                       (heading-face (cdr heading-pair)))
-                  (claude-gravity--insert-tool-context (car cycle))
+                       (first-item (car cycle))
+                       (athink (alist-get 'assistant_thinking first-item))
+                       (atext (alist-get 'assistant_text first-item))
+                       (athink (when athink (string-trim athink)))
+                       (atext (when atext (string-trim atext)))
+                       (split (when (and atext (not (string-empty-p atext)))
+                                (claude-gravity--split-margin-text atext 'claude-gravity-assistant-text)))
+                       (tools-label (format "%d tool%s" (length cycle)
+                                            (if (= (length cycle) 1) "" "s"))))
+                  ;; Thinking stays outside the section (always visible)
+                  (when (and athink (not (string-empty-p athink)))
+                    (let* ((indent (or (* (claude-gravity--section-depth) claude-gravity--indent-step) 0))
+                           (margin (propertize (concat claude-gravity--margin-char " ")
+                                              'face claude-gravity--margin-face))
+                           (prefix (concat (make-string indent ?\s) margin)))
+                      (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
+                      (claude-gravity--insert-wrapped athink (+ indent 4) 'claude-gravity-thinking)))
+                  ;; Response cycle section — heading is first line of assistant text
                   (magit-insert-section (response-cycle cycle-idx should-collapse)
                     (magit-insert-heading
-                      (format "%s%s%s"
-                              (claude-gravity--indent)
-                              (propertize (concat claude-gravity--margin-char " ")
-                                          'face claude-gravity--margin-face)
-                              (propertize heading 'face heading-face)))
-                    (claude-gravity--insert-tool-item (car cycle) nested-lookup)
+                      (if split
+                          (car split)
+                        (format "%s%s%s"
+                                (claude-gravity--indent)
+                                (propertize (concat claude-gravity--margin-char " ")
+                                            'face claude-gravity--margin-face)
+                                (propertize tools-label 'face 'claude-gravity-detail-label))))
+                    ;; Body: remaining assistant text lines (visible when collapsed)
+                    (when (cdr split)
+                      (insert (cdr split))
+                      ;; Move content marker past assistant text so it stays
+                      ;; visible when the section is collapsed
+                      (oset magit-insert-section--current content
+                            (if magit-section-inhibit-markers (point) (point-marker))))
+                    ;; Body: tool count summary (when heading was assistant text)
+                    (when split
+                      (insert (format "%s%s%s\n"
+                                      (claude-gravity--indent)
+                                      (propertize (concat claude-gravity--margin-char " ")
+                                                  'face claude-gravity--margin-face)
+                                      (propertize tools-label 'face 'claude-gravity-detail-label))))
+                    (claude-gravity--insert-tool-item first-item nested-lookup)
                     (dolist (ti (cdr cycle))
                       (claude-gravity--insert-tool-context ti)
                       (claude-gravity--insert-tool-item ti nested-lookup)))
