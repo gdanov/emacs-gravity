@@ -52,7 +52,13 @@
       "Bash(/opt/homebrew/bin/emacs:*)",
       "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs:*)",
       "Bash(/opt/homebrew/bin/emacsclient:*)",
-      "Bash(tail:*)"
+      "Bash(tail:*)",
+      "Bash(bd list:*)",
+      "Bash(bd create:*)",
+      "Bash(bd dep add:*)",
+      "Bash(bd stats:*)",
+      "Bash(bd blocked:*)",
+      "Bash(bd sync:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d"
