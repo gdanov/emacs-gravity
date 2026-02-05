@@ -871,11 +871,24 @@ Use as the argument to `magit-insert-heading'."
          (line (make-string width ?╌)))
     (insert indent (propertize line 'face 'claude-gravity-divider) "\n")))
 
+(defun claude-gravity--fontify-markdown (text)
+  "Return TEXT with markdown fontification and markup hiding applied.
+Uses `markdown-mode' if available; returns TEXT unchanged otherwise."
+  (if (fboundp 'markdown-mode)
+      (with-temp-buffer
+        (insert text)
+        (markdown-mode)
+        (let ((markdown-hide-markup t))
+          (font-lock-ensure))
+        (buffer-string))
+    text))
+
 (defun claude-gravity--insert-wrapped-with-margin (text indent-or-nil face)
   "Insert TEXT with word-wrap and a ┊ margin indicator.
 INDENT-OR-NIL and FACE work like `claude-gravity--insert-wrapped'."
   (when (and text (not (string-empty-p text)))
-    (let* ((indent (or indent-or-nil
+    (let* ((text (claude-gravity--fontify-markdown text))
+           (indent (or indent-or-nil
                        (* (claude-gravity--section-depth) claude-gravity--indent-step)))
            (margin (propertize (concat claude-gravity--margin-char " ")
                               'face claude-gravity--margin-face))
