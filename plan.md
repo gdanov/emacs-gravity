@@ -18,6 +18,16 @@ we will produce a claude code plug-in (`emacs-bridge`) that hooks into lifecycle
 
 we don't want to implement full-blown claude code IDE, as we already use two pretty good ones (claude-code and claude-code-ide). We may integrate with them later
 
+## previous art, i
+
+### google antigravity
+
+The IDE that made me go "a-ha". Good ideas (probably many taken from Cursor), bad implementation.
+
+### plannotator
+
+great claude code plug-in, I'm shamelessly copying it here.
+
 # current state
 
 ## features
@@ -47,10 +57,12 @@ we don't want to implement full-blown claude code IDE, as we already use two pre
 - Running tool/agent background highlighting (subtle gold tint via `claude-gravity-running-bg` face)
 - Inline agent annotations on Task tools ("→ AgentType (short-id) duration")
 - Bidirectional PermissionRequest: plan review buffer with approve/deny/feedback flow (matcher: ExitPlanMode, 96h timeout)
-- Plan review inline comments (`c` key): orange wave-underline overlays with `« comment »` after-string
+- Plan review inline comments (`C-c ;`): orange wave-underline overlays with `« comment »` after-string
 - Plan review `@claude` marker scanning: detects `@claude:` annotations in edited plan text
-- Plan review auto-deny: approve (`C-c C-c`) auto-converts to deny with structured feedback when edits, comments, or markers detected
+- Plan review smart approve (`C-c C-c`): if no feedback detected, sends clean allow. If edits, inline comments (`C-c ;`), or `@claude` markers are present, automatically sends deny with structured feedback instead — because the PermissionRequest allow channel cannot carry a payload, deny-with-message is the only way to deliver feedback back to Claude
+- Plan review explicit deny (`C-c C-k`): always denies, prompts for optional general comment, bundles all feedback (diff + comments + markers + comment)
 - Plan review diff view (`C-c C-d`): unified diff between original and edited plan
+- Plan review transient menu (`C-c ?`): command palette for all plan review actions
 
 # tech stack
 

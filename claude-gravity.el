@@ -2558,19 +2558,27 @@ Each entry is (event-data proc session-id).")
   "List of inline comments in the plan review buffer.
 Each entry is an alist with keys: line, text, overlay, context.")
 
-(defvar claude-gravity-plan-review-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'claude-gravity-plan-review-approve)
-    (define-key map (kbd "C-c C-k") #'claude-gravity-plan-review-deny)
-    (define-key map (kbd "C-c C-d") #'claude-gravity-plan-review-diff)
-    (define-key map (kbd "c") #'claude-gravity-plan-review-comment)
-    map)
+(defvar claude-gravity-plan-review-mode-map (make-sparse-keymap)
   "Keymap for `claude-gravity-plan-review-mode'.")
+(define-key claude-gravity-plan-review-mode-map (kbd "C-c C-c") #'claude-gravity-plan-review-approve)
+(define-key claude-gravity-plan-review-mode-map (kbd "C-c C-k") #'claude-gravity-plan-review-deny)
+(define-key claude-gravity-plan-review-mode-map (kbd "C-c C-d") #'claude-gravity-plan-review-diff)
+(define-key claude-gravity-plan-review-mode-map (kbd "C-c ;") #'claude-gravity-plan-review-comment)
+(define-key claude-gravity-plan-review-mode-map (kbd "C-c ?") #'claude-gravity-plan-review-menu)
+
+(transient-define-prefix claude-gravity-plan-review-menu ()
+  "Plan review commands."
+  ["Review"
+   ("C-c C-c" "Approve plan" claude-gravity-plan-review-approve)
+   ("C-c C-k" "Deny with feedback" claude-gravity-plan-review-deny)]
+  ["Annotate"
+   ("C-c ;" "Inline comment" claude-gravity-plan-review-comment)
+   ("C-c C-d" "Show diff" claude-gravity-plan-review-diff)])
 
 (define-minor-mode claude-gravity-plan-review-mode
   "Minor mode for reviewing Claude Code plans.
 \\{claude-gravity-plan-review-mode-map}"
-  :lighter " PlanReview[C-c C-c:approve | C-c C-k:deny | c:comment]"
+  :lighter " PlanReview[C-c ?:menu]"
   :keymap claude-gravity-plan-review-mode-map)
 
 (defun claude-gravity--handle-plan-review (event-data proc session-id)
@@ -2839,6 +2847,16 @@ Sends a deny response."
                           (decision . ((behavior . "deny")
                                        (message . "Plan review cancelled (buffer closed)"))))))))
       (claude-gravity--plan-review-send-response response))))
+
+(defun claude-gravity-test-plan-review ()
+  "Open a simulated plan review buffer for testing.
+No socket proc is attached — approve/deny will just message."
+  (interactive)
+  (claude-gravity--handle-plan-review
+   '((tool_input . ((planContent . "## Test Plan\n\n1. Step one\n2. Step two\n3. Step three\n")
+                     (allowedPrompts . [((tool . "Bash") (prompt . "npm test"))]))))
+   nil
+   "test-session"))
 
 (provide 'claude-gravity)
 ;;; claude-gravity.el ends here
