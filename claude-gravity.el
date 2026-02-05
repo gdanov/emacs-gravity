@@ -2502,9 +2502,13 @@ Accumulates partial data per connection until complete lines arrive."
                       (session-id (alist-get 'session_id data))
                       (cwd (alist-get 'cwd data))
                       (pid (alist-get 'pid data))
-                      (payload (alist-get 'data data)))
-                  (when event
-                    (claude-gravity-handle-event event session-id cwd payload pid))))
+                      (payload (alist-get 'data data))
+                      (needs-response (alist-get 'needs_response data)))
+                  (if needs-response
+                      ;; Bidirectional: keep proc open for response
+                      (claude-gravity--handle-plan-review payload proc session-id)
+                    (when event
+                      (claude-gravity-handle-event event session-id cwd payload pid)))))
             (error
              (message "Claude Gravity JSON error: %s" err))))))
     ;; Store any remaining partial data
@@ -2534,6 +2538,307 @@ Accumulates partial data per connection until complete lines arrive."
   (when (file-exists-p claude-gravity-server-sock-path)
     (delete-file claude-gravity-server-sock-path))
   (message "Claude Gravity server stopped"))
+
+;;; Plan Review Mode
+
+(defvar claude-gravity--plan-review-queue nil
+  "Queue of pending plan review requests.
+Each entry is (event-data proc session-id).")
+
+(defvar-local claude-gravity--plan-review-proc nil
+  "The socket process to send the review decision back on.")
+
+(defvar-local claude-gravity--plan-review-original nil
+  "Original plan content for computing diffs.")
+
+(defvar-local claude-gravity--plan-review-session-id nil
+  "Session ID associated with this plan review.")
+
+(defvar-local claude-gravity--plan-review-comments nil
+  "List of inline comments in the plan review buffer.
+Each entry is an alist with keys: line, text, overlay, context.")
+
+(defvar claude-gravity-plan-review-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'claude-gravity-plan-review-approve)
+    (define-key map (kbd "C-c C-k") #'claude-gravity-plan-review-deny)
+    (define-key map (kbd "C-c C-d") #'claude-gravity-plan-review-diff)
+    (define-key map (kbd "c") #'claude-gravity-plan-review-comment)
+    map)
+  "Keymap for `claude-gravity-plan-review-mode'.")
+
+(define-minor-mode claude-gravity-plan-review-mode
+  "Minor mode for reviewing Claude Code plans.
+\\{claude-gravity-plan-review-mode-map}"
+  :lighter " PlanReview[C-c C-c:approve | C-c C-k:deny | c:comment]"
+  :keymap claude-gravity-plan-review-mode-map)
+
+(defun claude-gravity--handle-plan-review (event-data proc session-id)
+  "Open a plan review buffer for EVENT-DATA.
+PROC is the socket connection to respond on.
+SESSION-ID identifies the Claude Code session."
+  (let* ((tool-input (alist-get 'tool_input event-data))
+         (plan-content (or (alist-get 'planContent tool-input)
+                           ;; ExitPlanMode may have allowedPrompts but plan
+                           ;; content could be in different fields
+                           (alist-get 'plan tool-input)
+                           ;; Fallback: stringify the whole tool_input
+                           (json-encode tool-input)))
+         (allowed-prompts (alist-get 'allowedPrompts tool-input))
+         (session (claude-gravity--get-session session-id))
+         (label (if session
+                    (claude-gravity--session-label session)
+                  (or session-id "unknown")))
+         (buf-name (format "*Claude Plan Review: %s*" label))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      (erase-buffer)
+      ;; Insert plan content
+      (insert plan-content)
+      (insert "\n")
+      ;; Insert allowed prompts section if present
+      (when (and allowed-prompts (> (length allowed-prompts) 0))
+        (insert "\n## Allowed Prompts\n\n")
+        (seq-doseq (p allowed-prompts)
+          (let ((tool (alist-get 'tool p))
+                (prompt (alist-get 'prompt p)))
+            (insert (format "- **%s**: %s\n" (or tool "?") (or prompt "?"))))))
+      ;; Set up modes
+      (when (fboundp 'markdown-mode)
+        (markdown-mode))
+      (claude-gravity-plan-review-mode 1)
+      ;; Store buffer-local state
+      (setq-local claude-gravity--plan-review-proc proc)
+      (setq-local claude-gravity--plan-review-original plan-content)
+      (setq-local claude-gravity--plan-review-session-id session-id)
+      ;; Kill hook to handle buffer closed without decision
+      (add-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill nil t)
+      (goto-char (point-min))
+      (set-buffer-modified-p nil))
+    ;; Display prominently
+    (pop-to-buffer buf '((display-buffer-reuse-window
+                          display-buffer-same-window)))
+    (message "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff")))
+
+(defun claude-gravity--plan-review-send-response (response)
+  "Send RESPONSE JSON to the bridge via the stored socket proc."
+  (let ((proc claude-gravity--plan-review-proc))
+    (when (and proc (process-live-p proc))
+      (process-send-string proc (concat (json-encode response) "\n"))
+      ;; Give the bridge time to read before closing
+      (run-at-time 0.1 nil (lambda (p) (when (process-live-p p) (delete-process p))) proc))
+    (setq-local claude-gravity--plan-review-proc nil)))
+
+(defun claude-gravity--plan-review-compute-diff ()
+  "Compute a unified diff between original and current buffer content.
+Returns the diff string or nil if no changes."
+  (let ((original claude-gravity--plan-review-original)
+        (current (buffer-substring-no-properties (point-min) (point-max))))
+    ;; Trim trailing whitespace for comparison
+    (setq current (string-trim-right current))
+    (setq original (string-trim-right original))
+    (if (string= original current)
+        nil
+      (let ((orig-file (make-temp-file "plan-orig"))
+            (curr-file (make-temp-file "plan-curr")))
+        (unwind-protect
+            (progn
+              (with-temp-file orig-file (insert original))
+              (with-temp-file curr-file (insert current))
+              (with-temp-buffer
+                (call-process "diff" nil t nil "-u" orig-file curr-file)
+                (buffer-string)))
+          (delete-file orig-file)
+          (delete-file curr-file))))))
+
+(defun claude-gravity-plan-review-comment ()
+  "Add an inline comment on the current line in the plan review buffer."
+  (interactive)
+  (let* ((text (read-string "Comment: "))
+         (line-num (line-number-at-pos))
+         (line-text (string-trim
+                     (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position))))
+         (beg (line-beginning-position))
+         (end (line-end-position))
+         (ov (make-overlay beg end)))
+    (when (string-empty-p text)
+      (delete-overlay ov)
+      (user-error "Empty comment, cancelled"))
+    (overlay-put ov 'face '(:underline (:style wave :color "orange")))
+    (overlay-put ov 'help-echo text)
+    (overlay-put ov 'after-string
+                 (propertize (format "  « %s »" text)
+                             'face '(:foreground "orange" :slant italic)))
+    (overlay-put ov 'claude-plan-comment t)
+    (push `((line . ,line-num)
+            (text . ,text)
+            (overlay . ,ov)
+            (context . ,line-text))
+          claude-gravity--plan-review-comments)
+    (message "Comment added on line %d" line-num)))
+
+(defun claude-gravity--plan-review-collect-feedback ()
+  "Collect inline comments from `claude-gravity--plan-review-comments'.
+Returns a formatted markdown string or nil if no comments."
+  (when claude-gravity--plan-review-comments
+    (let ((sorted (sort (copy-sequence claude-gravity--plan-review-comments)
+                        (lambda (a b)
+                          (< (alist-get 'line a) (alist-get 'line b))))))
+      (concat "## Inline comments:\n"
+              (mapconcat
+               (lambda (entry)
+                 (let ((line (alist-get 'line entry))
+                       (text (alist-get 'text entry))
+                       (ctx (alist-get 'context entry)))
+                   (format "- Line %d (near \"%s\"): \"%s\""
+                           line
+                           (if (> (length ctx) 60)
+                               (concat (substring ctx 0 57) "...")
+                             ctx)
+                           text)))
+               sorted "\n")
+              "\n"))))
+
+(defun claude-gravity--plan-review-scan-markers ()
+  "Scan the buffer for @claude text markers.
+Returns a formatted markdown string or nil if none found."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((markers nil))
+      (while (re-search-forward "^.*@[Cc]laude:?\\s-*\\(.+\\)" nil t)
+        (let* ((marker-text (string-trim (match-string 1)))
+               (line-num (line-number-at-pos (match-beginning 0)))
+               ;; Get surrounding context: previous non-empty line
+               (ctx (save-excursion
+                      (forward-line -1)
+                      (while (and (not (bobp))
+                                  (looking-at-p "^\\s-*$"))
+                        (forward-line -1))
+                      (string-trim
+                       (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position))))))
+          (push `((line . ,line-num)
+                  (text . ,marker-text)
+                  (context . ,ctx))
+                markers)))
+      (when markers
+        (let ((sorted (sort (nreverse markers)
+                            (lambda (a b)
+                              (< (alist-get 'line a) (alist-get 'line b))))))
+          (concat "## @claude markers:\n"
+                  (mapconcat
+                   (lambda (entry)
+                     (let ((line (alist-get 'line entry))
+                           (text (alist-get 'text entry))
+                           (ctx (alist-get 'context entry)))
+                       (format "- Line %d (near \"%s\"): \"%s\""
+                               line
+                               (if (> (length ctx) 60)
+                                   (concat (substring ctx 0 57) "...")
+                                 ctx)
+                               text)))
+                   sorted "\n")
+                  "\n"))))))
+
+(defun claude-gravity--plan-review-build-feedback-message (diff comments markers general-comment)
+  "Build a structured feedback message from DIFF, COMMENTS, MARKERS, and GENERAL-COMMENT.
+Returns the formatted markdown string.  Omits empty sections."
+  (let ((parts (list "# Plan Feedback\n")))
+    (when comments
+      (push (concat comments "\n") parts))
+    (when markers
+      (push (concat markers "\n") parts))
+    (when diff
+      (push (format "## Changes requested:\n```diff\n%s\n```\n" diff) parts))
+    (when (and general-comment (not (string-empty-p general-comment)))
+      (push (format "## General comment:\n%s\n" general-comment) parts))
+    (when (and (not diff) (not comments) (not markers)
+               (or (not general-comment) (string-empty-p general-comment)))
+      (push "Plan was rejected without specific feedback.\n" parts))
+    (string-join (nreverse parts) "\n")))
+
+(defun claude-gravity-plan-review-approve ()
+  "Approve the plan and send allow decision to Claude Code.
+If the user has made edits, added inline comments, or inserted
+@claude markers, automatically deny instead so Claude can
+incorporate the feedback (the allow channel cannot carry feedback)."
+  (interactive)
+  (let ((diff (claude-gravity--plan-review-compute-diff))
+        (comments (claude-gravity--plan-review-collect-feedback))
+        (markers (claude-gravity--plan-review-scan-markers)))
+    (if (or diff comments markers)
+        ;; Feedback exists — deny so Claude sees it
+        (let* ((deny-message (claude-gravity--plan-review-build-feedback-message
+                              diff comments markers
+                              "I edited/annotated the plan. Please update your plan to match these changes and call ExitPlanMode again."))
+               (response `((hookSpecificOutput
+                            . ((hookEventName . "PermissionRequest")
+                               (decision . ((behavior . "deny")
+                                            (message . ,deny-message))))))))
+          (claude-gravity--plan-review-send-response response)
+          (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
+          (let ((buf (current-buffer)))
+            (quit-window)
+            (kill-buffer buf))
+          (message "Feedback detected — denied for revision"))
+      ;; No feedback — clean approve
+      (let ((response `((hookSpecificOutput
+                         . ((hookEventName . "PermissionRequest")
+                            (decision . ((behavior . "allow"))))))))
+        (claude-gravity--plan-review-send-response response)
+        (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
+        (let ((buf (current-buffer)))
+          (quit-window)
+          (kill-buffer buf))
+        (message "Plan approved")))))
+
+(defun claude-gravity-plan-review-deny ()
+  "Deny the plan and send feedback to Claude Code.
+Collects inline comments, @claude markers, diff, and a general comment."
+  (interactive)
+  (let* ((diff (claude-gravity--plan-review-compute-diff))
+         (comments (claude-gravity--plan-review-collect-feedback))
+         (markers (claude-gravity--plan-review-scan-markers))
+         (general-comment (read-string "Feedback comment (optional): "))
+         (deny-message (claude-gravity--plan-review-build-feedback-message
+                        diff comments markers general-comment))
+         (response `((hookSpecificOutput
+                      . ((hookEventName . "PermissionRequest")
+                         (decision . ((behavior . "deny")
+                                      (message . ,deny-message))))))))
+    (claude-gravity--plan-review-send-response response)
+    (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
+    (let ((buf (current-buffer)))
+      (quit-window)
+      (kill-buffer buf))
+    (message "Plan denied with feedback")))
+
+(defun claude-gravity-plan-review-diff ()
+  "Show a diff between the original plan and current edits."
+  (interactive)
+  (let ((diff (claude-gravity--plan-review-compute-diff)))
+    (if diff
+        (let ((buf (get-buffer-create "*Claude Plan Diff*")))
+          (with-current-buffer buf
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert diff))
+            (diff-mode)
+            (goto-char (point-min))
+            (setq buffer-read-only t))
+          (display-buffer buf))
+      (message "No changes from original plan"))))
+
+(defun claude-gravity--plan-review-on-kill ()
+  "Handle plan review buffer being killed without explicit decision.
+Sends a deny response."
+  (when claude-gravity--plan-review-proc
+    (let ((response `((hookSpecificOutput
+                       . ((hookEventName . "PermissionRequest")
+                          (decision . ((behavior . "deny")
+                                       (message . "Plan review cancelled (buffer closed)"))))))))
+      (claude-gravity--plan-review-send-response response))))
 
 (provide 'claude-gravity)
 ;;; claude-gravity.el ends here

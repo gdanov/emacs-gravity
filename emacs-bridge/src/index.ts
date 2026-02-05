@@ -51,6 +51,75 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pi
   });
 }
 
+// Helper to send data to Emacs socket and wait for a response (bidirectional).
+// Used for PermissionRequest where Emacs must reply with allow/deny.
+async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: string, pid: number | null, payload: any, timeoutMs: number = 300000): Promise<any> {
+  log(`Sending event (wait): ${eventName} session: ${sessionId}`);
+  const socketPath = getSocketPath();
+
+  return new Promise<any>((resolve) => {
+    const client = createConnection(socketPath);
+    let responded = false;
+    let buffer = "";
+
+    const timer = setTimeout(() => {
+      if (!responded) {
+        responded = true;
+        log(`sendToEmacsAndWait timeout after ${timeoutMs}ms`);
+        client.destroy();
+        resolve({});
+      }
+    }, timeoutMs);
+
+    client.on("connect", () => {
+      log("Connected to socket (wait mode)");
+      const message =
+        JSON.stringify({ event: eventName, session_id: sessionId, cwd: cwd, pid: pid, needs_response: true, data: payload }) + "\n";
+      client.write(message);
+      // Do NOT call client.end() — keep connection open for response
+    });
+
+    client.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const newlineIdx = buffer.indexOf("\n");
+      if (newlineIdx >= 0) {
+        const line = buffer.substring(0, newlineIdx);
+        if (!responded) {
+          responded = true;
+          clearTimeout(timer);
+          try {
+            const response = JSON.parse(line);
+            log(`Received response: ${JSON.stringify(response)}`);
+            resolve(response);
+          } catch (e) {
+            log(`Failed to parse response: ${e}`);
+            resolve({});
+          }
+          client.end();
+        }
+      }
+    });
+
+    client.on("error", (err) => {
+      if (!responded) {
+        responded = true;
+        clearTimeout(timer);
+        log(`Socket error (wait): ${err.message}`);
+        resolve({});
+      }
+    });
+
+    client.on("close", () => {
+      if (!responded) {
+        responded = true;
+        clearTimeout(timer);
+        log("Connection closed before response");
+        resolve({});
+      }
+    });
+  });
+}
+
 // Read the tail of a file (last maxBytes), skipping any partial first line.
 // If the file is smaller than maxBytes, reads the whole file.
 export function readTail(filePath: string, maxBytes: number): string {
@@ -568,11 +637,15 @@ async function main() {
       }
     }
 
-    // Send to Emacs
-    await sendToEmacs(eventName, sessionId, cwd, pid, inputData);
-
-    // Always output valid JSON to stdout as expected by Claude Code
-    console.log(JSON.stringify({}));
+    // Send to Emacs — PermissionRequest uses bidirectional wait
+    if (eventName === "PermissionRequest") {
+      const response = await sendToEmacsAndWait(eventName, sessionId, cwd, pid, inputData);
+      console.log(JSON.stringify(response));
+    } else {
+      await sendToEmacs(eventName, sessionId, cwd, pid, inputData);
+      // Always output valid JSON to stdout as expected by Claude Code
+      console.log(JSON.stringify({}));
+    }
   } catch (error) {
     // Log error to stderr but output valid JSON to stdout to not break Claude
     // console.error("Emacs Bridge Logic Error:", error);
