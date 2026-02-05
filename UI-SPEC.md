@@ -458,7 +458,87 @@ Agent demarcation:
 
 ---
 
-## 10. Keyboard / Transient Menu (`?`)
+## 10. Plan Review Buffer: `*Claude Plan Review: <slug>*`
+
+Opened when a `PermissionRequest` (matcher: `ExitPlanMode`) arrives. The buffer
+shows the plan content as editable markdown. A minor mode
+(`claude-gravity-plan-review-mode`) provides review-specific keybindings.
+
+### Clean plan (no feedback)
+
+```
+*Claude Plan Review: calm-river*          PlanReview[C-c C-c:approve | C-c C-k:deny | c:comment]
+
+## Implementation Plan
+
+1. Explore the current rendering code
+2. Fix the section heading alignment
+3. Add word-wrapping to long tool descriptions
+4. Update tests
+```
+
+### Plan with inline comment (`c`)
+
+```
+1. Explore the current rendering code
+2. Fix the section heading alignment          « this should also fix indentation »
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~        (orange wave underline on line)
+3. Add word-wrapping to long tool descriptions
+```
+
+The comment overlay uses:
+- Orange wave underline on the full line (`(:underline (:style wave :color "orange"))`)
+- After-string: `  « comment text »` in orange italic
+
+### Plan with `@claude` marker
+
+```
+3. Add word-wrapping to long tool descriptions
+   @claude: also handle tool signatures, not just descriptions
+4. Update tests
+```
+
+Markers matching `@claude:` (case-insensitive) are scanned on approve/deny.
+
+### Actions
+
+| Key | Action | Behavior |
+|-----|--------|----------|
+| `C-c C-c` | Approve | If no feedback: sends `allow`. If any edits, comments, or `@claude` markers exist: **auto-converts to deny** with structured feedback message |
+| `C-c C-k` | Deny | Prompts for general comment, collects all feedback (comments, markers, diff, general comment), sends `deny` |
+| `C-c C-d` | Diff | Shows unified diff between original and current buffer in `*Claude Plan Diff*` |
+| `c` | Comment | Prompts for text, adds inline comment overlay on current line |
+
+### Feedback message format (sent on deny / auto-deny)
+
+```
+# Plan Feedback
+
+## Inline comments
+- Line 5 (near "Fix the section heading"): this should also fix indentation
+
+## @claude markers
+- Line 8 (near "Add word-wrapping"): also handle tool signatures
+
+## Changes requested
+--- original
++++ edited
+@@ -3,1 +3,2 @@
+-3. Add word-wrapping to long tool descriptions
++3. Add word-wrapping to long tool descriptions and signatures
+
+## General comment
+Please also consider edge cases with very long file paths.
+```
+
+### Buffer lifecycle
+
+- Buffer killed without decision → auto-sends deny
+- After approve/deny, buffer is killed and process handle released
+
+---
+
+## 11. Keyboard / Transient Menu (`?`)
 
 ```
 Actions
@@ -483,5 +563,16 @@ Sessions
 Navigation
   RET  Visit or toggle
   TAB  Toggle section
+```
+
+### Plan Review Mode (`claude-gravity-plan-review-mode-map`)
+
+Active in `*Claude Plan Review*` buffers:
+
+```
+C-c C-c  Approve plan (auto-denies if feedback detected)
+C-c C-k  Deny plan with feedback
+C-c C-d  Show diff vs original
+c        Add inline comment on current line
 ```
 

@@ -22,7 +22,7 @@ we don't want to implement full-blown claude code IDE, as we already use two pre
 
 ## features
 
-- Plugin hooks for 9 lifecycle events: PreToolUse, PostToolUse, Stop, UserPromptSubmit, SubagentStart, SubagentStop, SessionStart, SessionEnd, Notification
+- Plugin hooks for 10 lifecycle events: PreToolUse, PostToolUse, Stop, UserPromptSubmit, SubagentStart, SubagentStop, SessionStart, SessionEnd, Notification, PermissionRequest
 - Multi-session support with per-session buffers, grouped by project in overview
 - Track session state (idle, responding, ended) with PID-based liveness detection
 - Dead session detection: PID checks, staleness timeout (>5min), cleanup commands (D/d/R/X)
@@ -46,6 +46,11 @@ we don't want to implement full-blown claude code IDE, as we already use two pre
 - Visual section dividers (─ Title ──), turn separators (╌╌╌), margin indicators (┊)
 - Running tool/agent background highlighting (subtle gold tint via `claude-gravity-running-bg` face)
 - Inline agent annotations on Task tools ("→ AgentType (short-id) duration")
+- Bidirectional PermissionRequest: plan review buffer with approve/deny/feedback flow (matcher: ExitPlanMode, 96h timeout)
+- Plan review inline comments (`c` key): orange wave-underline overlays with `« comment »` after-string
+- Plan review `@claude` marker scanning: detects `@claude:` annotations in edited plan text
+- Plan review auto-deny: approve (`C-c C-c`) auto-converts to deny with structured feedback when edits, comments, or markers detected
+- Plan review diff view (`C-c C-d`): unified diff between original and edited plan
 
 # tech stack
 
@@ -55,6 +60,7 @@ we like emacs magit package and want to use similar UI paradigms and libraries. 
 
 ## open
 
+* restore session state from json files when emacs is restarted and claude planning or other activity is already in progress
 - transient keys that focus session state buffer on the latest turn - all previous are collapsed
 - show Edit tools diff (ideally color coded) — `old_string`/`new_string` are in `tool_input` but discarded by bridge. Render inline diff with `diff-mode` faces
 - show tools that asked for permissions (partially done: pattern generation + settings integration works, but no explicit "permission requested" indicator in UI)
@@ -64,7 +70,7 @@ we like emacs magit package and want to use similar UI paradigms and libraries. 
 - navigation & search: `]`/`[` next/prev turn, `}`/`{` next/prev tool, `S-TAB` collapse/expand all, `G` jump to latest, depth-level toggles (`1`/`2`/`3`)
 - permission mode display: `permission_mode` field is sent by Claude Code but ignored. Show in session header (plan/acceptEdits/default), show mode transitions in timeline
 - show the claude status bar info in the session status
-- bidirectional communication (Emacs → Claude Code): currently one-way only. Enable answering AskUserQuestion, approving plans, sending prompts from Emacs
+- bidirectional communication (Emacs → Claude Code): partially done — PermissionRequest (plan approve/deny with feedback) works. Still missing: answering AskUserQuestion, sending prompts from Emacs
 - session persistence: sessions lost on Emacs restart. Serialize state to file, offer restore on startup
 - incremental buffer updates: currently full `erase-buffer` + redraw on every event. Track changed sections and re-render only those, or use magit-section in-place updates
 - notification system: all non-reset notifications silently discarded. Display as timestamped entries, distinguish severity, surface status bar updates (tokens, cost, model)
@@ -75,13 +81,14 @@ we like emacs magit package and want to use similar UI paradigms and libraries. 
 
 ## hook & interaction gap analysis (Feb 2025)
 
-Claude Code supports 12 hook events. We handle 9. Analysis of missing hooks, unused data fields, and bridge-level gaps.
+Claude Code supports 12 hook events. We handle 10. Analysis of missing hooks, unused data fields, and bridge-level gaps.
 
-### missing hook events (3 unregistered)
+### missing hook events (2 unregistered)
 
 - **PostToolUseFailure** — fires when a tool execution fails. Fields: `tool_name`, `tool_use_id`, `tool_input`, `error`, `is_interrupt`. Enables: error/failure visualization (distinguishing failed tools from successful), user-interrupt detection. Directly unblocks the "error/failure visualization" open item.
-- **PermissionRequest** — fires when permission dialog appears. Fields: `tool_name`, `tool_input`, `permission_suggestions`. Enables: explicit "permission requested" indicator, pre-populating allow patterns from suggestions, and is prerequisite for bidirectional communication (answering permissions from Emacs). Partially unblocks "show tools that asked for permissions" and "bidirectional communication" open items.
 - **PreCompact** — fires before context compaction (manual or auto). Fields: `trigger` (manual/auto), `custom_instructions`. Enables: tracking compaction events, warning user before compaction, preserving pre-compact state for session persistence.
+
+**Note:** PermissionRequest was implemented — see current state features above. Bidirectional approve/deny with inline feedback flow is working.
 
 ### unused data fields (available but discarded)
 
@@ -116,25 +123,19 @@ Claude Code supports 12 hook events. We handle 9. Analysis of missing hooks, unu
 ### implementation priority (recommended order)
 
 1. Register **PostToolUseFailure** hook + handle in elisp → error visualization
-2. Register **PermissionRequest** hook + handle → permission UI
-3. Extract **token usage** in bridge from transcript → cost/stats display
-4. Render **Edit diffs** from existing `tool_input` data → inline diffs
-5. Use **SessionStart `source`** and **SessionEnd `reason`** → lifecycle visibility
-6. Register **PreCompact** hook → compaction tracking
-7. Expand **Notification handling** → surface notification types/content
-8. Add **tool timing** → capture timestamps in elisp Pre/PostToolUse handlers
+2. Extract **token usage** in bridge from transcript → cost/stats display
+3. Render **Edit diffs** from existing `tool_input` data → inline diffs
+4. Use **SessionStart `source`** and **SessionEnd `reason`** → lifecycle visibility
+5. Register **PreCompact** hook → compaction tracking
+6. Expand **Notification handling** → surface notification types/content
+7. Add **tool timing** → capture timestamps in elisp Pre/PostToolUse handlers
 
 ## done
 
-- ~~(done: inline preview + allowedPrompts + file path)~~
-  - ~~`ExitPlanMode` tool does not show the suggested plan. I want it to show the suggested plan. see the plannotator plugin for example~~
-- ~~(done: assistant monologue, thinking, and trailing text display)~~
-  - ~~show replies in conversation, for example when I ask claude in planning mode to analyze something, it answers and we're still in planning mode (and there's no explicit plan)~~
-- ~~(done: visual-line-mode + insert-wrapped helper for all long content: prompts, commands, paths, questions, answers, tool signatures, stderr, plan preview, permissions)~~
-  - ~~wrap text such as the full prompts~~
-- ~~(done: response cycle auto-collapse for completed cycles)~~
-  - ~~tools/agents history is automatically expanded when there are no running tools/agents, not nice~~
-- ~~(done: depth-aware indentation — top sections 0sp, sub-headings (Tools/Agents/Tasks/History) 2sp, items 4sp, body/labels 6sp, continuation/output 8sp; `insert-label` helper with optional indent arg; `indent-body`/`indent-continuation` constants for top-level contexts)~~
-  - ~~improve left padding of the different section content, so that it matches their level~~
-- ~~(done: debounced per-session rendering with 0.1s idle timer)~~
-  - ~~session status buffer should automatically update~~
+- ExitPlanMode inline preview + allowedPrompts + file path
+- Assistant monologue, thinking, and trailing text display
+- Visual-line-mode + insert-wrapped helper for all long content
+- Response cycle auto-collapse for completed cycles
+- Depth-aware indentation (top sections 0sp, sub-headings 2sp, items 4sp, body 6sp, continuation 8sp)
+- Debounced per-session rendering (0.1s idle timer)
+- PermissionRequest bidirectional flow with plan review feedback (inline comments, @claude markers, auto-deny, diff view)
