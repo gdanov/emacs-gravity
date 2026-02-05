@@ -86,6 +86,16 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PreToolUse"
           }
         ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/AskUserQuestionIntercept",
+            "timeout": 345600
+          }
+        ]
       }
     ],
     "PostToolUse": [

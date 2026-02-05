@@ -416,7 +416,8 @@ Optional PID is the Claude Code process ID."
     ("SessionEnd"
      (let ((session (claude-gravity--get-session session-id)))
        (when session
-         (plist-put session :status 'ended))))
+         (plist-put session :status 'ended)))
+     (claude-gravity--clear-notification-indicator))
 
     ("UserPromptSubmit"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -429,9 +430,11 @@ Optional PID is the Claude Code process ID."
                       (vconcat (plist-get session :prompts) (vector entry))))
          (plist-put session :current-turn
                     (1+ (or (plist-get session :current-turn) 0))))
-       (plist-put session :claude-status 'responding)))
+       (plist-put session :claude-status 'responding))
+     (claude-gravity--clear-notification-indicator))
 
     ("Stop"
+     (claude-gravity--clear-notification-indicator)
      (let ((session (claude-gravity--get-session session-id)))
        (when session
          (plist-put session :claude-status 'idle)
@@ -676,9 +679,25 @@ Optional PID is the Claude Code process ID."
 
     ("Notification"
      (let* ((session (claude-gravity--get-session session-id))
-            (msg (or (alist-get 'message data) "")))
-       (when (and session (string-match-p "\\(?:reset\\|clear\\)" msg))
-         (claude-gravity--reset-session session)))))
+            (msg (or (alist-get 'message data) ""))
+            (ntype (alist-get 'notification_type data))
+            (label (if session
+                       (claude-gravity--session-label session)
+                     (claude-gravity--session-short-id session-id))))
+       (when session
+         ;; Store notification in session
+         (let ((notifs (or (plist-get session :notifications) [])))
+           (plist-put session :notifications
+                      (vconcat notifs (vector (list (cons 'message msg)
+                                                    (cons 'type ntype)
+                                                    (cons 'timestamp (current-time)))))))
+         ;; Handle reset/clear
+         (when (string-match-p "\\(?:reset\\|clear\\)" msg)
+           (claude-gravity--reset-session session))
+         ;; Update mode-line indicator
+         (claude-gravity--update-notification-indicator ntype label))
+       ;; Always show in minibuffer
+       (message "Claude [%s]: %s" label msg))))
 
   (claude-gravity--schedule-refresh)
   (when session-id
@@ -882,6 +901,11 @@ INDENT-OR-NIL and FACE work like `claude-gravity--insert-wrapped'."
     (let* ((first (and (> (length response) 0) (aref response 0)))
            (text (and (listp first) (alist-get 'text first))))
       text))
+   ;; Alist with answers dict (AskUserQuestion format)
+   ((and (listp response) (alist-get 'answers response))
+    (let ((answers (alist-get 'answers response)))
+      (when (listp answers)
+        (cdar answers))))
    ;; Alist with stdout
    ((and (listp response) (alist-get 'stdout response))
     (alist-get 'stdout response))
@@ -2478,6 +2502,35 @@ final reply text."
 
 ;;; Socket Server
 
+;;; Notification mode-line indicator
+
+(defvar claude-gravity--notification-indicator ""
+  "Mode-line string showing Claude notification status.
+Added to `global-mode-string' by `claude-gravity-server-start'.")
+
+(put 'claude-gravity--notification-indicator 'risky-local-variable t)
+
+(defun claude-gravity--update-notification-indicator (notification-type label)
+  "Update the mode-line indicator based on NOTIFICATION-TYPE and LABEL."
+  (setq claude-gravity--notification-indicator
+        (cond
+         ((equal notification-type "permission")
+          (propertize (format " [Claude: permission]") 'face 'claude-gravity-question))
+         ((or (equal notification-type "waiting")
+              (equal notification-type "tool"))
+          (propertize (format " [Claude: waiting]") 'face 'claude-gravity-status-responding))
+         (notification-type
+          (propertize (format " [Claude: %s]" notification-type) 'face 'claude-gravity-status-responding))
+         (t
+          (propertize " [Claude: notice]" 'face 'claude-gravity-status-responding))))
+  (force-mode-line-update t))
+
+(defun claude-gravity--clear-notification-indicator ()
+  "Clear the mode-line notification indicator."
+  (when (not (string-empty-p claude-gravity--notification-indicator))
+    (setq claude-gravity--notification-indicator "")
+    (force-mode-line-update t)))
+
 (defvar claude-gravity-server-sock-path
   (expand-file-name "claude-gravity.sock" (file-name-directory (or load-file-name buffer-file-name)))
   "Path to the Unix socket for Claude Gravity communication.")
@@ -2505,8 +2558,13 @@ Accumulates partial data per connection until complete lines arrive."
                       (payload (alist-get 'data data))
                       (needs-response (alist-get 'needs_response data)))
                   (if needs-response
-                      ;; Bidirectional: keep proc open for response
-                      (claude-gravity--handle-plan-review payload proc session-id)
+                      ;; Bidirectional: dispatch by tool_name
+                      (let ((tool-name (alist-get 'tool_name payload)))
+                        (cond
+                         ((equal tool-name "AskUserQuestion")
+                          (claude-gravity--handle-ask-user-question payload proc session-id cwd))
+                         (t
+                          (claude-gravity--handle-plan-review payload proc session-id))))
                     (when event
                       (claude-gravity-handle-event event session-id cwd payload pid)))))
             (error
@@ -2527,6 +2585,9 @@ Accumulates partial data per connection until complete lines arrive."
          :family 'local
          :service claude-gravity-server-sock-path
          :filter 'claude-gravity--server-filter))
+  ;; Register notification indicator in mode-line
+  (unless (memq 'claude-gravity--notification-indicator global-mode-string)
+    (push 'claude-gravity--notification-indicator global-mode-string))
   (message "Claude Gravity server started at %s" claude-gravity-server-sock-path))
 
 (defun claude-gravity-server-stop ()
@@ -2581,6 +2642,63 @@ Each entry is an alist with keys: line, text, overlay, context.")
   :lighter " PlanReview[C-c ?:menu]"
   :keymap claude-gravity-plan-review-mode-map)
 
+(defun claude-gravity--handle-ask-user-question (event-data proc session-id cwd)
+  "Handle bidirectional AskUserQuestion from EVENT-DATA.
+PROC is the socket to respond on.  SESSION-ID and CWD identify the session."
+  ;; Fire normal PreToolUse handler to update session state
+  (claude-gravity-handle-event "PreToolUse" session-id cwd event-data)
+  ;; Defer interactive part to the command loop — completing-read
+  ;; cannot run inside a process filter.
+  (let ((tool-input (alist-get 'tool_input event-data))
+        (tid (alist-get 'tool_use_id event-data)))
+    (run-at-time 0 nil
+                 #'claude-gravity--ask-user-question-prompt
+                 tool-input proc session-id tid)))
+
+(defun claude-gravity--ask-user-question-prompt (tool-input proc session-id tid)
+  "Prompt user for AskUserQuestion answer via minibuffer.
+TOOL-INPUT is the question data, PROC the socket, SESSION-ID the session,
+TID the tool_use_id for updating prompts."
+  (let* ((questions (alist-get 'questions tool-input))
+         (first-q (and (vectorp questions) (> (length questions) 0) (aref questions 0)))
+         (q-text (and first-q (alist-get 'question first-q)))
+         (header (and first-q (alist-get 'header first-q)))
+         (options (and first-q (alist-get 'options first-q)))
+         (choices (when (vectorp options)
+                    (cl-loop for i from 0 below (length options)
+                             for opt = (aref options i)
+                             for label = (alist-get 'label opt)
+                             for desc = (alist-get 'description opt)
+                             collect (if desc (format "%s -- %s" label desc) label))))
+         (prompt-str (format "Claude asks [%s]: %s " (or header "?") (or q-text "?")))
+         (answer (if choices
+                     (completing-read prompt-str choices nil t)
+                   (read-string prompt-str)))
+         ;; Extract just the label (before " -- ")
+         (answer-label (if (string-match "\\`\\(.+?\\) -- " answer)
+                           (match-string 1 answer)
+                         answer)))
+    ;; Build deny response with the answer
+    (let ((response `((hookSpecificOutput
+                       . ((hookEventName . "PreToolUse")
+                          (permissionDecision . "deny")
+                          (permissionDecisionReason
+                           . ,(format "User answered from Emacs: %s\nQuestion: %s\nAnswer: %s"
+                                      answer-label (or q-text "") answer-label)))))))
+      (claude-gravity--send-bidirectional-response proc response))
+    ;; Update the prompt entry with the answer
+    (let* ((session (claude-gravity--get-session session-id))
+           (prompts (when session (plist-get session :prompts)))
+           (tid tid))
+      (when (and prompts tid)
+        (dotimes (i (length prompts))
+          (let ((p (aref prompts i)))
+            (when (and (equal (alist-get 'type p) 'question)
+                       (equal (alist-get 'tool_use_id p) tid))
+              (setf (alist-get 'answer p) answer-label)
+              (aset prompts i p))))))
+    (message "Answered: %s" answer-label)))
+
 (defun claude-gravity--handle-plan-review (event-data proc session-id)
   "Open a plan review buffer for EVENT-DATA.
 PROC is the socket connection to respond on.
@@ -2628,14 +2746,18 @@ SESSION-ID identifies the Claude Code session."
                           display-buffer-same-window)))
     (message "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff")))
 
+(defun claude-gravity--send-bidirectional-response (proc response)
+  "Send RESPONSE JSON to the bridge via socket PROC, then close."
+  (if (and proc (process-live-p proc))
+      (progn
+        (process-send-string proc (concat (json-encode response) "\n"))
+        (run-at-time 0.1 nil (lambda (p) (when (process-live-p p) (delete-process p))) proc))
+    (message "Claude Gravity: bridge connection lost. Response not sent.")))
+
 (defun claude-gravity--plan-review-send-response (response)
   "Send RESPONSE JSON to the bridge via the stored socket proc."
-  (let ((proc claude-gravity--plan-review-proc))
-    (when (and proc (process-live-p proc))
-      (process-send-string proc (concat (json-encode response) "\n"))
-      ;; Give the bridge time to read before closing
-      (run-at-time 0.1 nil (lambda (p) (when (process-live-p p) (delete-process p))) proc))
-    (setq-local claude-gravity--plan-review-proc nil)))
+  (claude-gravity--send-bidirectional-response claude-gravity--plan-review-proc response)
+  (setq-local claude-gravity--plan-review-proc nil))
 
 (defun claude-gravity--plan-review-compute-diff ()
   "Compute a unified diff between original and current buffer content.

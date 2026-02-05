@@ -53,7 +53,7 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pi
 
 // Helper to send data to Emacs socket and wait for a response (bidirectional).
 // Used for PermissionRequest where Emacs must reply with allow/deny.
-async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: string, pid: number | null, payload: any, timeoutMs: number = 300000): Promise<any> {
+async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: string, pid: number | null, payload: any, timeoutMs: number = 345600000): Promise<any> {
   log(`Sending event (wait): ${eventName} session: ${sessionId}`);
   const socketPath = getSocketPath();
 
@@ -637,10 +637,18 @@ async function main() {
       }
     }
 
-    // Send to Emacs — PermissionRequest uses bidirectional wait
+    // Send to Emacs — PermissionRequest and AskUserQuestionIntercept use bidirectional wait
     if (eventName === "PermissionRequest") {
       const response = await sendToEmacsAndWait(eventName, sessionId, cwd, pid, inputData);
       console.log(JSON.stringify(response));
+    } else if (eventName === "AskUserQuestionIntercept") {
+      const response = await sendToEmacsAndWait("PreToolUse", sessionId, cwd, pid, inputData);
+      if (response && response.hookSpecificOutput) {
+        console.log(JSON.stringify(response));
+      } else {
+        // Fallback: allow terminal execution
+        console.log(JSON.stringify({}));
+      }
     } else {
       await sendToEmacs(eventName, sessionId, cwd, pid, inputData);
       // Always output valid JSON to stdout as expected by Claude Code
