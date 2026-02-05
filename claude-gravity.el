@@ -456,19 +456,26 @@ Optional PID is the Claude Code process ID."
                  (when stop-thinking
                    (setf (alist-get 'stop_thinking last-prompt) stop-thinking))
                  (when (or stop-text stop-thinking)
-                   (aset prompts (1- len) last-prompt)))))))))
+                   (aset prompts (1- len) last-prompt))))))
+         ;; Store cumulative token usage from bridge
+         (let ((token-usage (alist-get 'token_usage data)))
+           (when token-usage
+             (plist-put session :token-usage token-usage))))))
 
     ("SubagentStart"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
             (agents (plist-get session :agents))
-            (new-agent (list (cons 'agent_id (alist-get 'agent_id data))
-                             (cons 'type (alist-get 'agent_type data))
-                             (cons 'status "running")
-                             (cons 'timestamp (current-time))
-                             (cons 'turn (or (plist-get session :current-turn) 0))
-                             (cons 'agent-tools [])
-                             (cons 'transcript_path (alist-get 'agent_transcript_path data)))))
-       (plist-put session :agents (vconcat agents (vector new-agent)))))
+            (new-id (alist-get 'agent_id data))
+            (existing (claude-gravity--find-agent-by-id agents new-id)))
+       (unless existing
+         (let ((new-agent (list (cons 'agent_id new-id)
+                                (cons 'type (alist-get 'agent_type data))
+                                (cons 'status "running")
+                                (cons 'timestamp (current-time))
+                                (cons 'turn (or (plist-get session :current-turn) 0))
+                                (cons 'agent-tools [])
+                                (cons 'transcript_path (alist-get 'agent_transcript_path data)))))
+           (plist-put session :agents (vconcat agents (vector new-agent)))))))
 
     ("SubagentStop"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -817,6 +824,11 @@ Optional PID is the Claude Code process ID."
   "Face for the main buffer header title."
   :group 'claude-gravity)
 
+(defface claude-gravity-slug
+  '((t :foreground "dark gray" :slant italic))
+  "Face for the session slug shown in the header."
+  :group 'claude-gravity)
+
 ;;; Divider helpers
 
 (defun claude-gravity--section-divider (title)
@@ -918,6 +930,30 @@ is applied to the inserted text."
        ((< secs 60) (format "%ds" secs))
        ((< secs 3600) (format "%dm%02ds" (/ secs 60) (% secs 60)))
        (t (format "%dh%02dm" (/ secs 3600) (% (/ secs 60) 60)))))))
+
+(defun claude-gravity--format-token-count (n)
+  "Format token count N compactly: 1234 → 1.2k, 1234567 → 1.2M."
+  (cond
+   ((null n) "0")
+   ((< n 1000) (format "%d" n))
+   ((< n 1000000) (format "%.1fk" (/ n 1000.0)))
+   (t (format "%.1fM" (/ n 1000000.0)))))
+
+(defun claude-gravity--session-total-elapsed (session)
+  "Sum elapsed seconds across all prompts in SESSION."
+  (let ((prompts (plist-get session :prompts))
+        (total 0.0))
+    (when prompts
+      (cl-loop for i from 0 below (length prompts)
+               for p = (aref prompts i)
+               for e = (and (listp p) (alist-get 'elapsed p))
+               when (numberp e) do (cl-incf total e)))
+    (if (> total 0) total
+      ;; Fallback: wall-clock from start to last event
+      (let ((start (plist-get session :start-time))
+            (last-ev (plist-get session :last-event-time)))
+        (when (and start last-ev)
+          (float-time (time-subtract last-ev start)))))))
 
 (defun claude-gravity--shorten-path (path)
   "Shorten PATH to project-relative or basename."
@@ -1184,17 +1220,35 @@ LABEL gets detail-label face, VALUE gets optional FACE."
 
 ;;; Section renderers (used by per-session buffers)
 
-(defun claude-gravity-insert-header (state)
-  "Insert header section showing tool count from STATE."
-  (let* ((tool-count (length (alist-get 'tools state)))
+(defun claude-gravity-insert-header (session)
+  "Insert header section showing session slug, tool count, elapsed time, and tokens from SESSION."
+  (let* ((state (plist-get session :state))
+         (tool-count (length (alist-get 'tools state)))
+         (slug (claude-gravity--session-label session))
+         (elapsed (claude-gravity--session-total-elapsed session))
+         (usage (plist-get session :token-usage))
+         (in-tokens (when usage
+                      (+ (or (alist-get 'input_tokens usage) 0)
+                         (or (alist-get 'cache_read_input_tokens usage) 0)
+                         (or (alist-get 'cache_creation_input_tokens usage) 0))))
+         (out-tokens (when usage (or (alist-get 'output_tokens usage) 0)))
          (width (max 40 (- (or (window-width) 80) 2)))
          (top-line (make-string width ?━)))
     (magit-insert-section (header)
       (insert (propertize top-line 'face 'claude-gravity-divider) "\n")
       (magit-insert-heading
-        (format "%s%s"
-                (propertize "Structured Claude Session" 'face 'claude-gravity-header-title)
-                (propertize (format "  ◆ %d tools" tool-count) 'face 'claude-gravity-detail-label)))
+        (concat
+         (propertize "Structured Claude Session" 'face 'claude-gravity-header-title)
+         (propertize (format "  %s" slug) 'face 'claude-gravity-slug)
+         (propertize (format "  ◆ %d tools" tool-count) 'face 'claude-gravity-detail-label)
+         (when elapsed
+           (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))
+                       'face 'claude-gravity-detail-label))
+         (when (and in-tokens (> in-tokens 0))
+           (propertize (format "  ↓%s ↑%s tokens"
+                               (claude-gravity--format-token-count in-tokens)
+                               (claude-gravity--format-token-count out-tokens))
+                       'face 'claude-gravity-detail-label))))
       (insert (propertize top-line 'face 'claude-gravity-divider) "\n")
       (insert "\n"))))
 
@@ -1551,14 +1605,14 @@ as root tools, allowing recursive sub-branches for nested agents."
       (magit-insert-section (tool item collapsed)
         (magit-insert-heading
           (if desc
-              (format "%s%s %s\n%s%s%s"
+              (format "%s🤖 %s %s\n%s%s%s"
                       (claude-gravity--indent) indicator
                       (propertize desc 'face 'claude-gravity-tool-description)
                       (claude-gravity--indent 2)
                       (propertize (claude-gravity--tool-signature name input)
                                   'face 'claude-gravity-tool-signature)
                       agent-suffix)
-            (format "%s%s %s  %s%s"
+            (format "%s🤖 %s %s  %s%s"
                     (claude-gravity--indent) indicator
                     (propertize (or name "?") 'face 'claude-gravity-tool-name)
                     (propertize (claude-gravity--tool-summary name input)
@@ -1634,26 +1688,28 @@ as root tools, allowing recursive sub-branches for nested agents."
   "Collect agents that are nested within PARENT-AGENT.
 PARENT-TOOLS are the tools belonging to the parent agent.
 ALL-AGENTS is the session's full agents vector.
-Returns a list of agents whose Task tool_use_id matches a tool in parent-tools."
-  (let ((task-tool-ids nil)
+Returns a list of agents whose turn:type matches a Task tool in parent-tools."
+  (let ((task-keys (make-hash-table :test 'equal))
         (result nil))
-    ;; Collect tool_use_ids from Task tool calls in parent's tools
+    ;; Collect turn:subagent_type keys from Task tool calls in parent's tools
     (dolist (tool parent-tools)
       (when (equal (alist-get 'name tool) "Task")
-        (push (alist-get 'tool_use_id tool) task-tool-ids)))
-    ;; For now, return all agents that match by turn+type with parent's Task tools.
-    ;; This is the same heuristic as the root level — turn:type matching.
-    ;; A more precise approach would match by agent_id correlation, but
-    ;; that requires the bridge to inject which Task spawned which agent.
+        (let* ((turn (or (alist-get 'turn tool) 0))
+               (stype (or (alist-get 'subagent_type (alist-get 'input tool)) ""))
+               (key (format "%d:%s" turn stype)))
+          (puthash key t task-keys))))
+    ;; Only include agents whose turn:type matches one of the parent's Task keys
     (when all-agents
       (dolist (agent (append all-agents nil))
-        ;; Check if this agent has agent-tools (meaning it's a sub-agent with tool data)
         (let ((atools (alist-get 'agent-tools agent)))
           (when (and atools (> (length atools) 0)
                      (not (equal (alist-get 'agent_id agent)
                                  (alist-get 'agent_id parent-agent))))
-            ;; Include if its turn matches any Task tool's turn in parent
-            (push agent result)))))
+            (let* ((aturn (or (alist-get 'turn agent) 0))
+                   (atype (or (alist-get 'type agent) ""))
+                   (key (format "%d:%s" aturn atype)))
+              (when (gethash key task-keys)
+                (push agent result)))))))
     (nreverse result)))
 
 (defun claude-gravity--insert-tool-item (item &optional agent-lookup)
@@ -1699,20 +1755,23 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
                             (propertize short-id 'face 'claude-gravity-detail-label)
                             dur-str))
                 ""))
+             (agent-icon (if agent "🤖 " ""))
              (section-start (point)))
       (magit-insert-section (tool item t)
         (magit-insert-heading
           (if desc
-              (format "%s%s %s\n%s%s%s"
+              (format "%s%s%s %s\n%s%s%s"
                       (claude-gravity--indent)
+                      agent-icon
                       indicator
                       (propertize desc 'face 'claude-gravity-tool-description)
                       (claude-gravity--indent 2)
                       (propertize (claude-gravity--tool-signature name input)
                                   'face 'claude-gravity-tool-signature)
                       agent-suffix)
-            (format "%s%s %s  %s%s"
+            (format "%s%s%s %s  %s%s"
                     (claude-gravity--indent)
+                    agent-icon
                     indicator
                     tool-face
                     (propertize summary 'face 'claude-gravity-detail-label)
@@ -1886,7 +1945,7 @@ the message under `message` with `role`, `content`, and `model`."
     (let ((section-start (point)))
       (magit-insert-section (agent agent t)
         (magit-insert-heading
-          (format "%s%s %s  (%s)%s"
+          (format "%s🤖 %s %s  (%s)%s"
                   (claude-gravity--indent)
                   indicator
                   (propertize (or agent-type "?") 'face 'claude-gravity-tool-name)
@@ -2091,7 +2150,7 @@ overlays.  Since we render from timers, we must apply them manually."
               (pos (point)))
           (erase-buffer)
           (magit-insert-section (root)
-            (claude-gravity-insert-header state)
+            (claude-gravity-insert-header session)
             (claude-gravity-insert-plan session)
             (claude-gravity-insert-turns session)
             (claude-gravity-insert-files session)
