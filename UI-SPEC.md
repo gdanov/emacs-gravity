@@ -449,6 +449,11 @@ UI chrome:
   gray        — dividers (━ ── ╌), detail labels, tool signatures
   gray italic — tool signatures, activeForm text
   gold bg     — running tool/agent background highlight
+
+Agent demarcation:
+  teal bg     — agent sub-branch background (#0a1a2a dark / #f0f5fa light)
+  darker bg   — nested agent background (#0f2030 dark / #e8f0f5 light)
+  teal ┃      — agent margin indicator (#5599aa), replaces ┊ inside agents
 ```
 
 ---

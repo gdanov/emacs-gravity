@@ -47,7 +47,12 @@
       "Bash(git -C /Users/gdanov/work/playground/emacs-gravity add .claude/settings.local.json plan.md)",
       "Bash(git -C /Users/gdanov/work/playground/emacs-gravity commit -m \"$\\(cat <<''EOF''\nUpdate local settings and color hierarchy plan notes\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(wc:*)",
-      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity add claude-gravity.el UI-SPEC.md)"
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity add claude-gravity.el UI-SPEC.md)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(/opt/homebrew/bin/emacs:*)",
+      "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs:*)",
+      "Bash(/opt/homebrew/bin/emacsclient:*)",
+      "Bash(tail:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d"

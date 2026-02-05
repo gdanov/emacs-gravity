@@ -137,6 +137,39 @@ export function extractPrecedingContent(transcriptPath: string, toolUseId: strin
 }
 
 // Extract trailing assistant text/thinking after the last tool interaction.
+// Extract cumulative token usage from the transcript JSONL.
+// Sums usage fields across all entries that contain a "usage" object.
+export function extractTokenUsage(transcriptPath: string): {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+} {
+  const result = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  try {
+    const content = readTail(transcriptPath, 10 * 1024 * 1024);
+    const lines = content.split("\n").filter((l) => l.length > 0);
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line);
+        const usage = obj.usage;
+        if (usage) {
+          result.input_tokens += usage.input_tokens || 0;
+          result.output_tokens += usage.output_tokens || 0;
+          result.cache_read_input_tokens += usage.cache_read_input_tokens || 0;
+          result.cache_creation_input_tokens += usage.cache_creation_input_tokens || 0;
+        }
+      } catch {
+        continue;
+      }
+    }
+    log(`extractTokenUsage: in=${result.input_tokens} out=${result.output_tokens} cache_read=${result.cache_read_input_tokens} cache_create=${result.cache_creation_input_tokens}`);
+  } catch (e) {
+    log(`extractTokenUsage error: ${e}`);
+  }
+  return result;
+}
+
 // Called on Stop events to capture the conclusion text.
 export function extractTrailingText(transcriptPath: string): { text: string; thinking: string } {
   const result = { text: "", thinking: "" };
@@ -524,6 +557,13 @@ async function main() {
           }
         } catch (e) {
           log(`Failed to extract trailing content: ${e}`);
+        }
+        // Extract cumulative token usage
+        try {
+          const tokenUsage = extractTokenUsage(transcriptPath);
+          (inputData as any).token_usage = tokenUsage;
+        } catch (e) {
+          log(`Failed to extract token usage: ${e}`);
         }
       }
     }
