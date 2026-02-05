@@ -111,7 +111,7 @@
     ],
     "PermissionRequest": [
       {
-        "matcher": "ExitPlanMode",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",

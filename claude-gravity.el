@@ -2665,8 +2665,10 @@ Accumulates partial data per connection until complete lines arrive."
                         (cond
                          ((equal tool-name "AskUserQuestion")
                           (claude-gravity--handle-ask-user-question payload proc session-id cwd))
+                         ((equal tool-name "ExitPlanMode")
+                          (claude-gravity--handle-plan-review payload proc session-id))
                          (t
-                          (claude-gravity--handle-plan-review payload proc session-id))))
+                          (claude-gravity--handle-tool-permission payload proc session-id cwd))))
                     (when event
                       (claude-gravity-handle-event event session-id cwd payload pid)))))
             (error
@@ -2800,6 +2802,86 @@ TID the tool_use_id for updating prompts."
               (setf (alist-get 'answer p) answer-label)
               (aset prompts i p))))))
     (message "Answered: %s" answer-label)))
+
+;;; Tool Permission Requests
+
+(defun claude-gravity--handle-tool-permission (event-data proc session-id cwd)
+  "Handle a tool permission request from Claude Code.
+EVENT-DATA is the PermissionRequest payload, PROC the socket to respond on,
+SESSION-ID and CWD identify the session."
+  ;; Record the tool in session state for UI display
+  (claude-gravity-handle-event "PreToolUse" session-id cwd event-data)
+  ;; Defer interactive prompt out of process filter
+  (run-at-time 0 nil
+               #'claude-gravity--tool-permission-prompt
+               event-data proc session-id cwd))
+
+(defun claude-gravity--tool-permission-prompt (event-data proc session-id cwd)
+  "Prompt user to approve/deny a tool permission request.
+EVENT-DATA is the PermissionRequest payload, PROC the socket,
+SESSION-ID and CWD identify the session."
+  (let* ((tool-name (alist-get 'tool_name event-data))
+         (tool-input (alist-get 'tool_input event-data))
+         (signature (claude-gravity--tool-signature tool-name tool-input))
+         (choices '("Allow" "Allow always" "Deny"))
+         (answer (completing-read
+                  (format "Claude permission [%s]: " signature)
+                  choices nil t)))
+    (pcase answer
+      ("Allow"
+       (claude-gravity--send-permission-response proc "allow"))
+      ("Allow always"
+       (claude-gravity--send-permission-response proc "allow")
+       (claude-gravity--write-allow-pattern-for-tool tool-name tool-input session-id cwd))
+      ("Deny"
+       (let ((reason (read-string "Reason (optional): ")))
+         (if (string-empty-p reason)
+             (claude-gravity--send-permission-response proc "deny")
+           (claude-gravity--send-permission-response proc "deny" reason)))))))
+
+(defun claude-gravity--send-permission-response (proc behavior &optional message)
+  "Send allow/deny response for a PermissionRequest.
+PROC is the socket, BEHAVIOR is \"allow\" or \"deny\", MESSAGE is optional reason."
+  (let* ((decision (if message
+                       `((behavior . ,behavior) (message . ,message))
+                     `((behavior . ,behavior))))
+         (response `((hookSpecificOutput
+                      . ((hookEventName . "PermissionRequest")
+                         (decision . ,decision))))))
+    (claude-gravity--send-bidirectional-response proc response)))
+
+(defun claude-gravity--write-allow-pattern-for-tool (tool-name tool-input session-id cwd)
+  "Write an allow pattern for TOOL-NAME/TOOL-INPUT to settings.local.json.
+SESSION-ID and CWD identify the session project."
+  (let* ((suggestions (claude-gravity--suggest-patterns tool-name tool-input))
+         (chosen (if (cdr suggestions)
+                     (completing-read "Allow pattern: " suggestions nil nil
+                                      (car suggestions))
+                   (car suggestions)))
+         (settings-path (expand-file-name ".claude/settings.local.json" cwd)))
+    (when chosen
+      (let* ((json-object-type 'alist)
+             (json-array-type 'list)
+             (data (if (file-exists-p settings-path)
+                       (json-read-file settings-path)
+                     (list (cons 'permissions (list (cons 'allow nil))))))
+             (perms (or (alist-get 'permissions data)
+                        (list (cons 'allow nil))))
+             (allow (or (alist-get 'allow perms) nil)))
+        (if (member chosen allow)
+            (message "Pattern already exists: %s" chosen)
+          (setf (alist-get 'allow perms) (append allow (list chosen)))
+          (setf (alist-get 'permissions data) perms)
+          (let ((dir (file-name-directory settings-path)))
+            (unless (file-exists-p dir)
+              (make-directory dir t)))
+          (with-temp-file settings-path
+            (let ((json-encoding-pretty-print t))
+              (insert (json-encode data))))
+          (let ((session (claude-gravity--get-session session-id)))
+            (when session
+              (claude-gravity--load-allow-patterns session)))
+          (message "Added allow pattern: %s" chosen))))))
 
 (defun claude-gravity--handle-plan-review (event-data proc session-id)
   "Open a plan review buffer for EVENT-DATA.
