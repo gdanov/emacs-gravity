@@ -3483,6 +3483,24 @@ MODEL overrides the default model.  PERMISSION-MODE sets the permission mode."
         (setq args (append args (list "--plugin-dir" plugin-dir)))))
     args))
 
+(defun claude-gravity--managed-ensure-agent (session session-id cwd parent-tool-use-id)
+  "Ensure an agent exists for PARENT-TOOL-USE-ID in SESSION.
+If no agent with that ID exists, synthesize a SubagentStart event.
+Uses the Task tool's input to determine the agent type.
+SESSION-ID and CWD are passed to handle-event."
+  (when parent-tool-use-id
+    (let ((agents (plist-get session :agents)))
+      (unless (claude-gravity--find-agent-by-id agents parent-tool-use-id)
+        ;; Look up the Task tool to get agent type
+        (let* ((task-tool (claude-gravity-model-find-tool session parent-tool-use-id))
+               (agent-type (and task-tool
+                                (alist-get 'subagent_type
+                                           (alist-get 'input task-tool)))))
+          (claude-gravity-handle-event
+           "SubagentStart" session-id cwd
+           `((agent_id . ,parent-tool-use-id)
+             (agent_type . ,(or agent-type "unknown")))))))))
+
 (defun claude-gravity--managed-extract-tool-response (result-content)
   "Extract text from RESULT-CONTENT of a tool_result block.
 Handles vector-of-blocks, string, and nil content."
@@ -3591,15 +3609,19 @@ See: https://platform.claude.com/docs/en/agent-sdk/typescript#message-types"
                             (when (equal block-type "tool_use")
                               (let ((tool-id (alist-get 'id block))
                                     (tool-name (alist-get 'name block))
+                                    (parent-id (alist-get 'parent_tool_use_id data))
                                     (pending-text (plist-get session :pending-assistant-text))
                                     (pending-thinking (plist-get session :pending-assistant-thinking)))
                                 (unless (claude-gravity--session-has-tool-p session tool-id)
+                                  ;; Ensure agent exists for nested tools
+                                  (claude-gravity--managed-ensure-agent
+                                   session session-id cwd parent-id)
                                   (claude-gravity-handle-event
                                    "PreToolUse" session-id cwd
                                    `((tool_use_id . ,tool-id)
                                      (tool_name . ,tool-name)
                                      (tool_input . nil)
-                                     (parent_agent_id . ,(alist-get 'parent_tool_use_id data))
+                                     (parent_agent_id . ,parent-id)
                                      (assistant_text . ,(or pending-text ""))
                                      (assistant_thinking . ,(or pending-thinking ""))))
                                   (plist-put session :pending-assistant-text nil)
@@ -3652,14 +3674,18 @@ See: https://platform.claude.com/docs/en/agent-sdk/typescript#message-types"
                                    ("tool_use"
                                     (let ((tool-id (alist-get 'id block))
                                           (tool-name (alist-get 'name block))
+                                          (parent-id (alist-get 'parent_tool_use_id data))
                                           (pending-text (and texts (string-join (nreverse texts) "\n\n"))))
                                       (unless (claude-gravity--session-has-tool-p session tool-id)
+                                        ;; Ensure agent exists for nested tools
+                                        (claude-gravity--managed-ensure-agent
+                                         session session-id cwd parent-id)
                                         (claude-gravity-handle-event
                                          "PreToolUse" session-id cwd
                                          `((tool_use_id . ,tool-id)
                                            (tool_name . ,tool-name)
                                            (tool_input . ,(alist-get 'input block))
-                                           (parent_agent_id . ,(alist-get 'parent_tool_use_id data))
+                                           (parent_agent_id . ,parent-id)
                                            (assistant_text . ,(or pending-text ""))
                                            (assistant_thinking . ,(or thinking ""))))
                                         (setq texts nil)
@@ -3688,7 +3714,15 @@ See: https://platform.claude.com/docs/en/agent-sdk/typescript#message-types"
                                     `((tool_use_id . ,tool-use-id)
                                       (parent_agent_id . ,(alist-get 'parent_tool_use_id data))
                                       (tool_response . ,(claude-gravity--managed-extract-tool-response
-                                                         result-content)))))))))))))
+                                                         result-content))))
+                                   ;; Synthesize SubagentStop when a Task tool completes
+                                   (let ((tool (claude-gravity-model-find-tool
+                                                (claude-gravity--get-session session-id)
+                                                tool-use-id)))
+                                     (when (and tool (equal (alist-get 'name tool) "Task"))
+                                       (claude-gravity-handle-event
+                                        "SubagentStop" session-id cwd
+                                        `((agent_id . ,tool-use-id))))))))))))))
 
                   ;; --- result: turn complete → Stop ---
                   ("result"
