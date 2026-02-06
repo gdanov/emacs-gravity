@@ -109,6 +109,17 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PostToolUseFailure"
+          }
+        ]
+      }
+    ],
     "PermissionRequest": [
       {
         "matcher": "",

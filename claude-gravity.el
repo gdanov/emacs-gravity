@@ -498,6 +498,29 @@ AGENT-ID is used for routing; handles re-attribution of ambiguous tools."
         (setf (alist-get 'result tool) result)
         (aset target-tools idx tool)))))
 
+(defun claude-gravity-model-find-tool (session tool-use-id)
+  "Find and return tool alist in SESSION matching TOOL-USE-ID, or nil.
+Searches both root tools and agent tools."
+  (let ((root-tools (alist-get 'tools (plist-get session :state)))
+        (agents (plist-get session :agents))
+        (result nil))
+    ;; Search root tools first
+    (when root-tools
+      (dotimes (i (length root-tools))
+        (when (equal (alist-get 'tool_use_id (aref root-tools i)) tool-use-id)
+          (setq result (aref root-tools i)))))
+    ;; If not found in root, search agent tools
+    (unless result
+      (when agents
+        (dotimes (i (length agents))
+          (let* ((agent (aref agents i))
+                 (agent-tools (alist-get 'agent-tools agent)))
+            (when agent-tools
+              (dotimes (j (length agent-tools))
+                (when (equal (alist-get 'tool_use_id (aref agent-tools j)) tool-use-id)
+                  (setq result (aref agent-tools j)))))))))
+    result))
+
 (defun claude-gravity-model-add-agent (session agent)
   "Add AGENT alist to SESSION's :agents vector if not already present."
   (let* ((agents (plist-get session :agents))
@@ -743,10 +766,22 @@ the model mutation API to update session state."
     ("PostToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
             (parent-agent-id (alist-get 'parent_agent_id data))
-            (tool-use-id (alist-get 'tool_use_id data)))
+            (tool-use-id (alist-get 'tool_use_id data))
+            (post-text (alist-get 'post_tool_text data))
+            (post-think (alist-get 'post_tool_thinking data)))
+       ;; Complete tool with response
        (claude-gravity-model-complete-tool
         session tool-use-id parent-agent-id
         (alist-get 'tool_response data))
+       ;; Store post-tool text and thinking if present
+       (when (and tool-use-id post-text)
+         (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+           (when tool
+             (setf (alist-get 'post_text tool) post-text))))
+       (when (and tool-use-id post-think)
+         (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+           (when tool
+             (setf (alist-get 'post_thinking tool) post-think))))
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
        (claude-gravity--track-task session "PostToolUse" (alist-get 'tool_name data)
                                    (alist-get 'tool_input data) tool-use-id
@@ -772,6 +807,35 @@ the model mutation API to update session state."
                         (cons 'type 'phase-boundary)
                         (cons 'submitted (current-time))
                         (cons 'elapsed nil))))))
+
+    ("PostToolUseFailure"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (parent-agent-id (alist-get 'parent_agent_id data))
+            (tool-use-id (alist-get 'tool_use_id data))
+            (error-msg (or (alist-get 'error data) "Unknown error"))
+            (post-text (alist-get 'post_tool_text data))
+            (post-think (alist-get 'post_tool_thinking data)))
+       ;; Complete tool with error as result, then set status to error
+       (claude-gravity-model-complete-tool
+        session tool-use-id parent-agent-id
+        (format "[ERROR] %s" error-msg))
+       ;; Override status from "done" to "error"
+       (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+         (when tool
+           (setf (alist-get 'status tool) "error")))
+       ;; Store post-tool text and thinking if present
+       (when (and tool-use-id post-text)
+         (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+           (when tool
+             (setf (alist-get 'post_text tool) post-text))))
+       (when (and tool-use-id post-think)
+         (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+           (when tool
+             (setf (alist-get 'post_thinking tool) post-think))))
+       (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
+       (claude-gravity--track-task session "PostToolUseFailure" (alist-get 'tool_name data)
+                                   (alist-get 'tool_input data) tool-use-id
+                                   error-msg)))
 
     ("Notification"
      (let* ((session (claude-gravity--get-session session-id))
@@ -807,6 +871,11 @@ the model mutation API to update session state."
 (defface claude-gravity-tool-running
   '((t :foreground "yellow"))
   "Face for running tool status indicator."
+  :group 'claude-gravity)
+
+(defface claude-gravity-tool-error
+  '((t :foreground "red"))
+  "Face for failed tool status indicator."
   :group 'claude-gravity)
 
 (defface claude-gravity-tool-name
@@ -1457,20 +1526,76 @@ Format: [Nt Ma P tools] — tasks, agents, total tools."
                     'face 'claude-gravity-detail-label)
       "")))
 
+(defun claude-gravity--text-subsumes-p (a b)
+  "Return non-nil if text A fully contains B's content.
+Checks equality and paragraph-boundary prefix match."
+  (and a b
+       (not (string-empty-p a))
+       (not (string-empty-p b))
+       (or (equal a b)
+           (string-prefix-p (concat b "\n\n") a)
+           (string-prefix-p (concat a "\n\n") b))))
+
 (defun claude-gravity--dedup-assistant-text (tools)
   "Remove duplicate assistant_text and assistant_thinking on consecutive TOOLS.
-Parallel tool calls get the same preceding content; only the first should display it."
+Handles three cases:
+1. Parallel tool calls get the same preceding content — clear on 2nd+ tool.
+2. Post-tool text on tool N overlaps with assistant_text on tool N+1 — keep
+   the more complete version, clear the other.
+3. Post-tool thinking similarly deduped."
   (let ((prev-text nil)
-        (prev-thinking nil))
+        (prev-thinking nil)
+        (prev-post-text nil)
+        (prev-post-thinking nil))
     (dolist (item tools)
       (let ((atext (alist-get 'assistant_text item))
             (athink (alist-get 'assistant_thinking item)))
+        ;; Case 1: parallel tools — same preceding content
         (when (and atext (equal atext prev-text))
-          (setf (alist-get 'assistant_text item) nil))
+          (setf (alist-get 'assistant_text item) nil)
+          (setq atext nil))
         (when (and athink (equal athink prev-thinking))
-          (setf (alist-get 'assistant_thinking item) nil))
+          (setf (alist-get 'assistant_thinking item) nil)
+          (setq athink nil))
+        ;; Case 2: post_text of previous tool overlaps with this tool's assistant_text
+        ;; Keep the more complete version, clear the shorter one
+        (when (and atext prev-post-text
+                   (claude-gravity--text-subsumes-p atext prev-post-text))
+          (if (>= (length prev-post-text) (length atext))
+              ;; post_text is more complete or equal — clear assistant_text
+              (progn
+                (setf (alist-get 'assistant_text item) nil)
+                (setq atext nil))
+            ;; assistant_text is more complete — clear post_text on previous tool
+            ;; (iterate to find previous tool with this post_text)
+            (claude-gravity--clear-post-text-matching tools prev-post-text)
+            (setq prev-post-text nil)))
+        ;; Same for thinking
+        (when (and athink prev-post-thinking
+                   (claude-gravity--text-subsumes-p athink prev-post-thinking))
+          (if (>= (length prev-post-thinking) (length athink))
+              (progn
+                (setf (alist-get 'assistant_thinking item) nil)
+                (setq athink nil))
+            (claude-gravity--clear-post-thinking-matching tools prev-post-thinking)
+            (setq prev-post-thinking nil)))
+        ;; Track for next iteration
         (setq prev-text atext
-              prev-thinking athink)))))
+              prev-thinking athink
+              prev-post-text (alist-get 'post_text item)
+              prev-post-thinking (alist-get 'post_thinking item))))))
+
+(defun claude-gravity--clear-post-text-matching (tools text)
+  "Clear post_text on the tool in TOOLS whose post_text equals TEXT."
+  (dolist (item tools)
+    (when (equal (alist-get 'post_text item) text)
+      (setf (alist-get 'post_text item) nil))))
+
+(defun claude-gravity--clear-post-thinking-matching (tools text)
+  "Clear post_thinking on the tool in TOOLS whose post_thinking equals TEXT."
+  (dolist (item tools)
+    (when (equal (alist-get 'post_thinking item) text)
+      (setf (alist-get 'post_thinking item) nil))))
 
 (defun claude-gravity--insert-tool-context (item)
   "Insert thinking and assistant text from ITEM as standalone interlaced lines.
@@ -1758,8 +1883,25 @@ Each turn groups its prompt, tools, agents, and tasks together."
                 ;; Children: tools, agents, tasks
                 (claude-gravity--insert-turn-children turn-tools turn-agents turn-tasks)
                 ;; Trailing assistant text (conclusion after last tool)
-                (let ((stop-think (and (listp prompt-entry) (alist-get 'stop_thinking prompt-entry)))
-                      (stop-text (and (listp prompt-entry) (alist-get 'stop_text prompt-entry))))
+                ;; Dedup against last tool's post_text/post_thinking
+                (let* ((stop-think (and (listp prompt-entry) (alist-get 'stop_thinking prompt-entry)))
+                       (stop-text (and (listp prompt-entry) (alist-get 'stop_text prompt-entry)))
+                       (last-tool (and turn-tools
+                                       (aref turn-tools (1- (length turn-tools)))))
+                       (last-post-text (when last-tool (alist-get 'post_text last-tool)))
+                       (last-post-think (when last-tool (alist-get 'post_thinking last-tool))))
+                  ;; Dedup stop_thinking vs last tool's post_thinking
+                  (when (and stop-think last-post-think
+                             (claude-gravity--text-subsumes-p stop-think last-post-think))
+                    (if (>= (length last-post-think) (length stop-think))
+                        (setq stop-think nil) ; post_thinking covers it
+                      (setf (alist-get 'post_thinking last-tool) nil))) ; stop has more
+                  ;; Dedup stop_text vs last tool's post_text
+                  (when (and stop-text last-post-text
+                             (claude-gravity--text-subsumes-p stop-text last-post-text))
+                    (if (>= (length last-post-text) (length stop-text))
+                        (setq stop-text nil) ; post_text covers it
+                      (setf (alist-get 'post_text last-tool) nil))) ; stop has more
                   (when (and stop-think (not (string-empty-p stop-think)))
                     (claude-gravity--insert-wrapped-with-margin
                      stop-think nil 'claude-gravity-thinking))
@@ -1777,11 +1919,14 @@ as root tools, allowing recursive sub-branches for nested agents."
          (status (alist-get 'status item))
          (input (alist-get 'input item))
          (done-p (equal status "done"))
+         (error-p (equal status "error"))
          (agent-done-p (equal (alist-get 'status agent) "done"))
-         (indicator (propertize (if done-p "[x]" "[/]")
-                                'face (if done-p
-                                         'claude-gravity-tool-done
-                                       'claude-gravity-tool-running)))
+         (indicator (propertize (cond (error-p "[!]")
+                                      (done-p "[x]")
+                                      (t "[/]"))
+                                'face (cond (error-p 'claude-gravity-tool-error)
+                                            (done-p 'claude-gravity-tool-done)
+                                            (t 'claude-gravity-tool-running))))
          (desc (claude-gravity--tool-description input))
          (atype (alist-get 'type agent))
          (aid (alist-get 'agent_id agent))
@@ -1954,10 +2099,13 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
          (input (alist-get 'input item))
          (result (alist-get 'result item))
          (done-p (equal status "done"))
-         (indicator (propertize (if done-p "[x]" "[/]")
-                                'face (if done-p
-                                           'claude-gravity-tool-done
-                                         'claude-gravity-tool-running)))
+         (error-p (equal status "error"))
+         (indicator (propertize (cond (error-p "[!]")
+                                      (done-p "[x]")
+                                      (t "[/]"))
+                                'face (cond (error-p 'claude-gravity-tool-error)
+                                            (done-p 'claude-gravity-tool-done)
+                                            (t 'claude-gravity-tool-running))))
          (tool-face (propertize (or name "?") 'face 'claude-gravity-tool-name))
          (summary (claude-gravity--tool-summary name input))
          (desc (claude-gravity--tool-description input))
@@ -2016,6 +2164,15 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
             (claude-gravity--insert-wrapped sig nil 'claude-gravity-tool-signature)))
         (insert "\n")
         (claude-gravity--insert-tool-detail name input result)
+        ;; Post-tool text and thinking (text generated after this tool completes)
+        (let ((post-think (alist-get 'post_thinking item))
+              (post-text (alist-get 'post_text item)))
+          (when (and post-think (not (string-empty-p post-think)))
+            (claude-gravity--insert-wrapped-with-margin post-think nil 'claude-gravity-thinking)
+            (insert "\n"))
+          (when (and post-text (not (string-empty-p post-text)))
+            (claude-gravity--insert-wrapped-with-margin post-text nil 'claude-gravity-assistant-text)
+            (insert "\n")))
         ;; Agent detail (transcript, model, etc.) in expanded view
         (when agent
           (let ((tp (alist-get 'transcript_path agent))

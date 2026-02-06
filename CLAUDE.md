@@ -10,9 +10,9 @@ Emacs UI for Claude Code, inspired by Google's AntiGravity and Cursor. Provides 
 
 ```
 Claude Code
-    ↓ (hooks: PreToolUse, PostToolUse, Stop, UserPromptSubmit,
-    │         SubagentStart, SubagentStop, SessionStart, SessionEnd,
-    │         Notification, PermissionRequest)
+    ↓ (hooks: PreToolUse, PostToolUse, PostToolUseFailure, Stop,
+    │         UserPromptSubmit, SubagentStart, SubagentStop,
+    │         SessionStart, SessionEnd, Notification, PermissionRequest)
 emacs-bridge (Node.js)
     ↕ (JSON over Unix domain socket — bidirectional for PermissionRequest)
 claude-gravity.el (Emacs)
@@ -46,10 +46,10 @@ For the Emacs Lisp code we use the `emacs` MCP to re-evaluate code.
 
 ## Hook System
 
-Hook scripts in `emacs-bridge/hooks/` are registered via `hooks.json`. Each hook is a shell script that pipes stdin to the Node.js bridge with the event name as an argument. Handles 10 events:
+Hook scripts in `emacs-bridge/hooks/` are registered via `hooks.json`. Each hook is a shell script that pipes stdin to the Node.js bridge with the event name as an argument. Handles 11 events:
 
 - **Session lifecycle**: `SessionStart`, `SessionEnd`
-- **Tool lifecycle**: `PreToolUse`, `PostToolUse`
+- **Tool lifecycle**: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`
 - **Agent lifecycle**: `SubagentStart`, `SubagentStop`
 - **Interaction**: `UserPromptSubmit`, `Stop`, `Notification`
 - **Bidirectional**: `PermissionRequest` — Emacs sends approval/denial back over the socket (matcher: `ExitPlanMode`, timeout: 96h)

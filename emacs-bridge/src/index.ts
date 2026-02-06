@@ -169,7 +169,8 @@ export function extractPrecedingContent(transcriptPath: string, toolUseId: strin
       startIdx = lines.length;
     }
 
-    // Walk backwards collecting the most recent text and thinking blocks
+    // Walk backwards collecting all text and thinking blocks before this tool_use
+    const textParts: string[] = [];
     for (let i = startIdx - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(lines[i]);
@@ -181,10 +182,10 @@ export function extractPrecedingContent(transcriptPath: string, toolUseId: strin
         const blockType = c[0].type;
         if (blockType === "tool_use") continue; // parallel sibling or preceding tool, skip
         if (blockType === "tool_result") break; // hit a tool result — stop
-        if (blockType === "text" && !result.text) {
+        if (blockType === "text") {
           const text = c[0].text || "";
           if (text && text !== "(no content)") {
-            result.text = text;
+            textParts.unshift(text); // prepend to maintain order
           }
           continue; // keep looking for thinking
         }
@@ -198,6 +199,7 @@ export function extractPrecedingContent(transcriptPath: string, toolUseId: strin
         continue;
       }
     }
+    result.text = textParts.join("\n\n");
     return result;
   } catch (e) {
     log(`extractPrecedingContent error: ${e}`);
@@ -237,6 +239,84 @@ export function extractTokenUsage(transcriptPath: string): {
     log(`extractTokenUsage error: ${e}`);
   }
   return result;
+}
+
+// Extract assistant text and thinking that follow a tool_result.
+// Scans forward from the tool_result to find any assistant text/thinking
+// that appears after the tool and before the next tool_use or end of transcript.
+export function extractFollowingContent(transcriptPath: string, toolUseId: string): { text: string; thinking: string } {
+  const result = { text: "", thinking: "" };
+  try {
+    const content = readTail(transcriptPath, 10 * 1024 * 1024);
+    const lines = content.split("\n").filter((l) => l.length > 0);
+
+    // Find the tool_result matching toolUseId
+    let toolResultIdx = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        if (obj.type !== "user" && obj.type !== "assistant") continue;
+        const c = obj.message?.content;
+        if (!Array.isArray(c)) continue;
+        // Look for tool_result with matching id
+        for (const block of c) {
+          if (block.type === "tool_result" && block.tool_use_id === toolUseId) {
+            toolResultIdx = i;
+            break;
+          }
+        }
+        if (toolResultIdx >= 0) break;
+      } catch {
+        continue;
+      }
+    }
+
+    // If tool_result not found, return empty
+    if (toolResultIdx < 0) {
+      return result;
+    }
+
+    // Walk forward from after the tool_result, collecting assistant text/thinking
+    // Stop when we hit: another tool_use, end of transcript, or user message
+    const textParts: string[] = [];
+    for (let i = toolResultIdx + 1; i < lines.length; i++) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        if (obj.type !== "assistant") break; // hit user or other, stop
+        const c = obj.message?.content;
+        if (!Array.isArray(c) || c.length === 0) break;
+        const blockType = c[0].type;
+
+        // Collect text blocks
+        if (blockType === "text") {
+          const text = c[0].text || "";
+          if (text && text !== "(no content)") {
+            textParts.push(text);
+          }
+          continue; // keep looking for more text
+        }
+
+        // Extract thinking (do not break, keep looking for text after)
+        if (blockType === "thinking") {
+          if (!result.thinking) {
+            result.thinking = c[0].thinking || "";
+          }
+          continue; // keep looking for text after thinking
+        }
+
+        // Hit tool_use or tool_result — we've gone past the following content
+        break;
+      } catch {
+        continue;
+      }
+    }
+
+    result.text = textParts.join("\n\n");
+    return result;
+  } catch (e) {
+    log(`extractFollowingContent error: ${e}`);
+    return result;
+  }
 }
 
 // Called on Stop events to capture the conclusion text.
@@ -553,8 +633,8 @@ async function main() {
       }
     }
 
-    // Tool-to-agent attribution for PreToolUse/PostToolUse
-    if (eventName === "PreToolUse" || eventName === "PostToolUse") {
+    // Tool-to-agent attribution for PreToolUse/PostToolUse/PostToolUseFailure
+    if (eventName === "PreToolUse" || eventName === "PostToolUse" || eventName === "PostToolUseFailure") {
       if (cwd) {
         const state = readAgentState(cwd);
         const activeAgents = state[sessionId] || [];
@@ -595,6 +675,39 @@ async function main() {
           }
         } catch (e) {
           log(`Failed to extract preceding content: ${e}`);
+        }
+      }
+    }
+
+    // Enrich PostToolUse/PostToolUseFailure with assistant text that follows the tool_result.
+    // For agent tools, read from the agent's transcript instead of the session transcript.
+    if (eventName === "PostToolUse" || eventName === "PostToolUseFailure") {
+      const toolUseId = (inputData as any).tool_use_id;
+      const parentAgentId = (inputData as any).parent_agent_id;
+      const effectiveTranscript = (parentAgentId && parentAgentId !== "ambiguous" && transcriptPath)
+        ? agentTranscriptPath(transcriptPath, sessionId, parentAgentId)
+        : transcriptPath;
+      if (effectiveTranscript && toolUseId) {
+        try {
+          let { text, thinking } = extractFollowingContent(effectiveTranscript, toolUseId);
+          if (!text && !thinking) {
+            const maxRetries = 3;
+            const delayMs = 150;
+            for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
+              await new Promise(r => setTimeout(r, delayMs));
+              ({ text, thinking } = extractFollowingContent(effectiveTranscript, toolUseId));
+            }
+          }
+          if (text) {
+            (inputData as any).post_tool_text = text;
+            log(`Extracted post-tool text (${text.length} chars) for ${toolUseId}`);
+          }
+          if (thinking) {
+            (inputData as any).post_tool_thinking = thinking;
+            log(`Extracted post-tool thinking (${thinking.length} chars) for ${toolUseId}`);
+          }
+        } catch (e) {
+          log(`Failed to extract following content: ${e}`);
         }
       }
     }
