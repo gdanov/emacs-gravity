@@ -359,6 +359,252 @@ If AGENT-ID is nil, set root tools."
           (setf (alist-get 'agent-tools agent) new-vec)
           (aset agents idx agent))))))
 
+;;; Model mutation API
+;;
+;; These functions encapsulate all session state mutations.
+;; Both the hooks adapter (handle-event) and the future JSON-output
+;; adapter call these to update the view model.
+;; Model functions do NOT trigger UI refresh — that's the adapter's job.
+
+(defun claude-gravity-model-session-end (session)
+  "Mark SESSION as ended."
+  (plist-put session :status 'ended))
+
+(defun claude-gravity-model-set-claude-status (session status)
+  "Set SESSION's :claude-status to STATUS (idle or responding)."
+  (plist-put session :claude-status status))
+
+(defun claude-gravity-model-set-permission-mode (session mode)
+  "Set SESSION's :permission-mode to MODE."
+  (plist-put session :permission-mode mode))
+
+(defun claude-gravity-model-set-token-usage (session usage)
+  "Set SESSION's :token-usage to USAGE alist."
+  (when usage
+    (plist-put session :token-usage usage)))
+
+(defun claude-gravity-model-set-plan (session plan)
+  "Set SESSION's :plan to PLAN plist."
+  (plist-put session :plan plan))
+
+(defun claude-gravity-model-add-prompt (session entry)
+  "Append prompt ENTRY to SESSION's :prompts and increment :current-turn."
+  (plist-put session :prompts
+             (vconcat (plist-get session :prompts) (vector entry)))
+  (plist-put session :current-turn
+             (1+ (or (plist-get session :current-turn) 0))))
+
+(defun claude-gravity-model-finalize-last-prompt (session &optional stop-text stop-thinking)
+  "Compute elapsed time on SESSION's last prompt.
+Optionally store STOP-TEXT and STOP-THINKING."
+  (let* ((prompts (plist-get session :prompts))
+         (len (length prompts)))
+    (when (> len 0)
+      (let ((last-prompt (aref prompts (1- len))))
+        ;; Elapsed: key exists in alist (created as nil), so setf is in-place
+        (when (and (listp last-prompt)
+                   (not (alist-get 'elapsed last-prompt))
+                   (alist-get 'submitted last-prompt))
+          (setf (alist-get 'elapsed last-prompt)
+                (float-time (time-subtract (current-time)
+                                           (alist-get 'submitted last-prompt)))))
+        ;; stop_text/stop_thinking: new keys, setf conses new head → must write back
+        (when stop-text
+          (setf (alist-get 'stop_text last-prompt) stop-text))
+        (when stop-thinking
+          (setf (alist-get 'stop_thinking last-prompt) stop-thinking))
+        (when (or stop-text stop-thinking)
+          (aset prompts (1- len) last-prompt))))))
+
+(defun claude-gravity-model-update-prompt-answer (session tool-use-id answer)
+  "Update the question prompt matching TOOL-USE-ID in SESSION with ANSWER."
+  (let ((prompts (plist-get session :prompts)))
+    (when (and prompts tool-use-id)
+      (dotimes (i (length prompts))
+        (let ((p (aref prompts i)))
+          (when (and (equal (alist-get 'type p) 'question)
+                     (equal (alist-get 'tool_use_id p) tool-use-id))
+            (setf (alist-get 'answer p) answer)
+            (setf (alist-get 'elapsed p)
+                  (float-time (time-subtract (current-time)
+                                             (alist-get 'submitted p))))
+            (aset prompts i p)))))))
+
+(defun claude-gravity-model-add-tool (session tool agent-id candidate-ids)
+  "Add TOOL to SESSION, routing based on AGENT-ID.
+AGENT-ID can be a string (definitive agent), \"ambiguous\", or nil (root).
+CANDIDATE-IDS is a list of possible agent IDs when ambiguous."
+  (cond
+   ;; Definitively attributed to an agent
+   ((and agent-id (not (equal agent-id "ambiguous")))
+    (let ((agent-tools (claude-gravity--agent-tools-vector session agent-id)))
+      (if agent-tools
+          (claude-gravity--set-agent-tools-vector
+           session agent-id (vconcat agent-tools (vector tool)))
+        ;; Agent not found — fall back to root
+        (let ((root-tools (alist-get 'tools (plist-get session :state))))
+          (setf (alist-get 'tools (plist-get session :state))
+                (vconcat root-tools (vector tool)))))))
+   ;; Ambiguous — store in root with ambiguous flag
+   ((equal agent-id "ambiguous")
+    (setf (alist-get 'ambiguous tool) t)
+    (when candidate-ids
+      (setf (alist-get 'candidate-agents tool)
+            (append candidate-ids nil)))
+    (let ((root-tools (alist-get 'tools (plist-get session :state))))
+      (setf (alist-get 'tools (plist-get session :state))
+            (vconcat root-tools (vector tool)))))
+   ;; No agent context — root tool
+   (t
+    (let ((root-tools (alist-get 'tools (plist-get session :state))))
+      (setf (alist-get 'tools (plist-get session :state))
+            (vconcat root-tools (vector tool)))))))
+
+(defun claude-gravity-model-complete-tool (session tool-use-id agent-id result)
+  "Mark tool TOOL-USE-ID as done in SESSION with RESULT.
+AGENT-ID is used for routing; handles re-attribution of ambiguous tools."
+  (let ((target-tools nil)
+        (idx nil))
+    ;; Search agent tools first if agent specified
+    (when (and agent-id (not (equal agent-id "ambiguous")))
+      (setq target-tools (claude-gravity--agent-tools-vector session agent-id))
+      (when target-tools
+        (setq idx (claude-gravity--find-tool-by-id target-tools tool-use-id))))
+    ;; Fall back to root
+    (unless idx
+      (setq target-tools (alist-get 'tools (plist-get session :state)))
+      (setq idx (claude-gravity--find-tool-by-id target-tools tool-use-id))
+      ;; Re-attribute ambiguous tool if now definitive
+      (when (and idx agent-id (not (equal agent-id "ambiguous")))
+        (let ((tool (aref target-tools idx)))
+          (when (alist-get 'ambiguous tool)
+            (setf (alist-get 'ambiguous tool) nil)
+            (setf (alist-get 'status tool) "done")
+            (setf (alist-get 'result tool) result)
+            (let ((agent-tools (claude-gravity--agent-tools-vector session agent-id)))
+              (when agent-tools
+                (claude-gravity--set-agent-tools-vector
+                 session agent-id (vconcat agent-tools (vector tool)))
+                (let ((remaining nil))
+                  (dotimes (i (length target-tools))
+                    (unless (= i idx) (push (aref target-tools i) remaining)))
+                  (setf (alist-get 'tools (plist-get session :state))
+                        (vconcat (nreverse remaining))))
+                (setq idx nil)))))))
+    ;; Normal completion
+    (when idx
+      (let ((tool (aref target-tools idx)))
+        (setf (alist-get 'status tool) "done")
+        (setf (alist-get 'result tool) result)
+        (aset target-tools idx tool)))))
+
+(defun claude-gravity-model-add-agent (session agent)
+  "Add AGENT alist to SESSION's :agents vector if not already present."
+  (let* ((agents (plist-get session :agents))
+         (new-id (alist-get 'agent_id agent))
+         (existing (claude-gravity--find-agent-by-id agents new-id)))
+    (unless existing
+      (plist-put session :agents (vconcat agents (vector agent))))))
+
+(defun claude-gravity-model-complete-agent (session agent-id &rest props)
+  "Mark agent AGENT-ID as done in SESSION.
+PROPS is a plist with optional keys:
+  :transcript-path, :stop-text, :stop-thinking."
+  (let* ((agents (plist-get session :agents))
+         (idx (claude-gravity--find-agent-by-id agents agent-id)))
+    (when idx
+      (let ((agent (aref agents idx)))
+        (setf (alist-get 'status agent) "done")
+        (let ((ts (alist-get 'timestamp agent)))
+          (when ts
+            (setf (alist-get 'duration agent)
+                  (float-time (time-subtract (current-time) ts)))))
+        (let ((tp (plist-get props :transcript-path)))
+          (when tp (setf (alist-get 'transcript_path agent) tp)))
+        (let ((st (plist-get props :stop-text)))
+          (when st (setf (alist-get 'stop_text agent) st)))
+        (let ((sth (plist-get props :stop-thinking)))
+          (when sth (setf (alist-get 'stop_thinking agent) sth)))
+        (aset agents idx agent)))))
+
+(defun claude-gravity-model-move-tools-to-agent (session agent-id tool-ids)
+  "Move ambiguous root tools matching TOOL-IDS to agent AGENT-ID in SESSION."
+  (when (and tool-ids (> (length tool-ids) 0))
+    (let* ((agents (plist-get session :agents))
+           (idx (claude-gravity--find-agent-by-id agents agent-id)))
+      (when idx
+        (let* ((agent (aref agents idx))
+               (root-tools (alist-get 'tools (plist-get session :state)))
+               (agent-tools (alist-get 'agent-tools agent))
+               (to-move nil)
+               (keep nil))
+          (dotimes (i (length root-tools))
+            (let* ((tool (aref root-tools i))
+                   (tid (alist-get 'tool_use_id tool)))
+              (if (and (alist-get 'ambiguous tool)
+                       tid
+                       (seq-contains-p tool-ids tid #'equal))
+                  (progn
+                    (setf (alist-get 'ambiguous tool) nil)
+                    (push tool to-move))
+                (push tool keep))))
+          (when to-move
+            (setf (alist-get 'tools (plist-get session :state))
+                  (vconcat (nreverse keep)))
+            (setf (alist-get 'agent-tools agent)
+                  (vconcat agent-tools (vconcat (nreverse to-move))))
+            (aset agents idx agent)
+            (message "Claude Gravity: moved %d tools to agent %s"
+                     (length to-move) agent-id)))))))
+
+(defun claude-gravity-model-add-notification (session notif)
+  "Append NOTIF alist to SESSION's :notifications vector."
+  (let ((notifs (or (plist-get session :notifications) [])))
+    (plist-put session :notifications (vconcat notifs (vector notif)))))
+
+(defun claude-gravity--session-has-tool-p (session tool-use-id)
+  "Return non-nil if TOOL-USE-ID exists anywhere in SESSION's tools."
+  (or
+   (claude-gravity--find-tool-by-id
+    (alist-get 'tools (plist-get session :state))
+    tool-use-id)
+   (let ((agents (plist-get session :agents))
+         (found nil))
+     (when agents
+       (dotimes (i (length agents))
+         (unless found
+           (let ((agent (aref agents i)))
+             (when (claude-gravity--find-tool-by-id
+                    (or (alist-get 'agent-tools agent) [])
+                    tool-use-id)
+               (setq found t))))))
+     found)))
+
+(defun claude-gravity-model-append-streaming-text (session text)
+  "Append TEXT to SESSION's :streaming-text accumulator."
+  (let ((current (or (plist-get session :streaming-text) "")))
+    (plist-put session :streaming-text (concat current text))))
+
+(defun claude-gravity-model-clear-streaming-text (session)
+  "Clear SESSION's :streaming-text accumulator."
+  (plist-put session :streaming-text nil))
+
+(defun claude-gravity-model-update-session-meta (session &rest props)
+  "Update SESSION metadata from PROPS plist.
+Supported keys: :pid, :slug, :last-event-time."
+  (plist-put session :last-event-time
+             (or (plist-get props :last-event-time) (current-time)))
+  (let ((pid (plist-get props :pid)))
+    (when (and pid (numberp pid) (> pid 0))
+      (plist-put session :pid pid)))
+  (let ((slug (plist-get props :slug)))
+    (when (and slug (stringp slug) (not (plist-get session :slug)))
+      (let ((old-buf (plist-get session :buffer)))
+        (plist-put session :slug slug)
+        (when (and old-buf (buffer-live-p old-buf))
+          (with-current-buffer old-buf
+            (rename-buffer (claude-gravity--session-buffer-name session) t)))))))
+
 ;;; Event handling
 ;;
 ;; Turn demarcation
@@ -386,7 +632,9 @@ If AGENT-ID is nil, set root tools."
 
 (defun claude-gravity-handle-event (event session-id cwd data &optional pid)
   "Handle EVENT for SESSION-ID (with CWD) carrying DATA.
-Optional PID is the Claude Code process ID."
+Optional PID is the Claude Code process ID.
+This is the hooks adapter — it parses hook event payloads and calls
+the model mutation API to update session state."
   (unless session-id
     (setq session-id "legacy")
     (setq cwd (or cwd "")))
@@ -394,18 +642,8 @@ Optional PID is the Claude Code process ID."
   ;; Update PID, last-event-time, and slug on every event
   (let ((existing (claude-gravity--get-session session-id)))
     (when existing
-      (plist-put existing :last-event-time (current-time))
-      (when (and pid (numberp pid) (> pid 0))
-        (plist-put existing :pid pid))
-      ;; Store slug from transcript (arrives via bridge enrichment)
-      (let ((slug (alist-get 'slug data)))
-        (when (and slug (stringp slug) (not (plist-get existing :slug)))
-          (let ((old-buf (plist-get existing :buffer)))
-            (plist-put existing :slug slug)
-            ;; Rename session buffer if it exists
-            (when (and old-buf (buffer-live-p old-buf))
-              (with-current-buffer old-buf
-                (rename-buffer (claude-gravity--session-buffer-name existing) t))))))))
+      (claude-gravity-model-update-session-meta
+       existing :pid pid :slug (alist-get 'slug data))))
   (pcase event
     ("SessionStart"
      (let ((existing (claude-gravity--get-session session-id)))
@@ -416,166 +654,77 @@ Optional PID is the Claude Code process ID."
     ("SessionEnd"
      (let ((session (claude-gravity--get-session session-id)))
        (when session
-         (plist-put session :status 'ended)))
+         (claude-gravity-model-session-end session)))
      (claude-gravity--clear-notification-indicator))
 
     ("UserPromptSubmit"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
             (prompt-text (alist-get 'prompt data)))
        (when prompt-text
-         (let ((entry (list (cons 'text prompt-text)
-                            (cons 'submitted (current-time))
-                            (cons 'elapsed nil))))
-           (plist-put session :prompts
-                      (vconcat (plist-get session :prompts) (vector entry))))
-         (plist-put session :current-turn
-                    (1+ (or (plist-get session :current-turn) 0))))
-       (plist-put session :claude-status 'responding))
+         (claude-gravity-model-add-prompt
+          session (list (cons 'text prompt-text)
+                        (cons 'submitted (current-time))
+                        (cons 'elapsed nil))))
+       (claude-gravity-model-set-claude-status session 'responding))
      (claude-gravity--clear-notification-indicator))
 
     ("Stop"
      (claude-gravity--clear-notification-indicator)
      (let ((session (claude-gravity--get-session session-id)))
        (when session
-         (plist-put session :claude-status 'idle)
-         ;; Compute elapsed time for the last prompt
-         (let* ((prompts (plist-get session :prompts))
-                (len (length prompts)))
-           (when (> len 0)
-             (let ((last-prompt (aref prompts (1- len))))
-               (when (and (listp last-prompt)
-                          (not (alist-get 'elapsed last-prompt))
-                          (alist-get 'submitted last-prompt))
-                 (setf (alist-get 'elapsed last-prompt)
-                       (float-time (time-subtract (current-time)
-                                                  (alist-get 'submitted last-prompt)))))
-               ;; Store trailing assistant text (conclusion after last tool)
-               ;; Note: setf alist-get on new keys conses a new head, so we
-               ;; must write the updated alist back into the vector slot.
-               (let ((stop-text (alist-get 'stop_text data))
-                     (stop-thinking (alist-get 'stop_thinking data)))
-                 (when stop-text
-                   (setf (alist-get 'stop_text last-prompt) stop-text))
-                 (when stop-thinking
-                   (setf (alist-get 'stop_thinking last-prompt) stop-thinking))
-                 (when (or stop-text stop-thinking)
-                   (aset prompts (1- len) last-prompt))))))
-         ;; Store cumulative token usage from bridge
-         (let ((token-usage (alist-get 'token_usage data)))
-           (when token-usage
-             (plist-put session :token-usage token-usage))))))
+         (claude-gravity-model-set-claude-status session 'idle)
+         (claude-gravity-model-finalize-last-prompt
+          session
+          (alist-get 'stop_text data)
+          (alist-get 'stop_thinking data))
+         (claude-gravity-model-set-token-usage
+          session (alist-get 'token_usage data)))))
 
     ("SubagentStart"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
-            (agents (plist-get session :agents))
-            (new-id (alist-get 'agent_id data))
-            (existing (claude-gravity--find-agent-by-id agents new-id)))
-       (unless existing
-         (let ((new-agent (list (cons 'agent_id new-id)
-                                (cons 'type (alist-get 'agent_type data))
-                                (cons 'status "running")
-                                (cons 'timestamp (current-time))
-                                (cons 'turn (or (plist-get session :current-turn) 0))
-                                (cons 'agent-tools [])
-                                (cons 'transcript_path (alist-get 'agent_transcript_path data)))))
-           (plist-put session :agents (vconcat agents (vector new-agent)))))))
+            (new-agent (list (cons 'agent_id (alist-get 'agent_id data))
+                             (cons 'type (alist-get 'agent_type data))
+                             (cons 'status "running")
+                             (cons 'timestamp (current-time))
+                             (cons 'turn (or (plist-get session :current-turn) 0))
+                             (cons 'agent-tools [])
+                             (cons 'transcript_path (alist-get 'agent_transcript_path data)))))
+       (claude-gravity-model-add-agent session new-agent)))
 
     ("SubagentStop"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
-            (agents (plist-get session :agents))
-            (agent-id (alist-get 'agent_id data))
-            (idx (claude-gravity--find-agent-by-id agents agent-id)))
-       (when idx
-         (let ((agent (aref agents idx)))
-           (setf (alist-get 'status agent) "done")
-           (let ((ts (alist-get 'timestamp agent)))
-             (when ts
-               (setf (alist-get 'duration agent)
-                     (float-time (time-subtract (current-time) ts)))))
-           (let ((tp (alist-get 'agent_transcript_path data)))
-             (when tp
-               (setf (alist-get 'transcript_path agent) tp)))
-           ;; Store agent's trailing summary text
-           (let ((ast (alist-get 'agent_stop_text data))
-                 (asth (alist-get 'agent_stop_thinking data)))
-             (when ast (setf (alist-get 'stop_text agent) ast))
-             (when asth (setf (alist-get 'stop_thinking agent) asth)))
-           (aset agents idx agent)
-           ;; Fix-up: move ambiguously-attributed tools to this agent
-           (let ((agent-tool-ids (alist-get 'agent_tool_ids data)))
-             (when (and agent-tool-ids (> (length agent-tool-ids) 0))
-               (let* ((root-tools (alist-get 'tools (plist-get session :state)))
-                      (agent-tools (alist-get 'agent-tools agent))
-                      (to-move nil)
-                      (keep nil))
-                 ;; Partition root tools: move matching ones to agent
-                 (dotimes (i (length root-tools))
-                   (let* ((tool (aref root-tools i))
-                          (tid (alist-get 'tool_use_id tool)))
-                     (if (and (alist-get 'ambiguous tool)
-                              tid
-                              (seq-contains-p agent-tool-ids tid #'equal))
-                         (progn
-                           (setf (alist-get 'ambiguous tool) nil)
-                           (push tool to-move))
-                       (push tool keep))))
-                 (when to-move
-                   ;; Update root tools (remove moved ones)
-                   (setf (alist-get 'tools (plist-get session :state))
-                         (vconcat (nreverse keep)))
-                   ;; Add to agent tools
-                   (setf (alist-get 'agent-tools agent)
-                         (vconcat agent-tools (vconcat (nreverse to-move))))
-                   (aset agents idx agent)
-                   (message "Claude Gravity: moved %d tools to agent %s"
-                            (length to-move) agent-id)))))))))
+            (agent-id (alist-get 'agent_id data)))
+       (claude-gravity-model-complete-agent
+        session agent-id
+        :transcript-path (alist-get 'agent_transcript_path data)
+        :stop-text (alist-get 'agent_stop_text data)
+        :stop-thinking (alist-get 'agent_stop_thinking data))
+       (claude-gravity-model-move-tools-to-agent
+        session agent-id (alist-get 'agent_tool_ids data))))
 
     ("PreToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
             (parent-agent-id (alist-get 'parent_agent_id data))
-            (candidate-ids (alist-get 'candidate_agent_ids data))
             (new-tool (list (cons 'tool_use_id (alist-get 'tool_use_id data))
-                          (cons 'name (alist-get 'tool_name data))
-                          (cons 'input (alist-get 'tool_input data))
-                          (cons 'status "running")
-                          (cons 'timestamp (current-time))
-                          (cons 'turn (or (plist-get session :current-turn) 0))
-                          (cons 'permission_mode (alist-get 'permission_mode data))
-                          (cons 'assistant_text (alist-get 'assistant_text data))
-                          (cons 'assistant_thinking (alist-get 'assistant_thinking data))
-                          (cons 'parent_agent_id parent-agent-id))))
-       ;; Route tool to agent or root
-       (cond
-        ;; Definitively attributed to an agent
-        ((and parent-agent-id (not (equal parent-agent-id "ambiguous")))
-         (let ((agent-tools (claude-gravity--agent-tools-vector session parent-agent-id)))
-           (if agent-tools
-               (claude-gravity--set-agent-tools-vector
-                session parent-agent-id (vconcat agent-tools (vector new-tool)))
-             ;; Agent not found — fall back to root
-             (let ((root-tools (alist-get 'tools (plist-get session :state))))
-               (setf (alist-get 'tools (plist-get session :state))
-                     (vconcat root-tools (vector new-tool)))))))
-        ;; Ambiguous — store in root with ambiguous flag for later fix-up
-        ((equal parent-agent-id "ambiguous")
-         (setf (alist-get 'ambiguous new-tool) t)
-         (when candidate-ids
-           (setf (alist-get 'candidate-agents new-tool)
-                 (append candidate-ids nil)))
-         (let ((root-tools (alist-get 'tools (plist-get session :state))))
-           (setf (alist-get 'tools (plist-get session :state))
-                 (vconcat root-tools (vector new-tool)))))
-        ;; No agent context — root tool
-        (t
-         (let ((root-tools (alist-get 'tools (plist-get session :state))))
-           (setf (alist-get 'tools (plist-get session :state))
-                 (vconcat root-tools (vector new-tool))))))
-       (plist-put session :permission-mode (alist-get 'permission_mode data))
-       (plist-put session :claude-status 'responding)
+                            (cons 'name (alist-get 'tool_name data))
+                            (cons 'input (alist-get 'tool_input data))
+                            (cons 'status "running")
+                            (cons 'timestamp (current-time))
+                            (cons 'turn (or (plist-get session :current-turn) 0))
+                            (cons 'permission_mode (alist-get 'permission_mode data))
+                            (cons 'assistant_text (alist-get 'assistant_text data))
+                            (cons 'assistant_thinking (alist-get 'assistant_thinking data))
+                            (cons 'parent_agent_id parent-agent-id))))
+       (claude-gravity-model-add-tool
+        session new-tool parent-agent-id
+        (alist-get 'candidate_agent_ids data))
+       (claude-gravity-model-set-permission-mode
+        session (alist-get 'permission_mode data))
+       (claude-gravity-model-set-claude-status session 'responding)
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
        (claude-gravity--track-task session "PreToolUse" (alist-get 'tool_name data)
                                    (alist-get 'tool_input data) (alist-get 'tool_use_id data))
-       ;; Add AskUserQuestion as a prompt entry
+       ;; AskUserQuestion creates a question prompt and advances the turn
        (when (equal (alist-get 'tool_name data) "AskUserQuestion")
          (let* ((input (alist-get 'tool_input data))
                 (questions (alist-get 'questions input))
@@ -583,99 +732,46 @@ Optional PID is the Claude Code process ID."
                               (aref questions 0)))
                 (q-text (and first-q (alist-get 'question first-q))))
            (when q-text
-             (let ((entry (list (cons 'text q-text)
-                                (cons 'type 'question)
-                                (cons 'tool_use_id (alist-get 'tool_use_id data))
-                                (cons 'submitted (current-time))
-                                (cons 'elapsed nil)
-                                (cons 'answer nil))))
-               (plist-put session :prompts
-                          (vconcat (plist-get session :prompts) (vector entry)))
-               ;; Advance turn — question is a phase boundary
-               (plist-put session :current-turn
-                          (1+ (or (plist-get session :current-turn) 0)))))))))
+             (claude-gravity-model-add-prompt
+              session (list (cons 'text q-text)
+                            (cons 'type 'question)
+                            (cons 'tool_use_id (alist-get 'tool_use_id data))
+                            (cons 'submitted (current-time))
+                            (cons 'elapsed nil)
+                            (cons 'answer nil))))))))
 
     ("PostToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
             (parent-agent-id (alist-get 'parent_agent_id data))
-            (tool-use-id (alist-get 'tool_use_id data))
-            ;; Try to find tool in agent's tools first, then root
-            (target-tools nil)
-            (idx nil))
-       ;; Search for the tool in the appropriate vector
-       (when (and parent-agent-id (not (equal parent-agent-id "ambiguous")))
-         (setq target-tools (claude-gravity--agent-tools-vector session parent-agent-id))
-         (when target-tools
-           (setq idx (claude-gravity--find-tool-by-id target-tools tool-use-id))))
-       ;; If not found in agent, search root (handles ambiguous tools and backward compat)
-       (unless idx
-         (setq target-tools (alist-get 'tools (plist-get session :state)))
-         (setq idx (claude-gravity--find-tool-by-id target-tools tool-use-id))
-         ;; If tool was ambiguous and PostToolUse has definitive agent_id, move it
-         (when (and idx parent-agent-id (not (equal parent-agent-id "ambiguous")))
-           (let ((tool (aref target-tools idx)))
-             (when (alist-get 'ambiguous tool)
-               ;; Move from root to agent
-               (setf (alist-get 'ambiguous tool) nil)
-               (setf (alist-get 'status tool) "done")
-               (setf (alist-get 'result tool) (alist-get 'tool_response data))
-               (let ((agent-tools (claude-gravity--agent-tools-vector session parent-agent-id)))
-                 (when agent-tools
-                   (claude-gravity--set-agent-tools-vector
-                    session parent-agent-id (vconcat agent-tools (vector tool)))
-                   ;; Remove from root
-                   (let ((remaining nil))
-                     (dotimes (i (length target-tools))
-                       (unless (= i idx) (push (aref target-tools i) remaining)))
-                     (setf (alist-get 'tools (plist-get session :state))
-                           (vconcat (nreverse remaining))))
-                   (setq idx nil))))))) ; already handled
-       (when idx
-         (let ((tool (aref target-tools idx)))
-           (setf (alist-get 'status tool) "done")
-           (setf (alist-get 'result tool) (alist-get 'tool_response data))
-           (aset target-tools idx tool)))
-       ;; Track file operations
+            (tool-use-id (alist-get 'tool_use_id data)))
+       (claude-gravity-model-complete-tool
+        session tool-use-id parent-agent-id
+        (alist-get 'tool_response data))
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
-       ;; Track task operations
        (claude-gravity--track-task session "PostToolUse" (alist-get 'tool_name data)
-                                   (alist-get 'tool_input data) (alist-get 'tool_use_id data)
+                                   (alist-get 'tool_input data) tool-use-id
                                    (alist-get 'tool_response data))
-       ;; Store AskUserQuestion answer in the prompt entry
+       ;; Store AskUserQuestion answer
        (when (equal (alist-get 'tool_name data) "AskUserQuestion")
-         (let* ((prompts (plist-get session :prompts))
-                (tid (alist-get 'tool_use_id data))
-                (response (alist-get 'tool_response data)))
-           (when (and prompts tid)
-             (dotimes (i (length prompts))
-               (let ((p (aref prompts i)))
-                 (when (and (equal (alist-get 'type p) 'question)
-                            (equal (alist-get 'tool_use_id p) tid))
-                   (setf (alist-get 'answer p)
-                         (claude-gravity--extract-ask-answer response))
-                   (setf (alist-get 'elapsed p)
-                         (float-time (time-subtract (current-time)
-                                                    (alist-get 'submitted p))))
-                   (aset prompts i p)))))))
+         (claude-gravity-model-update-prompt-answer
+          session tool-use-id
+          (claude-gravity--extract-ask-answer (alist-get 'tool_response data))))
        ;; Detect plan presentation
-       (let ((tool-name (alist-get 'tool_name data)))
-         (when (equal tool-name "ExitPlanMode")
-           (let ((plan-content (alist-get 'plan (alist-get 'tool_input data)))
-                 (file-path (alist-get 'filePath (alist-get 'tool_response data)))
-                 (allowed-prompts (alist-get 'allowedPrompts (alist-get 'tool_input data))))
-             (when plan-content
-               (plist-put session :plan (list :content plan-content
-                                              :file-path file-path
-                                              :allowed-prompts (append allowed-prompts nil)))))
-           ;; Advance turn — plan approval is a phase boundary
-           (let ((entry (list (cons 'text "[Plan approved]")
-                              (cons 'type 'phase-boundary)
-                              (cons 'submitted (current-time))
-                              (cons 'elapsed nil))))
-             (plist-put session :prompts
-                        (vconcat (plist-get session :prompts) (vector entry)))
-             (plist-put session :current-turn
-                        (1+ (or (plist-get session :current-turn) 0))))))))
+       (when (equal (alist-get 'tool_name data) "ExitPlanMode")
+         (let ((plan-content (alist-get 'plan (alist-get 'tool_input data)))
+               (file-path (alist-get 'filePath (alist-get 'tool_response data)))
+               (allowed-prompts (alist-get 'allowedPrompts (alist-get 'tool_input data))))
+           (when plan-content
+             (claude-gravity-model-set-plan
+              session (list :content plan-content
+                            :file-path file-path
+                            :allowed-prompts (append allowed-prompts nil)))))
+         ;; Advance turn — plan approval is a phase boundary
+         (claude-gravity-model-add-prompt
+          session (list (cons 'text "[Plan approved]")
+                        (cons 'type 'phase-boundary)
+                        (cons 'submitted (current-time))
+                        (cons 'elapsed nil))))))
 
     ("Notification"
      (let* ((session (claude-gravity--get-session session-id))
@@ -685,12 +781,10 @@ Optional PID is the Claude Code process ID."
                        (claude-gravity--session-label session)
                      (claude-gravity--session-short-id session-id))))
        (when session
-         ;; Store notification in session
-         (let ((notifs (or (plist-get session :notifications) [])))
-           (plist-put session :notifications
-                      (vconcat notifs (vector (list (cons 'message msg)
-                                                    (cons 'type ntype)
-                                                    (cons 'timestamp (current-time)))))))
+         (claude-gravity-model-add-notification
+          session (list (cons 'message msg)
+                        (cons 'type ntype)
+                        (cons 'timestamp (current-time))))
          ;; Handle reset/clear
          (when (string-match-p "\\(?:reset\\|clear\\)" msg)
            (claude-gravity--reset-session session))
@@ -1286,6 +1380,20 @@ LABEL gets detail-label face, VALUE gets optional FACE."
           (insert (propertize (concat (claude-gravity--indent) "P to view full plan\n")
                               'face 'claude-gravity-detail-label))
           (insert "\n"))))))
+
+(defun claude-gravity-insert-streaming-text (session)
+  "Insert live streaming text section for SESSION.
+Shows assistant text as it generates from the JSON-output adapter.
+Only visible when :streaming-text is non-nil (during active generation)."
+  (let ((text (plist-get session :streaming-text)))
+    (when (and text (stringp text) (not (string-empty-p text)))
+      (magit-insert-section (streaming-text nil t)
+        (magit-insert-heading
+          (concat
+           (propertize ">>> " 'face 'claude-gravity-status-responding)
+           (propertize "Claude is responding..." 'face 'claude-gravity-assistant-text)))
+        (claude-gravity--insert-wrapped-with-margin text nil 'claude-gravity-assistant-text)
+        (insert "\n")))))
 
 ;;; Section renderers (used by per-session buffers)
 
@@ -2278,6 +2386,7 @@ overlays.  Since we render from timers, we must apply them manually."
           (magit-insert-section (root)
             (claude-gravity-insert-header session)
             (claude-gravity-insert-plan session)
+            (claude-gravity-insert-streaming-text session)
             (claude-gravity-insert-turns session)
             (claude-gravity-insert-files session)
             (claude-gravity-insert-allow-patterns session))
@@ -2461,6 +2570,9 @@ Returns a list from most specific to most general, with nils removed."
    ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
    ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]
   ["Sessions"
+   ("S" "Start managed session" claude-gravity-start-session)
+   ("s" "Send prompt" claude-gravity-send-prompt)
+   ("r" "Resume session" claude-gravity-resume-session)
    ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
    ("R" "Reset all status to idle" claude-gravity-reset-status)
    ("X" "Detect dead sessions" claude-gravity-detect-dead-sessions)
@@ -3163,6 +3275,351 @@ No socket proc is attached — approve/deny will just message."
                      (allowedPrompts . [((tool . "Bash") (prompt . "npm test"))]))))
    nil
    "test-session"))
+
+;;; Managed Claude Process
+;;
+;; Spawn `claude -p` as an Emacs subprocess with streaming JSON I/O.
+;; Hooks still fire via --plugin-dir, so the gravity UI updates as usual.
+;; The stdout stream provides additional data (streaming text, structured
+;; metadata) that hooks don't offer.
+
+(defvar claude-gravity--managed-processes (make-hash-table :test 'equal)
+  "Map of session-id → managed process for Emacs-spawned Claude sessions.")
+
+(defun claude-gravity--claude-command ()
+  "Return the claude command path."
+  (or (executable-find "claude")
+      (error "Claude CLI not found in PATH")))
+
+(defun claude-gravity--managed-process-args (cwd &optional resume-id model permission-mode)
+  "Build argument list for managed claude process.
+CWD is the working directory.  RESUME-ID resumes an existing session.
+MODEL overrides the default model.  PERMISSION-MODE sets the permission mode."
+  (let ((args (list "-p"
+                    "--input-format" "stream-json"
+                    "--output-format" "stream-json"
+                    "--verbose"
+                    "--include-partial-messages"
+                    "--setting-sources" "user,project,local")))
+    (when resume-id
+      (setq args (append args (list "--resume" resume-id))))
+    (when model
+      (setq args (append args (list "--model" model))))
+    (when permission-mode
+      (setq args (append args (list "--permission-mode" permission-mode))))
+    ;; Load our plugin so hooks fire
+    (let ((plugin-dir (file-name-directory
+                       (or load-file-name
+                           (locate-library "claude-gravity")
+                           ""))))
+      (when (and plugin-dir (file-directory-p plugin-dir))
+        (setq args (append args (list "--plugin-dir" plugin-dir)))))
+    args))
+
+(defun claude-gravity--managed-process-filter (proc string)
+  "Process filter for managed Claude process PROC receiving STRING.
+Accumulates partial lines and processes complete newline-delimited JSON.
+Handles the stream-json output protocol from `claude -p`:
+  system/init       — capture session ID, re-key temp→real
+  stream_event      — streaming text deltas, tool_use starts, message lifecycle
+  assistant         — finalized assistant message (clear streaming text)
+  user              — tool results (complete tools not yet done by hooks)
+  result            — turn complete: usage, idle status, clear streaming text
+See: https://platform.claude.com/docs/en/agent-sdk/typescript#message-types"
+  (let ((buf (concat (or (process-get proc 'claude-gravity--stdout-buffer) "") string)))
+    (while (string-match "\n" buf)
+      (let ((line (substring buf 0 (match-beginning 0))))
+        (setq buf (substring buf (match-end 0)))
+        (when (> (length line) 0)
+          (condition-case err
+              (let* ((json-object-type 'alist)
+                     (json-array-type 'vector)
+                     (data (json-read-from-string line))
+                     (type (alist-get 'type data))
+                     (session-id (process-get proc 'claude-gravity--session-id)))
+                (pcase type
+                  ;; --- system: init + compact_boundary ---
+                  ("system"
+                   (pcase (alist-get 'subtype data)
+                     ("init"
+                      (let ((sid (alist-get 'session_id data)))
+                        (when sid
+                          (process-put proc 'claude-gravity--session-id sid)
+                          ;; Re-key temp→real in managed processes + sessions tables
+                          (let ((temp-id (process-get proc 'claude-gravity--temp-id)))
+                            (when (and temp-id (not (equal temp-id sid)))
+                              (remhash temp-id claude-gravity--managed-processes)
+                              (puthash sid proc claude-gravity--managed-processes)
+                              (let ((session (gethash temp-id claude-gravity--sessions)))
+                                (when session
+                                  (remhash temp-id claude-gravity--sessions)
+                                  (plist-put session :session-id sid)
+                                  (plist-put session :managed-process proc)
+                                  (puthash sid session claude-gravity--sessions)))))
+                          (setq session-id sid)
+                          (claude-gravity--schedule-refresh)
+                          (claude-gravity--schedule-session-refresh sid))))))
+
+                  ;; --- stream_event: wraps standard API streaming events ---
+                  ("stream_event"
+                   (let* ((event (alist-get 'event data))
+                          (event-type (and event (alist-get 'type event)))
+                          (session (and session-id
+                                       (claude-gravity--get-session session-id))))
+                     (when session
+                       (pcase event-type
+                         ;; Start of a new message — mark responding
+                         ("message_start"
+                          (claude-gravity-model-set-claude-status session 'responding)
+                          (claude-gravity-model-clear-streaming-text session))
+
+                         ;; Content block start — early tool visibility
+                         ("content_block_start"
+                          (let* ((block (alist-get 'content_block event))
+                                 (block-type (and block (alist-get 'type block))))
+                            (when (equal block-type "tool_use")
+                              (let ((tool-id (alist-get 'id block))
+                                    (tool-name (alist-get 'name block)))
+                                (unless (claude-gravity--session-has-tool-p session tool-id)
+                                  (claude-gravity-model-add-tool
+                                   session
+                                   (list (cons 'tool_use_id tool-id)
+                                         (cons 'name tool-name)
+                                         (cons 'input nil)
+                                         (cons 'status "running")
+                                         (cons 'timestamp (current-time))
+                                         (cons 'turn (or (plist-get session :current-turn) 0))
+                                         (cons 'source 'stdout))
+                                   ;; parent_tool_use_id on the outer data indicates agent context
+                                   (alist-get 'parent_tool_use_id data)
+                                   nil)
+                                  (claude-gravity--schedule-session-refresh session-id))))))
+
+                         ;; Content block delta — streaming text or tool input
+                         ("content_block_delta"
+                          (let* ((delta (alist-get 'delta event))
+                                 (delta-type (and delta (alist-get 'type delta))))
+                            (pcase delta-type
+                              ("text_delta"
+                               (let ((text (alist-get 'text delta)))
+                                 (when text
+                                   (claude-gravity-model-append-streaming-text session text)
+                                   (claude-gravity--schedule-session-refresh session-id)))))))
+
+                         ;; Message delta — may have usage (cumulative output tokens)
+                         ("message_delta"
+                          nil) ; usage here is partial; wait for result event
+
+                         ;; Message stop — message is finalized
+                         ("message_stop"
+                          nil))))) ; assistant event follows with full content
+
+                  ;; --- assistant: finalized assistant message ---
+                  ("assistant"
+                   (let ((session (and session-id
+                                      (claude-gravity--get-session session-id))))
+                     (when session
+                       ;; Clear streaming text — the full text is now in the message
+                       (claude-gravity-model-clear-streaming-text session)
+                       (claude-gravity--schedule-session-refresh session-id))))
+
+                  ;; --- user: tool results ---
+                  ("user"
+                   (let* ((session (and session-id
+                                       (claude-gravity--get-session session-id))))
+                     (when session
+                       (let* ((message (alist-get 'message data))
+                              (content (and message (alist-get 'content message))))
+                         (when (vectorp content)
+                           (dotimes (i (length content))
+                             (let* ((block (aref content i))
+                                    (block-type (alist-get 'type block)))
+                               (when (equal block-type "tool_result")
+                                 (let ((tool-use-id (alist-get 'tool_use_id block))
+                                       (result-content (alist-get 'content block)))
+                                   (when tool-use-id
+                                     (claude-gravity-model-complete-tool
+                                      session tool-use-id
+                                      (alist-get 'parent_tool_use_id data)
+                                      (cond
+                                       ;; Content is a vector of blocks — extract text
+                                       ((and (vectorp result-content)
+                                             (> (length result-content) 0))
+                                        (let ((first (aref result-content 0)))
+                                          (or (alist-get 'text first)
+                                              (format "%s" first))))
+                                       ;; Content is a string
+                                       ((stringp result-content)
+                                        result-content)
+                                       (t nil))))))))))
+                       (claude-gravity--schedule-session-refresh session-id))))
+
+                  ;; --- result: turn complete ---
+                  ("result"
+                   (let ((session (and session-id
+                                      (claude-gravity--get-session session-id))))
+                     (when session
+                       (claude-gravity-model-clear-streaming-text session)
+                       (claude-gravity-model-set-claude-status session 'idle)
+                       ;; Store usage from result (authoritative)
+                       (let ((usage (alist-get 'usage data)))
+                         (when usage
+                           (claude-gravity-model-set-token-usage session usage)))
+                       (claude-gravity--schedule-session-refresh session-id)
+                       (claude-gravity--schedule-refresh))))))
+            (error
+             (message "Claude managed stdout parse error: %s line: %s"
+                      (error-message-string err)
+                      (substring line 0 (min 120 (length line)))))))))
+    (process-put proc 'claude-gravity--stdout-buffer buf)))
+
+(defun claude-gravity--managed-process-sentinel (proc event)
+  "Process sentinel for managed Claude process PROC with EVENT."
+  (let ((session-id (or (process-get proc 'claude-gravity--session-id)
+                        (process-get proc 'claude-gravity--temp-id))))
+    (message "Claude managed process [%s]: %s" (or session-id "?") (string-trim event))
+    (when session-id
+      (let ((session (claude-gravity--get-session session-id)))
+        (when session
+          (claude-gravity-model-set-claude-status session 'idle)
+          (plist-put session :managed-process nil)
+          ;; Mark ended if process exited normally
+          (when (string-match-p "\\(?:finished\\|exited\\)" event)
+            (claude-gravity-model-session-end session))
+          (claude-gravity--schedule-refresh)
+          (claude-gravity--schedule-session-refresh session-id)))
+      (remhash session-id claude-gravity--managed-processes))))
+
+(defun claude-gravity-start-session (cwd &optional model permission-mode)
+  "Start a new Emacs-managed Claude session in CWD.
+Optional MODEL overrides the default.  PERMISSION-MODE sets the mode.
+Returns the session-id (temporary until init event provides real ID)."
+  (interactive
+   (list (read-directory-name "Project directory: " default-directory)))
+  (let* ((temp-id (format "managed-%s" (format-time-string "%s%3N")))
+         (args (claude-gravity--managed-process-args cwd nil model permission-mode))
+         (proc (make-process
+                :name (format "claude-managed-%s" temp-id)
+                :command (cons (claude-gravity--claude-command) args)
+                :buffer nil
+                :filter #'claude-gravity--managed-process-filter
+                :sentinel #'claude-gravity--managed-process-sentinel
+                :connection-type 'pipe
+                :noquery t)))
+    ;; Set working directory
+    (process-put proc 'claude-gravity--cwd cwd)
+    (process-put proc 'claude-gravity--temp-id temp-id)
+    (set-process-coding-system proc 'utf-8 'utf-8)
+    ;; Create session with temp ID (will be re-keyed on init)
+    (let ((session (claude-gravity--ensure-session temp-id cwd)))
+      (plist-put session :managed-process proc)
+      (claude-gravity-model-set-claude-status session 'idle))
+    (puthash temp-id proc claude-gravity--managed-processes)
+    (claude-gravity--schedule-refresh)
+    (message "Claude managed session starting in %s" cwd)
+    temp-id))
+
+(defun claude-gravity-resume-session (session-id &optional cwd model)
+  "Resume an existing Claude session by SESSION-ID from Emacs.
+CWD defaults to the session's stored cwd.  MODEL overrides the default."
+  (interactive
+   (let* ((sessions nil)
+          (candidates nil))
+     (maphash (lambda (id session)
+                (when (eq (plist-get session :status) 'ended)
+                  (push (cons (format "%s [%s]"
+                                      (or (plist-get session :slug) id)
+                                      (plist-get session :project))
+                              id)
+                        candidates)))
+              claude-gravity--sessions)
+     (if candidates
+         (let* ((choice (completing-read "Resume session: " candidates nil t))
+                (sid (cdr (assoc choice candidates))))
+           (list sid))
+       ;; No ended sessions — prompt for raw ID
+       (list (read-string "Session ID to resume: ")))))
+  (let* ((existing (claude-gravity--get-session session-id))
+         (cwd (or cwd
+                  (and existing (plist-get existing :cwd))
+                  (read-directory-name "Project directory: ")))
+         (args (claude-gravity--managed-process-args cwd session-id model))
+         (proc (make-process
+                :name (format "claude-managed-%s" session-id)
+                :command (cons (claude-gravity--claude-command) args)
+                :buffer nil
+                :filter #'claude-gravity--managed-process-filter
+                :sentinel #'claude-gravity--managed-process-sentinel
+                :connection-type 'pipe
+                :noquery t)))
+    (process-put proc 'claude-gravity--cwd cwd)
+    (process-put proc 'claude-gravity--session-id session-id)
+    (process-put proc 'claude-gravity--temp-id session-id)
+    (set-process-coding-system proc 'utf-8 'utf-8)
+    ;; Update or create session
+    (let ((session (claude-gravity--ensure-session session-id cwd)))
+      (when (eq (plist-get session :status) 'ended)
+        (plist-put session :status 'active))
+      (plist-put session :managed-process proc)
+      (claude-gravity-model-set-claude-status session 'idle))
+    (puthash session-id proc claude-gravity--managed-processes)
+    (claude-gravity--schedule-refresh)
+    (message "Claude managed session resuming %s" session-id)
+    session-id))
+
+(defun claude-gravity-send-prompt (prompt &optional session-id)
+  "Send PROMPT string to the managed Claude process for SESSION-ID.
+If SESSION-ID is nil, uses the current buffer's session."
+  (interactive
+   (list (read-string "Prompt: ")))
+  (let* ((sid (or session-id
+                  claude-gravity--buffer-session-id
+                  ;; Find any active managed session
+                  (let ((found nil))
+                    (maphash (lambda (id proc)
+                               (when (and (process-live-p proc) (not found))
+                                 (setq found id)))
+                             claude-gravity--managed-processes)
+                    found)))
+         (proc (and sid (gethash sid claude-gravity--managed-processes))))
+    (unless proc
+      (error "No managed Claude process found for session %s" sid))
+    (unless (process-live-p proc)
+      (error "Managed Claude process for %s is not running" sid))
+    (let* ((json-encoding-pretty-print nil)
+           (msg (json-encode (list (cons 'type "user")
+                                   (cons 'message
+                                         (list (cons 'role "user")
+                                               (cons 'content prompt)))))))
+      (process-send-string proc (concat msg "\n"))
+      ;; Update status
+      (let ((session (claude-gravity--get-session sid)))
+        (when session
+          (claude-gravity-model-set-claude-status session 'responding)
+          (claude-gravity--schedule-session-refresh sid)))
+      (message "Sent prompt to Claude [%s]" sid))))
+
+(defun claude-gravity-stop-managed-session (&optional session-id)
+  "Stop the managed Claude process for SESSION-ID."
+  (interactive)
+  (let* ((sid (or session-id
+                  claude-gravity--buffer-session-id
+                  (let ((found nil))
+                    (maphash (lambda (id proc)
+                               (when (and (process-live-p proc) (not found))
+                                 (setq found id)))
+                             claude-gravity--managed-processes)
+                    found)))
+         (proc (and sid (gethash sid claude-gravity--managed-processes))))
+    (when proc
+      (when (process-live-p proc)
+        (delete-process proc))
+      (message "Stopped managed Claude process [%s]" sid))))
+
+;; Keybindings for managed process commands
+(define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-send-prompt)
+(define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)
+(define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-resume-session)
 
 (provide 'claude-gravity)
 ;;; claude-gravity.el ends here

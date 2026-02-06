@@ -16,7 +16,9 @@ we will produce a claude code plug-in (`emacs-bridge`) that hooks into lifecycle
 
 ## chatting with and "driving" claude code
 
-we don't want to implement full-blown claude code IDE, as we already use two pretty good ones (claude-code and claude-code-ide). We may integrate with them later
+We want emacs-gravity to function not just as an observer (with feedback) UI, but also as a driver — prompts are sent from within Emacs, not via the terminal. The approach: spawn `claude -p --input-format stream-json --output-format stream-json` as an Emacs subprocess, control it via JSON stdin/stdout, with hooks providing the existing gravity UI updates.
+
+Full research and architecture: [docs/emacs-driven-sessions.md](docs/emacs-driven-sessions.md)
 
 ## previous art, i
 
@@ -56,6 +58,11 @@ great claude code plug-in, I'm shamelessly copying it here.
 - Visual section dividers (─ Title ──), turn separators (╌╌╌), margin indicators (┊)
 - Running tool/agent background highlighting (subtle gold tint via `claude-gravity-running-bg` face)
 - Inline agent annotations on Task tools ("→ AgentType (short-id) duration")
+- Emacs-managed Claude process: start (`S`), resume (`r`), send prompt (`s`), stop sessions via transient menu
+- JSON-output adapter: full stream-json stdout parsing (system/init, stream_event, assistant, user, result)
+- Streaming text display: live ">>> Claude is responding..." section with text accumulation during generation
+- Model mutation API: 17 `claude-gravity-model-*` functions shared by hooks adapter and JSON-output adapter
+- Tool dedup: `session-has-tool-p` checks root and agent tools by tool_use_id across both adapters
 - Bidirectional PermissionRequest: plan review buffer with approve/deny/feedback flow (matcher: ExitPlanMode, 96h timeout)
 - Plan review inline comments (`C-c ;`): orange wave-underline overlays with `« comment »` after-string
 - Plan review `@claude` marker scanning: detects `@claude:` annotations in edited plan text
