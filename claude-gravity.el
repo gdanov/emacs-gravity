@@ -3101,6 +3101,8 @@ Returns a list from most specific to most general, with nils removed."
    ("r" "Resume session" claude-gravity-resume-session)
    ("$" "Terminal" claude-gravity-terminal-session
     :inapt-if-not claude-gravity--current-session-tmux-p)
+   ("<backtab>" "Cycle permission mode" claude-gravity-toggle-permission-mode
+    :inapt-if-not claude-gravity--current-session-tmux-p)
    ("K" "Stop session" claude-gravity-stop-session
     :inapt-if-not claude-gravity--current-session-tmux-p)
    ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
@@ -3584,10 +3586,7 @@ PERMISSIONS is an optional vector of permission rules for updatedPermissions."
   "Write an allow pattern for TOOL-NAME/TOOL-INPUT to settings.local.json.
 SESSION-ID and CWD identify the session project."
   (let* ((suggestions (claude-gravity--suggest-patterns tool-name tool-input))
-         (chosen (if (cdr suggestions)
-                     (completing-read "Allow pattern: " suggestions nil nil
-                                      (car suggestions))
-                   (car suggestions)))
+         (chosen (car suggestions))
          (settings-path (expand-file-name ".claude/settings.local.json" cwd)))
     (when chosen
       (let* ((json-object-type 'alist)
@@ -3907,6 +3906,7 @@ No socket proc is attached — approve/deny will just message."
 (define-key claude-gravity-permission-action-mode-map (kbd "A") #'claude-gravity-permission-action-allow-always)
 (define-key claude-gravity-permission-action-mode-map (kbd "S") #'claude-gravity-permission-action-allow-with-permissions)
 (define-key claude-gravity-permission-action-mode-map (kbd "d") #'claude-gravity-permission-action-deny)
+(define-key claude-gravity-permission-action-mode-map (kbd "p") #'claude-gravity-permission-action-add-pattern)
 (define-key claude-gravity-permission-action-mode-map (kbd "q") #'claude-gravity-permission-action-quit)
 
 (define-minor-mode claude-gravity-permission-action-mode
@@ -3944,6 +3944,7 @@ No socket proc is attached — approve/deny will just message."
                 (propertize "  A" 'face 'claude-gravity-tool-name) " Allow always  "
                 (propertize "  S" 'face 'claude-gravity-tool-name) " Session allow  "
                 (propertize "  d" 'face 'claude-gravity-tool-name) " Deny  "
+                (propertize "  p" 'face 'claude-gravity-tool-name) " Add pattern  "
                 (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n"))
       (setq buffer-read-only t)
       (goto-char (point-min))
@@ -3998,17 +3999,12 @@ No socket proc is attached — approve/deny will just message."
         (progn
           (claude-gravity--send-permission-response proc "allow")
           (message "No permission suggestions available, allowed without permissions"))
-      (let* ((labels (mapcar (lambda (s)
-                               (let ((type (alist-get 'type s))
-                                     (tool (alist-get 'tool s)))
-                                 (format "%s: %s" type (or tool "all"))))
-                             suggestions))
-             (chosen-label (completing-read "Permission rule: " labels nil t))
-             (idx (cl-position chosen-label labels :test #'equal))
-             (chosen (nth idx suggestions)))
-        (claude-gravity--send-permission-response proc "allow" nil (vector chosen))))
-    (claude-gravity--permission-action-finish)
-    (message "Permission allowed + session rule applied")))
+      (let ((chosen (elt suggestions 0)))
+        (claude-gravity--send-permission-response proc "allow" nil (vector chosen))
+        (let ((type (alist-get 'type chosen))
+              (tool (alist-get 'tool chosen)))
+          (message "Permission allowed + session rule: %s: %s" type (or tool "all")))))
+    (claude-gravity--permission-action-finish)))
 
 (defun claude-gravity-permission-action-deny ()
   "Deny the permission request."
@@ -4021,6 +4017,44 @@ No socket proc is attached — approve/deny will just message."
       (claude-gravity--send-permission-response proc "deny" reason))
     (claude-gravity--permission-action-finish)
     (message "Permission denied")))
+
+(defun claude-gravity-permission-action-add-pattern ()
+  "Interactively select and add an allow pattern for the current tool.
+Does not approve/deny — just writes the pattern to settings.local.json."
+  (interactive)
+  (let* ((item claude-gravity--action-inbox-item)
+         (data (alist-get 'data item))
+         (tool-name (alist-get 'tool_name data))
+         (tool-input (alist-get 'tool_input data))
+         (session-id (alist-get 'session-id item))
+         (session (claude-gravity--get-session session-id))
+         (cwd (when session (plist-get session :cwd)))
+         (suggestions (claude-gravity--suggest-patterns tool-name tool-input))
+         (chosen (completing-read "Allow pattern: " suggestions nil nil
+                                  (car suggestions))))
+    (when (and chosen cwd)
+      (let* ((settings-path (expand-file-name ".claude/settings.local.json" cwd))
+             (json-object-type 'alist)
+             (json-array-type 'list)
+             (file-data (if (file-exists-p settings-path)
+                            (json-read-file settings-path)
+                          (list (cons 'permissions (list (cons 'allow nil))))))
+             (perms (or (alist-get 'permissions file-data)
+                        (list (cons 'allow nil))))
+             (allow (or (alist-get 'allow perms) nil)))
+        (if (member chosen allow)
+            (message "Pattern already exists: %s" chosen)
+          (setf (alist-get 'allow perms) (append allow (list chosen)))
+          (setf (alist-get 'permissions file-data) perms)
+          (let ((dir (file-name-directory settings-path)))
+            (unless (file-exists-p dir)
+              (make-directory dir t)))
+          (with-temp-file settings-path
+            (let ((json-encoding-pretty-print t))
+              (insert (json-encode file-data))))
+          (when session
+            (claude-gravity--load-allow-patterns session))
+          (message "Added allow pattern: %s" chosen))))))
 
 (defun claude-gravity-permission-action-quit ()
   "Close action buffer without responding."
@@ -4287,7 +4321,9 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
                            (error "Cannot locate claude-gravity.el for --plugin-dir"))))
          (plugin-dir (expand-file-name "emacs-bridge" plugin-root))
          (sl-parts (claude-gravity--statusline-parts plugin-root))
-         (cmd-parts `("env" "TERM=dumb"
+         (cmd-parts `("env"
+											"DUMMY=true"
+											;;"TERM=dumb"
                       ,@(car sl-parts)
                       "claude" "--plugin-dir" ,plugin-dir)))
     (when model
@@ -4449,6 +4485,20 @@ in a read-only buffer."
               (special-mode)
               (display-buffer (current-buffer)))))))))
 
+(defun claude-gravity-toggle-permission-mode ()
+  "Cycle Claude Code permission mode (default → acceptEdits → plan).
+Sends Shift-Tab to the managed tmux session."
+  (interactive)
+  (let* ((sid (or claude-gravity--buffer-session-id
+                  (let ((section (magit-current-section)))
+                    (when (and section (eq (oref section type) 'session-entry))
+                      (oref section value)))))
+         (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions))))
+    (unless tmux-name
+      (user-error "No tmux session at point"))
+    (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "BTab")
+    (message "Sent Shift-Tab (cycle permission mode) to %s" tmux-name)))
+
 (defun claude-gravity-stop-session (&optional session-id)
   "Stop the tmux Claude session for SESSION-ID."
   (interactive)
@@ -4540,6 +4590,7 @@ in a read-only buffer."
 (define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-resume-session)
 (define-key claude-gravity-mode-map (kbd "$") 'claude-gravity-terminal-session)
+(define-key claude-gravity-mode-map (kbd "<backtab>") 'claude-gravity-toggle-permission-mode)
 
 (provide 'claude-gravity)
 ;;; claude-gravity.el ends here
