@@ -2773,6 +2773,8 @@ Returns a list from most specific to most general, with nils removed."
    ("/" "Slash command" claude-gravity-slash-command
     :inapt-if-not claude-gravity--current-session-tmux-p)
    ("r" "Resume session" claude-gravity-resume-session)
+   ("$" "Terminal" claude-gravity-terminal-session
+    :inapt-if-not claude-gravity--current-session-tmux-p)
    ("K" "Stop session" claude-gravity-stop-session
     :inapt-if-not claude-gravity--current-session-tmux-p)
    ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
@@ -3780,11 +3782,37 @@ in a read-only buffer."
 
 (add-hook 'kill-emacs-hook #'claude-gravity--tmux-cleanup-all)
 
+(defun claude-gravity-terminal-session ()
+  "Open a terminal buffer attached to the current session's tmux."
+  (interactive)
+  (let* ((sid (or claude-gravity--buffer-session-id
+                  (let ((section (magit-current-section)))
+                    (when (and section (eq (oref section type) 'session-entry))
+                      (oref section value)))))
+         (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions)))
+         (session (and sid (gethash sid claude-gravity--sessions)))
+         (project (and session (plist-get session :project))))
+    (unless tmux-name
+      (user-error "No tmux session at point"))
+    (let* ((buf-name (format "*Claude Terminal: %s*" (or project sid)))
+           (existing (get-buffer buf-name)))
+      (if (and existing (buffer-live-p existing)
+                (get-buffer-process existing)
+                (process-live-p (get-buffer-process existing)))
+          (pop-to-buffer existing)
+        (when existing (kill-buffer existing))
+        (let ((buf (make-term (substring buf-name 1 -1)
+                              "tmux" nil "attach-session" "-t" tmux-name)))
+          (with-current-buffer buf
+            (term-char-mode))
+          (pop-to-buffer buf))))))
+
 ;; Keybindings for session commands
 (define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-send-prompt)
 (define-key claude-gravity-mode-map (kbd "/") 'claude-gravity-slash-command)
 (define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-resume-session)
+(define-key claude-gravity-mode-map (kbd "$") 'claude-gravity-terminal-session)
 
 (provide 'claude-gravity)
 ;;; claude-gravity.el ends here
