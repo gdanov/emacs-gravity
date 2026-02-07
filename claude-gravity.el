@@ -2770,6 +2770,8 @@ Returns a list from most specific to most general, with nils removed."
    ("S" "Start session (tmux)" claude-gravity-start-session)
    ("s" "Send prompt" claude-gravity-send-prompt
     :inapt-if-not claude-gravity--current-session-tmux-p)
+   ("/" "Slash command" claude-gravity-slash-command
+    :inapt-if-not claude-gravity--current-session-tmux-p)
    ("r" "Resume session" claude-gravity-resume-session)
    ("K" "Stop session" claude-gravity-stop-session
     :inapt-if-not claude-gravity--current-session-tmux-p)
@@ -3678,6 +3680,46 @@ If SESSION-ID is nil, uses the current buffer's session."
         (claude-gravity--schedule-session-refresh sid)))
     (message "Sent prompt to Claude [%s]" sid)))
 
+(defun claude-gravity-slash-command (command &optional session-id)
+  "Send slash COMMAND to the tmux Claude session and display output.
+COMMAND should include the leading slash, e.g. \"/context\".
+Captures the tmux pane content after a short delay and shows it
+in a read-only buffer."
+  (interactive
+   (list (read-string "Slash command: " "/")))
+  (let* ((sid (or session-id
+                  claude-gravity--buffer-session-id
+                  (let ((found nil))
+                    (maphash (lambda (id tmux-name)
+                               (when (and (not found)
+                                          (claude-gravity--tmux-alive-p tmux-name))
+                                 (setq found id)))
+                             claude-gravity--tmux-sessions)
+                    found)))
+         (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions))))
+    (unless tmux-name
+      (error "No tmux Claude session found for %s" (or sid "any")))
+    (unless (claude-gravity--tmux-alive-p tmux-name)
+      (error "Tmux session %s is not running" tmux-name))
+    (claude-gravity--tmux-send-keys tmux-name command)
+    (let ((cmd command))
+      (run-at-time 1.0 nil
+        (lambda ()
+          (let* ((raw (shell-command-to-string
+                        (format "tmux capture-pane -t %s -p -S -300"
+                                (shell-quote-argument tmux-name))))
+                 (pos (string-search cmd raw))
+                 (output (if pos
+                             (substring raw pos)
+                           raw)))
+            (with-current-buffer (get-buffer-create "*Claude Slash Output*")
+              (let ((inhibit-read-only t))
+                (erase-buffer)
+                (insert output)
+                (goto-char (point-min)))
+              (special-mode)
+              (display-buffer (current-buffer)))))))))
+
 (defun claude-gravity-stop-session (&optional session-id)
   "Stop the tmux Claude session for SESSION-ID."
   (interactive)
@@ -3740,6 +3782,7 @@ If SESSION-ID is nil, uses the current buffer's session."
 
 ;; Keybindings for session commands
 (define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-send-prompt)
+(define-key claude-gravity-mode-map (kbd "/") 'claude-gravity-slash-command)
 (define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-resume-session)
 
