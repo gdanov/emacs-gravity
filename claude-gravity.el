@@ -1504,9 +1504,7 @@ LABEL gets detail-label face, VALUE gets optional FACE."
           (visual-line-mode 1)
           (setq buffer-read-only t)
           (set-buffer-modified-p nil))
-        (display-buffer buf '(display-buffer-in-side-window
-                              (side . right)
-                              (window-width . 0.4)))))))
+        (pop-to-buffer buf)))))
 
 (defun claude-gravity-show-plan ()
   "Show the plan for the current session."
