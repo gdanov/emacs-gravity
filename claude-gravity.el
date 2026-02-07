@@ -3804,7 +3804,8 @@ No socket proc is attached — approve/deny will just message."
       (goto-char (point-min))
       (claude-gravity-permission-action-mode 1)
       (setq-local claude-gravity--action-inbox-item item))
-    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))))
+    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))
+    (select-window (get-buffer-window buf))))
 
 (defun claude-gravity--permission-action-finish ()
   "Clean up after a permission action: remove inbox item, kill buffer."
@@ -3922,7 +3923,8 @@ No socket proc is attached — approve/deny will just message."
       (claude-gravity-question-action-mode 1)
       (setq-local claude-gravity--action-inbox-item item)
       (setq-local claude-gravity--question-choices choices))
-    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))))
+    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))
+    (select-window (get-buffer-window buf))))
 
 (defun claude-gravity--question-action-respond (answer-label)
   "Send ANSWER-LABEL as the question response and clean up."
