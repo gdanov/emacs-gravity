@@ -2747,7 +2747,7 @@ Only idle items can be dismissed.  Bidirectional items need a response."
 
 (defun claude-gravity--session-buffer-name (session)
   "Return buffer name for SESSION."
-  (format "*Structured Claude Session %s*" (claude-gravity--session-label session)))
+  (format "*Claude: %s*" (claude-gravity--session-label session)))
 
 (defun claude-gravity-open-session (session-id)
   "Open or switch to the buffer for SESSION-ID."
@@ -2819,7 +2819,7 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "f") 'claude-gravity-follow-mode)
 (define-key claude-gravity-mode-map (kbd "k") 'claude-gravity-inbox-dismiss)
 
-(define-derived-mode claude-gravity-mode magit-section-mode "StructuredSessions"
+(define-derived-mode claude-gravity-mode magit-section-mode "Claude"
   "Major mode for Structured Claude Sessions overview.
 
 \\{claude-gravity-mode-map}"
@@ -2829,11 +2829,67 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "T") 'claude-gravity-view-agent-transcript)
 (define-key claude-gravity-mode-map (kbd "V") 'claude-gravity-open-agent-transcript)
 
-(define-derived-mode claude-gravity-session-mode claude-gravity-mode "StructuredSession"
+(defun claude-gravity--session-header-line ()
+  "Return header-line string for the current session buffer."
+  (when-let* ((sid claude-gravity--buffer-session-id)
+              (session (gethash sid claude-gravity--sessions)))
+    (let* ((status (plist-get session :status))
+           (claude-st (plist-get session :claude-status))
+           (last-event (plist-get session :last-event-time))
+           (idle-time (when (and last-event (eq claude-st 'idle))
+                        (float-time (time-subtract (current-time) last-event))))
+           (idle-str (when idle-time
+                       (cond
+                        ((< idle-time 60) "")
+                        ((< idle-time 3600) (format " %dm" (truncate (/ idle-time 60))))
+                        (t (format " %dh" (truncate (/ idle-time 3600)))))))
+           (dot (cond
+                 ((eq status 'ended)
+                  (propertize "○" 'face 'claude-gravity-session-ended))
+                 ((eq claude-st 'responding)
+                  (propertize "●" 'face 'claude-gravity-status-responding))
+                 (t
+                  (propertize "●" 'face 'claude-gravity-status-idle))))
+           (status-word (cond
+                         ((eq status 'ended)
+                          (propertize "ended" 'face 'claude-gravity-session-ended))
+                         ((eq claude-st 'responding)
+                          (propertize "responding" 'face 'claude-gravity-status-responding))
+                         (t
+                          (propertize (concat "idle" (or idle-str ""))
+                                     'face 'claude-gravity-status-idle))))
+           (slug (propertize (claude-gravity--session-label session)
+                             'face 'claude-gravity-slug))
+           (state (plist-get session :state))
+           (tool-count (length (alist-get 'tools state)))
+           (elapsed (claude-gravity--session-total-elapsed session))
+           (usage (plist-get session :token-usage))
+           (in-tokens (when usage
+                        (+ (or (alist-get 'input_tokens usage) 0)
+                           (or (alist-get 'cache_read_input_tokens usage) 0)
+                           (or (alist-get 'cache_creation_input_tokens usage) 0))))
+           (out-tokens (when usage (or (alist-get 'output_tokens usage) 0)))
+           (parts (list " " dot " " status-word "  " slug
+                        (propertize (format "  ◆ %d tools" tool-count)
+                                    'face 'claude-gravity-detail-label))))
+      (when elapsed
+        (setq parts (append parts
+                            (list (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))
+                                             'face 'claude-gravity-detail-label)))))
+      (when (and in-tokens (> in-tokens 0))
+        (setq parts (append parts
+                            (list (propertize (format "  ↓%s ↑%s tokens"
+                                                     (claude-gravity--format-token-count in-tokens)
+                                                     (claude-gravity--format-token-count out-tokens))
+                                             'face 'claude-gravity-detail-label)))))
+      (apply #'concat parts))))
+
+(define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
   "Major mode for a single Structured Claude Session buffer."
   (setq mode-name '(:eval (if claude-gravity--follow-mode
-                              "StructuredSession[F]"
-                            "StructuredSession"))))
+                              "Claude[F]"
+                            "Claude")))
+  (setq header-line-format '(:eval (claude-gravity--session-header-line))))
 
 (defun claude-gravity-visit-or-toggle ()
   "If on a session entry, open it.  On an inbox item, act on it.
