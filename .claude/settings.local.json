@@ -38,7 +38,14 @@
       "Bash(git -C /Users/gdanov/work/playground/emacs-gravity log --oneline -20)",
       "Bash(python3:*)",
       "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs:*)",
-      "Bash(head:*)"
+      "Bash(head:*)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity status)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity diff)",
+      "Skill",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity diff --staged --stat)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity diff claude-gravity.el)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity log --oneline -5)",
+      "Bash(cat ~/.claude/settings.json 2>/dev/null | python3 -m json.tool 2>/dev/null || echo \"No settings.json found\")"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

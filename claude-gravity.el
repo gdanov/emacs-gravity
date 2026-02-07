@@ -22,6 +22,18 @@
   "Claude Code interface."
   :group 'tools)
 
+(defcustom claude-gravity-managed-statusline 'gravity
+  "StatusLine override for managed (tmux) Claude sessions.
+`gravity' -- use built-in gravity statusline (sends data to Emacs, minimal terminal output).
+`suppress' -- gravity statusline with no terminal output.
+A string -- path to a custom statusline script.
+nil -- no override; use the global statusline from settings.json."
+  :type '(choice (const :tag "Gravity statusline" gravity)
+                 (const :tag "Suppress terminal output" suppress)
+                 (string :tag "Custom script path")
+                 (const :tag "No override" nil))
+  :group 'claude-gravity)
+
 (defconst claude-gravity--indent-step 2
   "Indentation step (in spaces) per nesting level.")
 
@@ -807,6 +819,19 @@ the model mutation API to update session state."
      ;; Remove all inbox items for this session
      (claude-gravity--inbox-remove-for-session session-id)
      (claude-gravity--clear-notification-indicator))
+
+    ("StatusLine"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (let-alist data
+           (when .cost\.total_cost_usd
+             (plist-put session :cost .cost\.total_cost_usd))
+           (when .context_window\.used_percentage
+             (plist-put session :context-pct
+                        (truncate .context_window\.used_percentage)))
+           (when .model\.display_name
+             (plist-put session :model-name .model\.display_name)))
+         (claude-gravity--schedule-refresh))))
 
     ("UserPromptSubmit"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -2882,6 +2907,20 @@ overlays.  Since we render from timers, we must apply them manually."
                                                      (claude-gravity--format-token-count in-tokens)
                                                      (claude-gravity--format-token-count out-tokens))
                                              'face 'claude-gravity-detail-label)))))
+      ;; StatusLine data: cost and context window %
+      (let ((cost (plist-get session :cost))
+            (ctx-pct (plist-get session :context-pct)))
+        (when cost
+          (setq parts (append parts
+                              (list (propertize (format "  $%.2f" cost)
+                                               'face 'claude-gravity-detail-label)))))
+        (when ctx-pct
+          (let ((face (cond ((>= ctx-pct 90) 'error)
+                            ((>= ctx-pct 70) 'warning)
+                            (t 'claude-gravity-detail-label))))
+            (setq parts (append parts
+                                (list (propertize (format "  ctx:%d%%" ctx-pct)
+                                                 'face face)))))))
       (apply #'concat parts))))
 
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
@@ -4193,6 +4232,34 @@ send-keys -l interpreting newlines as Enter."
                      (oref section value))))))
     (and sid (gethash sid claude-gravity--tmux-sessions))))
 
+(defun claude-gravity--statusline-parts (plugin-root)
+  "Return statusline override parts for managed sessions.
+PLUGIN-ROOT is the directory containing claude-gravity.el.
+Returns (ENV-VARS . CLI-ARGS) where ENV-VARS are strings like
+\"KEY=val\" for the env command and CLI-ARGS are strings like
+\"--settings\" \"{...}\" for the claude command.  Returns nil when
+`claude-gravity-managed-statusline' is nil."
+  (when claude-gravity-managed-statusline
+    (let* ((script-path
+            (cond
+             ((stringp claude-gravity-managed-statusline)
+              claude-gravity-managed-statusline)
+             (t (expand-file-name "emacs-bridge/statusline.js" plugin-root))))
+           (mode (if (eq claude-gravity-managed-statusline 'suppress)
+                     "suppress" "minimal"))
+           (statusline-cmd (if (stringp claude-gravity-managed-statusline)
+                               script-path
+                             (format "node %s" script-path)))
+           (settings-json (json-encode
+                           `((statusLine . ((type . "command")
+                                           (command . ,statusline-cmd)))))))
+      (cons
+       ;; env vars
+       (list (format "CLAUDE_GRAVITY_SOCK=%s" claude-gravity-server-sock-path)
+             (format "CLAUDE_GRAVITY_STATUSLINE_MODE=%s" mode))
+       ;; cli args
+       (list "--settings" settings-json)))))
+
 (defun claude-gravity-start-session (cwd &optional model permission-mode)
   "Start a new Claude session in CWD via tmux.
 Optional MODEL overrides the default.  PERMISSION-MODE sets the mode.
@@ -4207,17 +4274,21 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
     (error "A tmux session is already pending for %s" cwd))
   (let* ((temp-id (format "tmux-%s" (format-time-string "%s%3N")))
          (tmux-name (format "claude-%s" temp-id))
-         (plugin-dir (expand-file-name
-                      "emacs-bridge"
-                      (file-name-directory
+         (plugin-root (file-name-directory
                        (or load-file-name
                            (locate-library "claude-gravity")
-                           (error "Cannot locate claude-gravity.el for --plugin-dir")))))
-         (cmd-parts (list "env" "TERM=dumb" "claude" "--plugin-dir" plugin-dir)))
+                           (error "Cannot locate claude-gravity.el for --plugin-dir"))))
+         (plugin-dir (expand-file-name "emacs-bridge" plugin-root))
+         (sl-parts (claude-gravity--statusline-parts plugin-root))
+         (cmd-parts `("env" "TERM=dumb"
+                      ,@(car sl-parts)
+                      "claude" "--plugin-dir" ,plugin-dir)))
     (when model
       (setq cmd-parts (append cmd-parts (list "--model" model))))
     (when permission-mode
       (setq cmd-parts (append cmd-parts (list "--permission-mode" permission-mode))))
+    (when (cdr sl-parts)
+      (setq cmd-parts (append cmd-parts (cdr sl-parts))))
     (let ((result (apply #'call-process "tmux" nil nil nil
                          "new-session" "-d" "-s" tmux-name
                          "-c" cwd
@@ -4263,17 +4334,20 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
                    (read-directory-name "Project directory: "))))
          (tmux-name (format "claude-resume-%s"
                             (substring session-id 0 (min 8 (length session-id)))))
-         (plugin-dir (expand-file-name
-                      "emacs-bridge"
-                      (file-name-directory
+         (plugin-root (file-name-directory
                        (or load-file-name
                            (locate-library "claude-gravity")
-                           (error "Cannot locate claude-gravity.el for --plugin-dir")))))
-         (cmd-parts (list "env" "TERM=dumb" "claude"
-                          "--resume" session-id
-                          "--plugin-dir" plugin-dir)))
+                           (error "Cannot locate claude-gravity.el for --plugin-dir"))))
+         (plugin-dir (expand-file-name "emacs-bridge" plugin-root))
+         (sl-parts (claude-gravity--statusline-parts plugin-root))
+         (cmd-parts `("env" "TERM=dumb"
+                      ,@(car sl-parts)
+                      "claude" "--resume" ,session-id
+                      "--plugin-dir" ,plugin-dir)))
     (when model
       (setq cmd-parts (append cmd-parts (list "--model" model))))
+    (when (cdr sl-parts)
+      (setq cmd-parts (append cmd-parts (cdr sl-parts))))
     ;; Register pending re-key by cwd (SessionStart will arrive with real ID)
     (puthash cwd session-id claude-gravity--tmux-pending)
     (let ((result (apply #'call-process "tmux" nil nil nil
