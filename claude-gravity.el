@@ -2894,7 +2894,15 @@ overlays.  Since we render from timers, we must apply them manually."
                            (or (alist-get 'cache_read_input_tokens usage) 0)
                            (or (alist-get 'cache_creation_input_tokens usage) 0))))
            (out-tokens (when usage (or (alist-get 'output_tokens usage) 0)))
+           (perm-mode (plist-get session :permission-mode))
+           (model-name (plist-get session :model-name))
            (parts (list " " dot " " status-word "  " slug
+                        (when perm-mode
+                          (propertize (format "  [%s]" perm-mode)
+                                     'face 'claude-gravity-detail-label))
+                        (when model-name
+                          (propertize (format "  %s" model-name)
+                                     'face 'claude-gravity-detail-label))
                         (propertize (format "  ◆ %d tools" tool-count)
                                     'face 'claude-gravity-detail-label))))
       (when elapsed
@@ -2921,7 +2929,7 @@ overlays.  Since we render from timers, we must apply them manually."
             (setq parts (append parts
                                 (list (propertize (format "  ctx:%d%%" ctx-pct)
                                                  'face face)))))))
-      (apply #'concat parts))))
+      (apply #'concat (delq nil parts)))))
 
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
   "Major mode for a single Structured Claude Session buffer."
@@ -3647,9 +3655,8 @@ SESSION-ID identifies the Claude Code session."
       (add-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill nil t)
       (goto-char (point-min))
       (set-buffer-modified-p nil))
-    ;; Display prominently
-    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.5)))
-    (select-window (get-buffer-window buf))
+    ;; Display in current window
+    (switch-to-buffer buf)
     (message "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff")))
 
 (defun claude-gravity--send-bidirectional-response (proc response)
