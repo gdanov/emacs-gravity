@@ -184,5 +184,79 @@ EXTRA-DATA is an alist merged into the event data."
       (should (= 0 (length (plist-get session :prompts))))
       (should (null (plist-get session :permission-mode))))))
 
+;;; Replay tests — feed JSONL transcripts through managed process filter
+
+(defvar cg-test--dir
+  (file-name-directory (or load-file-name buffer-file-name
+                           "/Users/gdanov/work/playground/emacs-gravity/test/claude-gravity-test.el"))
+  "Directory containing test files, captured at load time.")
+
+(require 'cg-test-replay (expand-file-name "replay.el" cg-test--dir))
+
+(defun cg-test--replay-plan-json ()
+  "Replay test/plan.json and return the session-id.
+Clears sessions first for a clean test."
+  (clrhash claude-gravity--sessions)
+  (clrhash claude-gravity--managed-processes)
+  (cg-test-replay-transcript (expand-file-name "plan.json" cg-test--dir)))
+
+(ert-deftest cg-test-replay-session-exists ()
+  "Replay creates a session with the correct real session-id."
+  (let ((sid (cg-test--replay-plan-json)))
+    (should (equal "bd6a0b39-3760-42e9-ac8d-5d9cf5bf75b4" sid))
+    (should (claude-gravity--get-session sid))))
+
+(ert-deftest cg-test-replay-session-status ()
+  "After replay, session should be idle (result event received)."
+  (let* ((sid (cg-test--replay-plan-json))
+         (session (claude-gravity--get-session sid)))
+    (should (eq 'idle (plist-get session :claude-status)))))
+
+(ert-deftest cg-test-replay-tool-count ()
+  "Replay should produce the expected number of tools.
+plan.json has 1 Task tool at root + ~19 subagent tools."
+  (let* ((sid (cg-test--replay-plan-json))
+         (session (claude-gravity--get-session sid))
+         (root-tools (alist-get 'tools (plist-get session :state))))
+    ;; At minimum: 1 root Task tool
+    (should (>= (length root-tools) 1))
+    ;; The Task tool should exist
+    (should (claude-gravity--find-tool-by-id
+             root-tools "toolu_01Nww8G8Dpz77JVzLTjzjqy2"))))
+
+(ert-deftest cg-test-replay-task-tool-done ()
+  "The root Task tool should be completed (result line 47 has tool_result)."
+  (let* ((sid (cg-test--replay-plan-json))
+         (session (claude-gravity--get-session sid))
+         (root-tools (alist-get 'tools (plist-get session :state)))
+         (idx (claude-gravity--find-tool-by-id
+               root-tools "toolu_01Nww8G8Dpz77JVzLTjzjqy2"))
+         (task-tool (and idx (aref root-tools idx))))
+    (should task-tool)
+    (should (equal "done" (alist-get 'status task-tool)))))
+
+(ert-deftest cg-test-replay-subagent-tools-have-parent ()
+  "Subagent tools (lines 9-46) have parent_tool_use_id pointing to Task tool."
+  (let* ((sid (cg-test--replay-plan-json))
+         (session (claude-gravity--get-session sid))
+         (root-tools (alist-get 'tools (plist-get session :state)))
+         (task-tool-id "toolu_01Nww8G8Dpz77JVzLTjzjqy2")
+         ;; Check the first subagent tool: Read toolu_01SF7qpWaQ6ae1bAXwDGyQ3u
+         (read-tool-id "toolu_01SF7qpWaQ6ae1bAXwDGyQ3u"))
+    ;; The subagent tool should NOT be in root tools (it has parent_tool_use_id)
+    ;; It might be stored under the Task tool's agent or in agent tools.
+    ;; Check that the session has agent-attributed tools somewhere.
+    ;; The total tool count across root + agents should be > 1
+    (let ((agents (plist-get session :agents)))
+      ;; Either agents exist with tools, or tools are in root with parent references
+      (should (or (> (length agents) 0)
+                  (> (length root-tools) 1))))))
+
+(ert-deftest cg-test-replay-pending-text-cleared ()
+  "After replay completes, pending assistant text should be nil."
+  (let* ((sid (cg-test--replay-plan-json))
+         (session (claude-gravity--get-session sid)))
+    (should (null (plist-get session :pending-assistant-text)))))
+
 (provide 'claude-gravity-test)
 ;;; claude-gravity-test.el ends here

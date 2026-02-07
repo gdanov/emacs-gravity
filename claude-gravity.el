@@ -804,13 +804,18 @@ the model mutation API to update session state."
              (claude-gravity-model-set-plan
               session (list :content plan-content
                             :file-path file-path
-                            :allowed-prompts (append allowed-prompts nil)))))
+                            :allowed-prompts (append allowed-prompts nil)))
+             ;; Flag managed sessions for plan review on next result
+             (when (plist-get session :managed-process)
+               (plist-put session :pending-plan-approval t)))))
          ;; Advance turn — plan approval is a phase boundary
-         (claude-gravity-model-add-prompt
-          session (list (cons 'text "[Plan approved]")
-                        (cons 'type 'phase-boundary)
-                        (cons 'submitted (current-time))
-                        (cons 'elapsed nil))))))
+         ;; Managed sessions handle this via plan review UI, not here
+         (unless (plist-get session :managed-process)
+           (claude-gravity-model-add-prompt
+            session (list (cons 'text "[Plan approved]")
+                          (cons 'type 'phase-boundary)
+                          (cons 'submitted (current-time))
+                          (cons 'elapsed nil))))))
 
     ("PostToolUseFailure"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -2744,6 +2749,12 @@ Returns a list from most specific to most general, with nils removed."
    ("R" "Reset all status to idle" claude-gravity-reset-status)
    ("X" "Detect dead sessions" claude-gravity-detect-dead-sessions)
    ("d" "Delete session" claude-gravity-delete-session)]
+  ["Tmux-based Interactive Session"
+   ("m S" "Start tmux session" claude-gravity-experiment-tmux-session)
+   ("m s" "Send prompt (tmux)" claude-gravity-experiment-tmux-send)
+   ("m o" "Capture output" claude-gravity-experiment-tmux-capture)
+   ("m a" "Attach to session" claude-gravity-experiment-tmux-show)
+   ("m k" "Kill tmux session" claude-gravity-experiment-tmux-kill)]
   ["Navigation"
    ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)
    ("TAB" "Toggle section" magit-section-toggle)])
@@ -3001,6 +3012,9 @@ Each entry is (event-data proc session-id).")
 (defvar-local claude-gravity--plan-review-comments nil
   "List of inline comments in the plan review buffer.
 Each entry is an alist with keys: line, text, overlay, context.")
+
+(defvar-local claude-gravity--plan-review-managed nil
+  "Non-nil if this plan review is for a managed session.")
 
 (defvar claude-gravity-plan-review-mode-map (make-sparse-keymap)
   "Keymap for `claude-gravity-plan-review-mode'.")
@@ -3360,26 +3374,32 @@ incorporate the feedback (the allow channel cannot carry feedback)."
   (let ((diff (claude-gravity--plan-review-compute-diff))
         (comments (claude-gravity--plan-review-collect-feedback))
         (markers (claude-gravity--plan-review-scan-markers)))
-    (if (or diff comments markers)
-        ;; Feedback exists — deny so Claude sees it
-        (let* ((deny-message (claude-gravity--plan-review-build-feedback-message
-                              diff comments markers
-                              "I edited/annotated the plan. Please update your plan to match these changes and call ExitPlanMode again."))
-               (response `((hookSpecificOutput
-                            . ((hookEventName . "PermissionRequest")
-                               (decision . ((behavior . "deny")
-                                            (message . ,deny-message))))))))
-          (claude-gravity--plan-review-send-response response)
-          (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
-          (let ((buf (current-buffer)))
-            (quit-window)
-            (kill-buffer buf))
-          (message "Feedback detected — denied for revision"))
-      ;; No feedback — clean approve
-      (let ((response `((hookSpecificOutput
-                         . ((hookEventName . "PermissionRequest")
-                            (decision . ((behavior . "allow"))))))))
-        (claude-gravity--plan-review-send-response response)
+    (let ((managed claude-gravity--plan-review-managed)
+          (sid claude-gravity--plan-review-session-id))
+      (if (or diff comments markers)
+          ;; Feedback exists — deny so Claude sees it
+          (let ((deny-message (claude-gravity--plan-review-build-feedback-message
+                               diff comments markers
+                               "I edited/annotated the plan. Please update your plan to match these changes and call ExitPlanMode again.")))
+            (if managed
+                (claude-gravity-send-prompt deny-message sid)
+              (let ((response `((hookSpecificOutput
+                                 . ((hookEventName . "PermissionRequest")
+                                    (decision . ((behavior . "deny")
+                                                 (message . ,deny-message))))))))
+                (claude-gravity--plan-review-send-response response)))
+            (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
+            (let ((buf (current-buffer)))
+              (quit-window)
+              (kill-buffer buf))
+            (message "Feedback detected — denied for revision"))
+        ;; No feedback — clean approve
+        (if managed
+            (claude-gravity-send-prompt "Plan approved, proceed with implementation." sid)
+          (let ((response `((hookSpecificOutput
+                             . ((hookEventName . "PermissionRequest")
+                                (decision . ((behavior . "allow"))))))))
+            (claude-gravity--plan-review-send-response response)))
         (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
         (let ((buf (current-buffer)))
           (quit-window)
@@ -3396,11 +3416,15 @@ Collects inline comments, @claude markers, diff, and a general comment."
          (general-comment (read-string "Feedback comment (optional): "))
          (deny-message (claude-gravity--plan-review-build-feedback-message
                         diff comments markers general-comment))
-         (response `((hookSpecificOutput
-                      . ((hookEventName . "PermissionRequest")
-                         (decision . ((behavior . "deny")
-                                      (message . ,deny-message))))))))
-    (claude-gravity--plan-review-send-response response)
+         (managed claude-gravity--plan-review-managed)
+         (sid claude-gravity--plan-review-session-id))
+    (if managed
+        (claude-gravity-send-prompt deny-message sid)
+      (let ((response `((hookSpecificOutput
+                         . ((hookEventName . "PermissionRequest")
+                            (decision . ((behavior . "deny")
+                                         (message . ,deny-message))))))))
+        (claude-gravity--plan-review-send-response response)))
     (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
     (let ((buf (current-buffer)))
       (quit-window)
@@ -3427,11 +3451,15 @@ Collects inline comments, @claude markers, diff, and a general comment."
   "Handle plan review buffer being killed without explicit decision.
 Sends a deny response."
   (when claude-gravity--plan-review-proc
-    (let ((response `((hookSpecificOutput
-                       . ((hookEventName . "PermissionRequest")
-                          (decision . ((behavior . "deny")
-                                       (message . "Plan review cancelled (buffer closed)"))))))))
-      (claude-gravity--plan-review-send-response response))))
+    (if claude-gravity--plan-review-managed
+        (let ((sid claude-gravity--plan-review-session-id))
+          (when sid
+            (claude-gravity-send-prompt "Plan review cancelled (buffer closed). Please re-present the plan." sid)))
+      (let ((response `((hookSpecificOutput
+                         . ((hookEventName . "PermissionRequest")
+                            (decision . ((behavior . "deny")
+                                         (message . "Plan review cancelled (buffer closed)"))))))))
+        (claude-gravity--plan-review-send-response response)))))
 
 (defun claude-gravity-test-plan-review ()
   "Open a simulated plan review buffer for testing.
@@ -3442,6 +3470,44 @@ No socket proc is attached — approve/deny will just message."
                      (allowedPrompts . [((tool . "Bash") (prompt . "npm test"))]))))
    nil
    "test-session"))
+
+(defun claude-gravity--managed-plan-review (session session-id)
+  "Open plan review for managed SESSION.
+Reuses the plan review buffer UI but sends approval/denial
+as a user message on stdin instead of a socket response."
+  (plist-put session :pending-plan-approval nil)
+  (let* ((plan (plist-get session :plan))
+         (plan-content (and plan (plist-get plan :content)))
+         (allowed-prompts (and plan (plist-get plan :allowed-prompts))))
+    (if (not plan-content)
+        (progn
+          (message "Claude managed: ExitPlanMode but no plan content found")
+          (claude-gravity-send-prompt "Plan approved, proceed." session-id))
+      (let* ((label (claude-gravity--session-label session))
+             (buf-name (format "*Claude Plan Review: %s*" label))
+             (buf (get-buffer-create buf-name))
+             (proc (gethash session-id claude-gravity--managed-processes)))
+        (with-current-buffer buf
+          (erase-buffer)
+          (insert plan-content)
+          (insert "\n")
+          (when (and allowed-prompts (> (length allowed-prompts) 0))
+            (insert "\n## Allowed Prompts\n\n")
+            (seq-doseq (p allowed-prompts)
+              (insert (format "- **%s**: %s\n"
+                              (or (alist-get 'tool p) "?")
+                              (or (alist-get 'prompt p) "?")))))
+          (when (fboundp 'markdown-mode) (markdown-mode))
+          (claude-gravity-plan-review-mode 1)
+          (setq-local claude-gravity--plan-review-proc proc)
+          (setq-local claude-gravity--plan-review-managed t)
+          (setq-local claude-gravity--plan-review-original plan-content)
+          (setq-local claude-gravity--plan-review-session-id session-id)
+          (add-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill nil t)
+          (goto-char (point-min))
+          (set-buffer-modified-p nil))
+        (pop-to-buffer buf '((display-buffer-reuse-window display-buffer-same-window)))
+        (message "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff")))))
 
 ;;; Managed Claude Process
 ;;
@@ -3474,13 +3540,12 @@ MODEL overrides the default model.  PERMISSION-MODE sets the permission mode."
       (setq args (append args (list "--model" model))))
     (when permission-mode
       (setq args (append args (list "--permission-mode" permission-mode))))
-    ;; Load our plugin so hooks fire
+    ;; Load our plugin so hooks fire — fail loudly if unresolvable
     (let ((plugin-dir (file-name-directory
                        (or load-file-name
                            (locate-library "claude-gravity")
-                           ""))))
-      (when (and plugin-dir (file-directory-p plugin-dir))
-        (setq args (append args (list "--plugin-dir" plugin-dir)))))
+                           (error "Cannot determine plugin directory for --plugin-dir; ensure claude-gravity.el is in `load-path'")))))
+      (setq args (append args (list "--plugin-dir" (expand-file-name "emacs-bridge" plugin-dir)))))
     args))
 
 (defun claude-gravity--managed-ensure-agent (session session-id cwd parent-tool-use-id)
@@ -3676,8 +3741,14 @@ See: https://platform.claude.com/docs/en/agent-sdk/typescript#message-types"
                                           (tool-name (alist-get 'name block))
                                           (parent-id (alist-get 'parent_tool_use_id data))
                                           (pending-text (and texts (string-join (nreverse texts) "\n\n"))))
-                                      (unless (claude-gravity--session-has-tool-p session tool-id)
-                                        ;; Ensure agent exists for nested tools
+                                      (if (claude-gravity--session-has-tool-p session tool-id)
+                                          ;; Tool already registered (from content_block_start)
+                                          ;; — backfill input if it was nil
+                                          (let ((stored (claude-gravity-model-find-tool session tool-id))
+                                                (input (alist-get 'input block)))
+                                            (when (and stored input (not (alist-get 'input stored)))
+                                              (setf (alist-get 'input stored) input)))
+                                        ;; New tool — register it
                                         (claude-gravity--managed-ensure-agent
                                          session session-id cwd parent-id)
                                         (claude-gravity-handle-event
@@ -3693,7 +3764,22 @@ See: https://platform.claude.com/docs/en/agent-sdk/typescript#message-types"
                              ;; Remaining text/thinking becomes pending for next tool
                              (plist-put session :pending-assistant-text
                                         (and texts (string-join (nreverse texts) "\n\n")))
-                             (plist-put session :pending-assistant-thinking thinking))))
+                             (plist-put session :pending-assistant-thinking thinking)
+                             ;; Detect ExitPlanMode — store plan for review on result
+                             (dotimes (j (length content))
+                               (let* ((blk (aref content j))
+                                      (blk-name (and (equal (alist-get 'type blk) "tool_use")
+                                                     (alist-get 'name blk))))
+                                 (when (equal blk-name "ExitPlanMode")
+                                   (let* ((input (alist-get 'input blk))
+                                          (plan-content (alist-get 'plan input))
+                                          (allowed-prompts (alist-get 'allowedPrompts input)))
+                                     (when plan-content
+                                       (claude-gravity-model-set-plan
+                                        session (list :content plan-content
+                                                      :file-path nil
+                                                      :allowed-prompts (append allowed-prompts nil)))
+                                       (plist-put session :pending-plan-approval t)))))))))
                        (claude-gravity--schedule-session-refresh session-id))))
 
                   ;; --- user: tool results → PostToolUse ---
@@ -3706,12 +3792,20 @@ See: https://platform.claude.com/docs/en/agent-sdk/typescript#message-types"
                            (let* ((block (aref content i))
                                   (block-type (alist-get 'type block)))
                              (when (equal block-type "tool_result")
-                               (let ((tool-use-id (alist-get 'tool_use_id block))
-                                     (result-content (alist-get 'content block)))
+                               (let* ((tool-use-id (alist-get 'tool_use_id block))
+                                      (result-content (alist-get 'content block))
+                                      ;; Look up stored tool for name/input
+                                      (stored-tool (and session-id
+                                                        (let ((s (claude-gravity--get-session session-id)))
+                                                          (and s (claude-gravity-model-find-tool s tool-use-id)))))
+                                      (tool-name (and stored-tool (alist-get 'name stored-tool)))
+                                      (tool-input (and stored-tool (alist-get 'input stored-tool))))
                                  (when tool-use-id
                                    (claude-gravity-handle-event
                                     "PostToolUse" session-id cwd
                                     `((tool_use_id . ,tool-use-id)
+                                      (tool_name . ,tool-name)
+                                      (tool_input . ,tool-input)
                                       (parent_agent_id . ,(alist-get 'parent_tool_use_id data))
                                       (tool_response . ,(claude-gravity--managed-extract-tool-response
                                                          result-content))))
@@ -3740,7 +3834,12 @@ See: https://platform.claude.com/docs/en/agent-sdk/typescript#message-types"
                           "Stop" session-id cwd
                           `((stop_text . ,stop-text)
                             (stop_thinking . ,stop-thinking)
-                            (token_usage . ,(alist-get 'usage data))))))))))
+                            (token_usage . ,(alist-get 'usage data))))
+                         ;; Plan review needed — defer interactive UI after Stop
+                         (when (plist-get session :pending-plan-approval)
+                           (run-at-time 0 nil
+                                        #'claude-gravity--managed-plan-review
+                                        session session-id))))))))
             (error
              (message "Claude managed stdout parse error: %s line: %s"
                       (error-message-string err)
@@ -3906,6 +4005,102 @@ If SESSION-ID is nil, uses the current buffer's session."
 (define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-send-prompt)
 (define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-resume-session)
+
+;;; ============================================================================
+;;; Tmux-based Interactive Claude Sessions
+;;; ============================================================================
+;;; This approach uses tmux send-keys to submit prompts to interactive Claude
+;;; (no -p flag), bypassing the Ink library limitation (GitHub issue #15553)
+;;; where stdin is not interpreted as user submission. Tmux send-keys sends
+;;; actual keystrokes, triggering the onSubmit handler.
+
+(defvar claude-gravity--experiment-tmux-session nil
+  "Name of the tmux session for interactive Claude control.")
+
+(defun claude-gravity-experiment-tmux-session (cwd)
+  "Run interactive Claude in tmux with TERM=dumb, controlled via send-keys.
+Uses tmux send-keys to submit prompts, bypassing Ink library limitation
+(GitHub issue #15553) where stdin is not interpreted as submission.
+Hooks (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop) work
+properly with this approach.
+
+CWD is the working directory for the session."
+  (interactive
+   (list (read-directory-name "Project directory: " default-directory)))
+  (let* ((session-name (format "claude-tmux-%s" (format-time-string "%s")))
+         (plugin-dir (expand-file-name
+                      "emacs-bridge"
+                      (file-name-directory
+                       (or load-file-name
+                           (locate-library "claude-gravity")
+                           (error "Cannot locate claude-gravity.el"))))))
+    ;; Kill existing session if any
+    (when claude-gravity--experiment-tmux-session
+      (call-process "tmux" nil nil nil "kill-session" "-t" claude-gravity--experiment-tmux-session))
+    ;; Create new tmux session running Claude with TERM=dumb
+    ;; Use "env TERM=dumb" as the command to set TERM (tmux overrides -e flag)
+    (let ((result (call-process
+                   "tmux" nil nil nil
+                   "new-session" "-d" "-s" session-name
+                   "-c" cwd
+                   "env" "TERM=dumb" "claude" "--plugin-dir" plugin-dir)))
+      (if (= result 0)
+          (progn
+            (setq claude-gravity--experiment-tmux-session session-name)
+            (message "Claude tmux session started: %s (TERM=dumb, hooks enabled)" session-name)
+            session-name)
+        (error "Failed to create tmux session")))))
+
+(defun claude-gravity-experiment-tmux-send (prompt)
+  "Send PROMPT to the tmux Claude session using send-keys."
+  (interactive "sPrompt: ")
+  (unless (and claude-gravity--experiment-tmux-session
+               (= 0 (call-process "tmux" nil nil nil "has-session" "-t" claude-gravity--experiment-tmux-session)))
+    (error "No active tmux session.  Run claude-gravity-experiment-tmux-session first"))
+  ;; Send the prompt text
+  (call-process "tmux" nil nil nil "send-keys" "-t" claude-gravity--experiment-tmux-session
+                "-l" prompt)
+  ;; Send Enter key to submit
+  (call-process "tmux" nil nil nil "send-keys" "-t" claude-gravity--experiment-tmux-session
+                "Enter")
+  (message "Sent prompt to Claude (tmux): %s" prompt))
+
+(defun claude-gravity-experiment-tmux-show ()
+  "Attach to the tmux session to view output."
+  (interactive)
+  (unless (and claude-gravity--experiment-tmux-session
+               (= 0 (call-process "tmux" nil nil nil "has-session" "-t" claude-gravity--experiment-tmux-session)))
+    (error "No active tmux session")))
+  ;; Use ansi-term to attach to tmux session
+  (let ((buf (get-buffer-create (format "*tmux: %s*" claude-gravity--experiment-tmux-session))))
+    (with-current-buffer buf
+      (unless (get-buffer-process buf)
+        (make-comint-in-buffer "tmux" buf "tmux" nil "attach-session" "-t" claude-gravity--experiment-tmux-session)))
+    (display-buffer buf)))
+
+(defun claude-gravity-experiment-tmux-capture ()
+  "Capture and display the tmux pane content."
+  (interactive)
+  (unless (and claude-gravity--experiment-tmux-session
+               (= 0 (call-process "tmux" nil nil nil "has-session" "-t" claude-gravity--experiment-tmux-session)))
+    (error "No active tmux session")))
+  (let ((output (with-temp-buffer
+                  (call-process "tmux" nil t nil "capture-pane" "-t" claude-gravity--experiment-tmux-session "-p")
+                  (buffer-string))))
+    (with-current-buffer (get-buffer-create "*Claude tmux output*")
+      (erase-buffer)
+      (insert output)
+      (goto-char (point-min))
+      (display-buffer (current-buffer)))))
+
+(defun claude-gravity-experiment-tmux-kill ()
+  "Kill the tmux experiment session."
+  (interactive)
+  (when (and claude-gravity--experiment-tmux-session
+             (= 0 (call-process "tmux" nil nil nil "has-session" "-t" claude-gravity--experiment-tmux-session)))
+    (call-process "tmux" nil nil nil "kill-session" "-t" claude-gravity--experiment-tmux-session)
+    (setq claude-gravity--experiment-tmux-session nil)
+    (message "Killed tmux experiment session")))
 
 (provide 'claude-gravity)
 ;;; claude-gravity.el ends here

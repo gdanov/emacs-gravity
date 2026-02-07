@@ -96,6 +96,15 @@ Multi-session support: each Claude Code session gets its own buffer, identified 
 | `TAB` | `magit-section-toggle` | Toggle section |
 | `RET` | `claude-gravity-visit-or-toggle` | Visit session/agent or toggle |
 
+### Transient menu experiment commands (`?` then `e`)
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `e S` | `claude-gravity-experiment-eat-session` | Start hidden eat session with hooks |
+| `e s` | `claude-gravity-experiment-send-prompt` | Send prompt to eat session |
+| `e o` | `claude-gravity-experiment-show-output` | Display eat buffer output |
+| `e k` | `claude-gravity-experiment-kill-session` | Kill eat experiment session |
+
 ### Plan review mode (`claude-gravity-plan-review-mode-map`)
 
 | Key | Command | Description |

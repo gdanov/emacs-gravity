@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { join } from "path";
 import { writeFileSync, mkdtempSync } from "fs";
 import { tmpdir } from "os";
-import { extractTrailingText, extractPrecedingContent, readTail } from "../src/index";
+import { extractTrailingText, extractPrecedingContent, extractFollowingContent, readTail } from "../src/index";
 
 const FIXTURES = join(__dirname, "fixtures");
 
@@ -176,5 +176,140 @@ describe("extractPrecedingContent", () => {
     writeFileSync(f, lines.join("\n") + "\n");
     const result = extractPrecedingContent(f, "tool_x");
     expect(result.text).toBe("");
+  });
+
+  it("collects multiple text blocks before tool_use", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "multi_preceding.jsonl");
+    const lines = [
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "prev", content: "ok" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "First paragraph" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Second paragraph" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "tool_y", name: "Read", input: {} }] },
+      }),
+    ];
+    writeFileSync(f, lines.join("\n") + "\n");
+    const result = extractPrecedingContent(f, "tool_y");
+    expect(result.text).toBe("First paragraph\n\nSecond paragraph");
+  });
+});
+
+describe("extractFollowingContent", () => {
+  it("extracts text following a tool_result", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "following.jsonl");
+    const lines = [
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "tool_123", content: "ok" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Great! Now I understand" }] },
+      }),
+    ];
+    writeFileSync(f, lines.join("\n") + "\n");
+    const result = extractFollowingContent(f, "tool_123");
+    expect(result.text).toBe("Great! Now I understand");
+  });
+
+  it("extracts multiple text blocks following a tool_result", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "following_multi.jsonl");
+    const lines = [
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "tool_456", content: "result" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "First response" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Second response" }] },
+      }),
+    ];
+    writeFileSync(f, lines.join("\n") + "\n");
+    const result = extractFollowingContent(f, "tool_456");
+    expect(result.text).toBe("First response\n\nSecond response");
+  });
+
+  it("stops at next tool_use", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "following_stops.jsonl");
+    const lines = [
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "tool_a", content: "ok" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "After tool_a" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "tool_b", name: "Read", input: {} }] },
+      }),
+    ];
+    writeFileSync(f, lines.join("\n") + "\n");
+    const result = extractFollowingContent(f, "tool_a");
+    expect(result.text).toBe("After tool_a");
+  });
+
+  it("extracts thinking following tool_result", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "following_thinking.jsonl");
+    const lines = [
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "thinking", thinking: "Let me process this" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Here's my response" }] },
+      }),
+    ];
+    writeFileSync(f, lines.join("\n") + "\n");
+    const result = extractFollowingContent(f, "t1");
+    expect(result.thinking).toBe("Let me process this");
+    expect(result.text).toBe("Here's my response");
+  });
+
+  it("returns empty when tool_result not found", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "not_found.jsonl");
+    const lines = [
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "tool_x", content: "ok" }] },
+      }),
+    ];
+    writeFileSync(f, lines.join("\n") + "\n");
+    const result = extractFollowingContent(f, "nonexistent");
+    expect(result).toEqual({ text: "", thinking: "" });
+  });
+
+  it("returns empty for empty file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "empty.jsonl");
+    writeFileSync(f, "");
+    const result = extractFollowingContent(f, "any");
+    expect(result).toEqual({ text: "", thinking: "" });
   });
 });
