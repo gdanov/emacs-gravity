@@ -31,7 +31,9 @@
       "Bash(wc:*)",
       "Write(/Users/gdanov/work/playground/emacs-gravity/.claude/settings.local.json)",
       "Read(/Users/gdanov/.claude/CLAUDE.md)",
-      "Edit(/Users/gdanov/work/playground/emacs-gravity/claude-gravity.el)"
+      "Edit(/Users/gdanov/work/playground/emacs-gravity/claude-gravity.el)",
+      "Bash(find ~/.claude -type f -name \"*.json\" -o -name \"*.jsonl\" 2>/dev/null | head -20)",
+      "Bash(ls -la ~/.claude/projects/ | grep -i gravity)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",
