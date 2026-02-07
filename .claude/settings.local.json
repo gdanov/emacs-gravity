@@ -33,7 +33,12 @@
       "Read(/Users/gdanov/.claude/CLAUDE.md)",
       "Edit(/Users/gdanov/work/playground/emacs-gravity/claude-gravity.el)",
       "Bash(find ~/.claude -type f -name \"*.json\" -o -name \"*.jsonl\" 2>/dev/null | head -20)",
-      "Bash(ls -la ~/.claude/projects/ | grep -i gravity)"
+      "Bash(ls -la ~/.claude/projects/ | grep -i gravity)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity branch:*)",
+      "Bash(git -C /Users/gdanov/work/playground/emacs-gravity log --oneline -20)",
+      "Bash(python3:*)",
+      "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs:*)",
+      "Bash(head:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

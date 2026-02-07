@@ -197,6 +197,93 @@ Stores the patterns list on SESSION's :allow-patterns property."
                claude-gravity--sessions)
       result)))
 
+;;; Inbox — Async queue for items needing user attention
+
+(defvar claude-gravity--inbox nil
+  "List of inbox items needing user attention, newest first.
+Each item is an alist with keys: id, type, session-id, project, label,
+timestamp, summary, data, socket-proc.")
+
+(defvar claude-gravity--inbox-counter 0
+  "Monotonic counter for inbox item IDs.")
+
+(defun claude-gravity--inbox-add (type session-id data proc)
+  "Add an inbox item of TYPE for SESSION-ID with DATA and socket PROC.
+TYPE is a symbol: permission, question, plan-review, or idle.
+Returns the new item."
+  (cl-incf claude-gravity--inbox-counter)
+  (let* ((session (claude-gravity--get-session session-id))
+         (project (when session (plist-get session :project)))
+         (label (if session
+                    (claude-gravity--session-label session)
+                  (claude-gravity--session-short-id session-id)))
+         (summary (claude-gravity--inbox-summary type data))
+         (item `((id . ,claude-gravity--inbox-counter)
+                 (type . ,type)
+                 (session-id . ,session-id)
+                 (project . ,project)
+                 (label . ,label)
+                 (timestamp . ,(current-time))
+                 (summary . ,summary)
+                 (data . ,data)
+                 (socket-proc . ,proc))))
+    (push item claude-gravity--inbox)
+    (claude-gravity--inbox-notify item)
+    (claude-gravity--schedule-refresh)
+    item))
+
+(defun claude-gravity--inbox-remove (id)
+  "Remove inbox item with ID.  Schedules overview refresh."
+  (setq claude-gravity--inbox
+        (cl-remove-if (lambda (item) (eq (alist-get 'id item) id))
+                      claude-gravity--inbox))
+  (claude-gravity--update-inbox-indicator)
+  (claude-gravity--schedule-refresh))
+
+(defun claude-gravity--inbox-remove-for-session (session-id &optional type)
+  "Remove all inbox items for SESSION-ID, optionally filtered by TYPE."
+  (setq claude-gravity--inbox
+        (cl-remove-if (lambda (item)
+                        (and (equal (alist-get 'session-id item) session-id)
+                             (or (null type)
+                                 (eq (alist-get 'type item) type))))
+                      claude-gravity--inbox))
+  (claude-gravity--update-inbox-indicator)
+  (claude-gravity--schedule-refresh))
+
+(defun claude-gravity--inbox-find (id)
+  "Return inbox item with ID, or nil."
+  (cl-find-if (lambda (item) (eq (alist-get 'id item) id))
+              claude-gravity--inbox))
+
+(defun claude-gravity--inbox-summary (type data)
+  "Generate summary text for inbox item of TYPE with DATA."
+  (pcase type
+    ('permission
+     (let ((tool-name (alist-get 'tool_name data))
+           (tool-input (alist-get 'tool_input data)))
+       (if tool-name
+           (claude-gravity--tool-signature tool-name tool-input)
+         "Permission request")))
+    ('question
+     (let* ((tool-input (alist-get 'tool_input data))
+            (questions (alist-get 'questions tool-input))
+            (first-q (and (vectorp questions) (> (length questions) 0)
+                          (aref questions 0)))
+            (q-text (and first-q (alist-get 'question first-q))))
+       (if q-text
+           (truncate-string-to-width
+            (replace-regexp-in-string "\n" " " q-text) 80)
+         "Question from Claude")))
+    ('plan-review "Plan ready for review")
+    ('idle
+     (let* ((turn (alist-get 'turn data))
+            (snippet (alist-get 'snippet data)))
+       (format "Turn %s — %s"
+               (or turn "?")
+               (or snippet "idle"))))
+    (_ "Unknown")))
+
 ;;; Refresh timers
 
 (defvar claude-gravity--refresh-timer nil
@@ -709,11 +796,14 @@ the model mutation API to update session state."
          (claude-gravity-model-session-end session)
          ;; Clean up tmux session mapping (tmux process may already be dead)
          (remhash session-id claude-gravity--tmux-sessions)))
+     ;; Remove all inbox items for this session
+     (claude-gravity--inbox-remove-for-session session-id)
      (claude-gravity--clear-notification-indicator))
 
     ("UserPromptSubmit"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
-            (prompt-text (alist-get 'prompt data)))
+            (prompt-text (claude-gravity--strip-system-xml
+                          (alist-get 'prompt data))))
        ;; Dedup: if tmux-prompt-sent flag is set, we already created the
        ;; prompt entry in send-prompt — skip to avoid duplicate
        (if (plist-get session :tmux-prompt-sent)
@@ -724,6 +814,8 @@ the model mutation API to update session state."
                           (cons 'submitted (current-time))
                           (cons 'elapsed nil)))))
        (claude-gravity-model-set-claude-status session 'responding))
+     ;; Session is responding — remove idle inbox items
+     (claude-gravity--inbox-remove-for-session session-id 'idle)
      (claude-gravity--clear-notification-indicator))
 
     ("Stop"
@@ -736,7 +828,16 @@ the model mutation API to update session state."
           (alist-get 'stop_text data)
           (alist-get 'stop_thinking data))
          (claude-gravity-model-set-token-usage
-          session (alist-get 'token_usage data)))))
+          session (alist-get 'token_usage data))
+         ;; Replace any existing idle inbox item for this session
+         (claude-gravity--inbox-remove-for-session session-id 'idle)
+         (let* ((turn (plist-get session :current-turn))
+                (stop-text (alist-get 'stop_text data))
+                (snippet (when stop-text
+                           (truncate-string-to-width
+                            (replace-regexp-in-string "\n" " " stop-text) 80))))
+           (claude-gravity--inbox-add 'idle session-id
+                                      `((turn . ,turn) (snippet . ,snippet)) nil)))))
 
     ("SubagentStart"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -2243,6 +2344,32 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
     ("completed" 2)
     (_ 3)))
 
+(defun claude-gravity--strip-system-xml (text)
+  "Strip system-injected XML tags from TEXT.
+Claude Code injects tags like <system-reminder>, <task-notification>,
+<local-command-caveat>, <command-name>, <command-message>, <command-args>,
+<local-command-stdout> into user prompt text.  Remove them and any
+surrounding whitespace so the UI shows only the actual user prompt."
+  (if (and text (string-match-p "<" text))
+      (let ((result text)
+            (tag-re "system-reminder\\|task-notification\\|local-command-caveat\\|command-name\\|command-message\\|command-args\\|local-command-stdout"))
+        ;; Remove matched pairs: <tag ...>content</tag>
+        ;; Use \\(?:.\\|\n\\)*? for multi-line non-greedy match
+        (setq result (replace-regexp-in-string
+                      (concat "<\\(" tag-re "\\)[^>]*>"
+                              "\\(?:.\\|\n\\)*?"
+                              "</\\1>")
+                      "" result))
+        ;; Remove any remaining unpaired/self-closing tags
+        (setq result (replace-regexp-in-string
+                      (concat "</?\\(" tag-re "\\)[^>]*>")
+                      "" result))
+        ;; Collapse excessive blank lines left behind
+        (setq result (replace-regexp-in-string "\n\\{3,\\}" "\n\n" result))
+        (setq result (string-trim result))
+        (if (string-empty-p result) nil result))
+    text))
+
 (defun claude-gravity--prompt-text (prompt-entry)
   "Extract text from PROMPT-ENTRY (alist or legacy string)."
   (if (listp prompt-entry)
@@ -2488,6 +2615,30 @@ the message under `message` with `role`, `content`, and `model`."
                           (propertize "Structured Claude Sessions" 'face 'claude-gravity-header-title)
                           (propertize (format "  ◆ %d sessions" total-count) 'face 'claude-gravity-detail-label)))
                 (insert (propertize top-line 'face 'claude-gravity-divider) "\n\n")))
+            ;; Inbox: Attention Required (permission, question, plan-review)
+            (let ((attention (cl-remove-if
+                              (lambda (item) (eq (alist-get 'type item) 'idle))
+                              claude-gravity--inbox)))
+              (when attention
+                (magit-insert-section (inbox-attention nil t)
+                  (magit-insert-heading
+                    (propertize (format "Attention Required (%d)" (length attention))
+                                'face 'claude-gravity-question))
+                  (dolist (item attention)
+                    (claude-gravity--insert-inbox-item item)))
+                (insert "\n")))
+            ;; Inbox: Waiting for Input (idle sessions)
+            (let ((waiting (cl-remove-if-not
+                            (lambda (item) (eq (alist-get 'type item) 'idle))
+                            claude-gravity--inbox)))
+              (when waiting
+                (magit-insert-section (inbox-waiting nil t)
+                  (magit-insert-heading
+                    (propertize (format "Waiting for Input (%d)" (length waiting))
+                                'face 'claude-gravity-status-idle))
+                  (dolist (item waiting)
+                    (claude-gravity--insert-inbox-item item)))
+                (insert "\n")))
             (if (= (hash-table-count claude-gravity--sessions) 0)
                 (insert (propertize "  No sessions.\n" 'face 'claude-gravity-detail-label))  ;; static text, not a section
               (maphash
@@ -2535,6 +2686,56 @@ the message under `message` with `role`, `content`, and `model`."
                projects)))
           (goto-char (min pos (point-max)))
           (claude-gravity--apply-visibility))))))
+
+(defun claude-gravity--insert-inbox-item (item)
+  "Render a single inbox ITEM as a magit-section line."
+  (let* ((id (alist-get 'id item))
+         (type (alist-get 'type item))
+         (project (or (alist-get 'project item) "?"))
+         (summary (or (alist-get 'summary item) ""))
+         (timestamp (alist-get 'timestamp item))
+         (icon (pcase type
+                 ('permission "!")
+                 ('question "?")
+                 ('plan-review "P")
+                 ('idle ".")
+                 (_ " ")))
+         (icon-face (pcase type
+                      ('permission 'claude-gravity-question)
+                      ('question 'claude-gravity-status-responding)
+                      ('plan-review 'claude-gravity-question)
+                      ('idle 'claude-gravity-status-idle)
+                      (_ 'default)))
+         (age (when timestamp
+                (let ((secs (float-time (time-subtract (current-time) timestamp))))
+                  (cond
+                   ((< secs 60) "<1m")
+                   ((< secs 3600) (format "%dm" (truncate (/ secs 60))))
+                   (t (format "%dh" (truncate (/ secs 3600)))))))))
+    (magit-insert-section (inbox-item id)
+      (magit-insert-heading
+        (format "  %s [%s] %-60s %s"
+                (propertize icon 'face icon-face)
+                (propertize project 'face 'claude-gravity-detail-label)
+                summary
+                (propertize (or age "") 'face 'claude-gravity-detail-label))))))
+
+(defun claude-gravity-inbox-dismiss ()
+  "Dismiss the inbox item at point.
+Only idle items can be dismissed.  Bidirectional items need a response."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (if (and section (eq (oref section type) 'inbox-item))
+        (let* ((item-id (oref section value))
+               (item (claude-gravity--inbox-find item-id)))
+          (if (null item)
+              (message "Inbox item not found")
+            (if (eq (alist-get 'type item) 'idle)
+                (progn
+                  (claude-gravity--inbox-remove item-id)
+                  (message "Dismissed"))
+              (message "Cannot dismiss — this item needs a response (use RET to act on it)"))))
+      (message "No inbox item at point"))))
 
 ;;; Per-Session Buffer
 
@@ -2609,6 +2810,7 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "a") 'claude-gravity-add-allow-pattern-to-settings)
 (define-key claude-gravity-mode-map (kbd "F") 'claude-gravity-open-plan-file)
 (define-key claude-gravity-mode-map (kbd "t") 'claude-gravity-tail)
+(define-key claude-gravity-mode-map (kbd "k") 'claude-gravity-inbox-dismiss)
 
 (define-derived-mode claude-gravity-mode magit-section-mode "StructuredSessions"
   "Major mode for Structured Claude Sessions overview.
@@ -2624,10 +2826,20 @@ overlays.  Since we render from timers, we must apply them manually."
   "Major mode for a single Structured Claude Session buffer.")
 
 (defun claude-gravity-visit-or-toggle ()
-  "If on a session entry, open it.  On an agent, parse transcript.  Otherwise toggle."
+  "If on a session entry, open it.  On an inbox item, act on it.
+On an agent, parse transcript.  Otherwise toggle."
   (interactive)
   (let ((section (magit-current-section)))
     (cond
+     ((and section (eq (oref section type) 'inbox-item))
+      (let* ((item-id (oref section value))
+             (item (claude-gravity--inbox-find item-id)))
+        (when item
+          (pcase (alist-get 'type item)
+            ('permission (claude-gravity--inbox-act-permission item))
+            ('question (claude-gravity--inbox-act-question item))
+            ('plan-review (claude-gravity--inbox-act-plan-review item))
+            ('idle (claude-gravity--inbox-act-idle item))))))
      ((and section (eq (oref section type) 'session-entry))
       (claude-gravity-open-session (oref section value)))
      ((and section (eq (oref section type) 'agent)
@@ -2783,7 +2995,8 @@ Returns a list from most specific to most general, with nils removed."
    ("d" "Delete session" claude-gravity-delete-session)]
   ["Navigation"
    ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)
-   ("TAB" "Toggle section" magit-section-toggle)])
+   ("TAB" "Toggle section" magit-section-toggle)
+   ("k" "Dismiss inbox item" claude-gravity-inbox-dismiss)])
 
 (defun claude-gravity-cleanup-sessions ()
   "Remove all ended sessions from the registry."
@@ -2825,9 +3038,10 @@ Returns a list from most specific to most general, with nils removed."
   "Detect and mark dead sessions as ended.
 Checks PID liveness when available, falls back to last-event-time staleness."
   (interactive)
-  (let ((count 0))
+  (let ((count 0)
+        (dead-ids nil))
     (maphash
-     (lambda (_id session)
+     (lambda (id session)
        (when (eq (plist-get session :status) 'active)
          (let ((pid (plist-get session :pid))
                (last-event (plist-get session :last-event-time)))
@@ -2836,17 +3050,23 @@ Checks PID liveness when available, falls back to last-event-time staleness."
             ((and pid (numberp pid) (> pid 0))
              (unless (claude-gravity--process-alive-p pid)
                (plist-put session :status 'ended)
+               (push id dead-ids)
                (cl-incf count)))
             ;; No PID, has last-event: use staleness (>5 min since last event)
             ((and last-event
                   (> (float-time (time-subtract (current-time) last-event)) 300))
              (plist-put session :status 'ended)
+             (push id dead-ids)
              (cl-incf count))
             ;; No PID, no last-event: legacy session with no way to verify
             ((null last-event)
              (plist-put session :status 'ended)
+             (push id dead-ids)
              (cl-incf count))))))
      claude-gravity--sessions)
+    ;; Clean up inbox items for dead sessions
+    (dolist (id dead-ids)
+      (claude-gravity--inbox-remove-for-session id))
     (message "Marked %d dead session(s) as ended" count)
     (claude-gravity--render-overview)))
 
@@ -2944,10 +3164,44 @@ Added to `global-mode-string' by `claude-gravity-server-start'.")
   (force-mode-line-update t))
 
 (defun claude-gravity--clear-notification-indicator ()
-  "Clear the mode-line notification indicator."
-  (when (not (string-empty-p claude-gravity--notification-indicator))
-    (setq claude-gravity--notification-indicator "")
+  "Clear the mode-line notification indicator.
+If there are inbox items needing attention, shows the inbox indicator instead."
+  (let ((attention (cl-count-if
+                    (lambda (item) (not (eq (alist-get 'type item) 'idle)))
+                    claude-gravity--inbox)))
+    (if (> attention 0)
+        (claude-gravity--update-inbox-indicator)
+      (when (not (string-empty-p claude-gravity--notification-indicator))
+        (setq claude-gravity--notification-indicator "")
+        (force-mode-line-update t)))))
+
+(defun claude-gravity--update-inbox-indicator ()
+  "Update the mode-line indicator based on inbox contents."
+  (let ((attention (cl-count-if
+                    (lambda (item) (not (eq (alist-get 'type item) 'idle)))
+                    claude-gravity--inbox))
+        (has-sessions (> (hash-table-count claude-gravity--sessions) 0)))
+    (setq claude-gravity--notification-indicator
+          (cond
+           ((> attention 0)
+            (propertize (format " [Claude: %d!]" attention)
+                        'face 'claude-gravity-question))
+           (has-sessions
+            (propertize " [Claude]" 'face 'claude-gravity-status-idle))
+           (t "")))
     (force-mode-line-update t)))
+
+(defun claude-gravity--inbox-notify (item)
+  "Flash a message and update mode-line for new inbox ITEM."
+  (claude-gravity--update-inbox-indicator)
+  (let ((type-label (pcase (alist-get 'type item)
+                      ('permission "Permission")
+                      ('question "Question")
+                      ('plan-review "Plan review")
+                      ('idle "Idle")
+                      (_ "Notice")))
+        (project (or (alist-get 'project item) "?")))
+    (message "Claude: %s from %s" type-label project)))
 
 (defvar claude-gravity-server-sock-path
   (expand-file-name "claude-gravity.sock" (file-name-directory (or load-file-name buffer-file-name)))
@@ -2976,15 +3230,17 @@ Accumulates partial data per connection until complete lines arrive."
                       (payload (alist-get 'data data))
                       (needs-response (alist-get 'needs_response data)))
                   (if needs-response
-                      ;; Bidirectional: dispatch by tool_name
+                      ;; Bidirectional: queue in inbox instead of stealing focus
                       (let ((tool-name (alist-get 'tool_name payload)))
+                        ;; Fire PreToolUse to update session state
+                        (claude-gravity-handle-event "PreToolUse" session-id cwd payload pid)
                         (cond
                          ((equal tool-name "AskUserQuestion")
-                          (claude-gravity--handle-ask-user-question payload proc session-id cwd))
+                          (claude-gravity--inbox-add 'question session-id payload proc))
                          ((equal tool-name "ExitPlanMode")
-                          (claude-gravity--handle-plan-review payload proc session-id))
+                          (claude-gravity--inbox-add 'plan-review session-id payload proc))
                          (t
-                          (claude-gravity--handle-tool-permission payload proc session-id cwd))))
+                          (claude-gravity--inbox-add 'permission session-id payload proc))))
                     (when event
                       (claude-gravity-handle-event event session-id cwd payload pid)))))
             (error
@@ -3048,6 +3304,9 @@ Each entry is (event-data proc session-id).")
 (defvar-local claude-gravity--plan-review-comments nil
   "List of inline comments in the plan review buffer.
 Each entry is an alist with keys: line, text, overlay, context.")
+
+(defvar-local claude-gravity--plan-review-inbox-id nil
+  "Inbox item ID associated with this plan review buffer, if any.")
 
 
 (defvar claude-gravity-plan-review-mode-map (make-sparse-keymap)
@@ -3253,8 +3512,8 @@ SESSION-ID identifies the Claude Code session."
       (goto-char (point-min))
       (set-buffer-modified-p nil))
     ;; Display prominently
-    (pop-to-buffer buf '((display-buffer-reuse-window
-                          display-buffer-same-window)))
+    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.5)))
+    (select-window (get-buffer-window buf))
     (message "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff")))
 
 (defun claude-gravity--send-bidirectional-response (proc response)
@@ -3399,6 +3658,15 @@ Returns the formatted markdown string.  Omits empty sections."
       (push "Plan was rejected without specific feedback.\n" parts))
     (string-join (nreverse parts) "\n")))
 
+(defun claude-gravity--plan-review-cleanup-and-close ()
+  "Remove inbox item, kill-buffer hook, and close the plan review buffer."
+  (when claude-gravity--plan-review-inbox-id
+    (claude-gravity--inbox-remove claude-gravity--plan-review-inbox-id))
+  (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
+  (let ((buf (current-buffer)))
+    (quit-window)
+    (kill-buffer buf)))
+
 (defun claude-gravity-plan-review-approve ()
   "Approve the plan and send allow decision to Claude Code.
 If the user has made edits, added inline comments, or inserted
@@ -3418,20 +3686,14 @@ incorporate the feedback (the allow channel cannot carry feedback)."
                                 (decision . ((behavior . "deny")
                                              (message . ,deny-message))))))))
             (claude-gravity--plan-review-send-response response))
-          (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
-          (let ((buf (current-buffer)))
-            (quit-window)
-            (kill-buffer buf))
+          (claude-gravity--plan-review-cleanup-and-close)
           (message "Feedback detected — denied for revision"))
       ;; No feedback — clean approve
       (let ((response `((hookSpecificOutput
                          . ((hookEventName . "PermissionRequest")
                             (decision . ((behavior . "allow"))))))))
         (claude-gravity--plan-review-send-response response))
-      (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
-      (let ((buf (current-buffer)))
-        (quit-window)
-        (kill-buffer buf))
+      (claude-gravity--plan-review-cleanup-and-close)
       (message "Plan approved"))))
 
 (defun claude-gravity-plan-review-deny ()
@@ -3449,10 +3711,7 @@ Collects inline comments, @claude markers, diff, and a general comment."
                           (decision . ((behavior . "deny")
                                        (message . ,deny-message))))))))
       (claude-gravity--plan-review-send-response response))
-    (remove-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill t)
-    (let ((buf (current-buffer)))
-      (quit-window)
-      (kill-buffer buf))
+    (claude-gravity--plan-review-cleanup-and-close)
     (message "Plan denied with feedback")))
 
 (defun claude-gravity-plan-review-diff ()
@@ -3473,7 +3732,9 @@ Collects inline comments, @claude markers, diff, and a general comment."
 
 (defun claude-gravity--plan-review-on-kill ()
   "Handle plan review buffer being killed without explicit decision.
-Sends a deny response."
+Sends a deny response and cleans up inbox item."
+  (when claude-gravity--plan-review-inbox-id
+    (claude-gravity--inbox-remove claude-gravity--plan-review-inbox-id))
   (when claude-gravity--plan-review-proc
     (let ((response `((hookSpecificOutput
                        . ((hookEventName . "PermissionRequest")
@@ -3490,6 +3751,267 @@ No socket proc is attached — approve/deny will just message."
                      (allowedPrompts . [((tool . "Bash") (prompt . "npm test"))]))))
    nil
    "test-session"))
+
+;;; ============================================================================
+;;; Inbox Action Buffers
+;;; ============================================================================
+
+;; --- Permission Action Buffer ---
+
+(defvar claude-gravity-permission-action-mode-map (make-sparse-keymap)
+  "Keymap for `claude-gravity-permission-action-mode'.")
+(define-key claude-gravity-permission-action-mode-map (kbd "a") #'claude-gravity-permission-action-allow)
+(define-key claude-gravity-permission-action-mode-map (kbd "A") #'claude-gravity-permission-action-allow-always)
+(define-key claude-gravity-permission-action-mode-map (kbd "d") #'claude-gravity-permission-action-deny)
+(define-key claude-gravity-permission-action-mode-map (kbd "q") #'claude-gravity-permission-action-quit)
+
+(define-minor-mode claude-gravity-permission-action-mode
+  "Minor mode for permission action buffers.
+\\{claude-gravity-permission-action-mode-map}"
+  :lighter " PermAction"
+  :keymap claude-gravity-permission-action-mode-map)
+
+(defvar-local claude-gravity--action-inbox-item nil
+  "The inbox item associated with this action buffer.")
+
+(defun claude-gravity--inbox-act-permission (item)
+  "Open a permission action buffer for inbox ITEM."
+  (let* ((data (alist-get 'data item))
+         (label (alist-get 'label item))
+         (tool-name (alist-get 'tool_name data))
+         (tool-input (alist-get 'tool_input data))
+         (signature (claude-gravity--tool-signature tool-name tool-input))
+         (buf (get-buffer-create "*Claude Action: Permission*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (format "Permission Request — %s\n" label)
+                            'face 'claude-gravity-header-title))
+        (insert (make-string 60 ?─) "\n\n")
+        (insert (propertize "Tool: " 'face 'claude-gravity-detail-label)
+                (propertize signature 'face 'claude-gravity-tool-name) "\n\n")
+        ;; Show tool input details
+        (when tool-input
+          (insert (propertize "Input:\n" 'face 'claude-gravity-detail-label))
+          (let ((json-encoding-pretty-print t))
+            (insert (json-encode tool-input) "\n\n")))
+        (insert (make-string 60 ?─) "\n")
+        (insert (propertize "  a" 'face 'claude-gravity-tool-name) " Allow  "
+                (propertize "  A" 'face 'claude-gravity-tool-name) " Allow always  "
+                (propertize "  d" 'face 'claude-gravity-tool-name) " Deny  "
+                (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n"))
+      (setq buffer-read-only t)
+      (goto-char (point-min))
+      (claude-gravity-permission-action-mode 1)
+      (setq-local claude-gravity--action-inbox-item item))
+    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))))
+
+(defun claude-gravity--permission-action-finish ()
+  "Clean up after a permission action: remove inbox item, kill buffer."
+  (let ((item claude-gravity--action-inbox-item))
+    (when item
+      (claude-gravity--inbox-remove (alist-get 'id item))))
+  (let ((buf (current-buffer)))
+    (quit-window)
+    (kill-buffer buf)))
+
+(defun claude-gravity-permission-action-allow ()
+  "Allow the permission request."
+  (interactive)
+  (let* ((item claude-gravity--action-inbox-item)
+         (proc (alist-get 'socket-proc item)))
+    (claude-gravity--send-permission-response proc "allow")
+    (claude-gravity--permission-action-finish)
+    (message "Permission allowed")))
+
+(defun claude-gravity-permission-action-allow-always ()
+  "Allow the permission and write an allow pattern."
+  (interactive)
+  (let* ((item claude-gravity--action-inbox-item)
+         (data (alist-get 'data item))
+         (proc (alist-get 'socket-proc item))
+         (tool-name (alist-get 'tool_name data))
+         (tool-input (alist-get 'tool_input data))
+         (session-id (alist-get 'session-id item))
+         (session (claude-gravity--get-session session-id))
+         (cwd (when session (plist-get session :cwd))))
+    (claude-gravity--send-permission-response proc "allow")
+    (when cwd
+      (claude-gravity--write-allow-pattern-for-tool tool-name tool-input session-id cwd))
+    (claude-gravity--permission-action-finish)
+    (message "Permission allowed + pattern written")))
+
+(defun claude-gravity-permission-action-deny ()
+  "Deny the permission request."
+  (interactive)
+  (let* ((item claude-gravity--action-inbox-item)
+         (proc (alist-get 'socket-proc item))
+         (reason (read-string "Reason (optional): ")))
+    (if (string-empty-p reason)
+        (claude-gravity--send-permission-response proc "deny")
+      (claude-gravity--send-permission-response proc "deny" reason))
+    (claude-gravity--permission-action-finish)
+    (message "Permission denied")))
+
+(defun claude-gravity-permission-action-quit ()
+  "Close action buffer without responding."
+  (interactive)
+  (let ((buf (current-buffer)))
+    (quit-window)
+    (kill-buffer buf)))
+
+;; --- Question Action Buffer ---
+
+(defvar claude-gravity-question-action-mode-map (make-sparse-keymap)
+  "Keymap for `claude-gravity-question-action-mode'.")
+(define-key claude-gravity-question-action-mode-map (kbd "1") #'claude-gravity-question-action-1)
+(define-key claude-gravity-question-action-mode-map (kbd "2") #'claude-gravity-question-action-2)
+(define-key claude-gravity-question-action-mode-map (kbd "3") #'claude-gravity-question-action-3)
+(define-key claude-gravity-question-action-mode-map (kbd "4") #'claude-gravity-question-action-4)
+(define-key claude-gravity-question-action-mode-map (kbd "o") #'claude-gravity-question-action-other)
+(define-key claude-gravity-question-action-mode-map (kbd "q") #'claude-gravity-question-action-quit)
+
+(define-minor-mode claude-gravity-question-action-mode
+  "Minor mode for question action buffers.
+\\{claude-gravity-question-action-mode-map}"
+  :lighter " QuestionAction"
+  :keymap claude-gravity-question-action-mode-map)
+
+(defvar-local claude-gravity--question-choices nil
+  "List of (label . description) choices for the current question buffer.")
+
+(defun claude-gravity--inbox-act-question (item)
+  "Open a question action buffer for inbox ITEM."
+  (let* ((data (alist-get 'data item))
+         (label (alist-get 'label item))
+         (tool-input (alist-get 'tool_input data))
+         (questions (alist-get 'questions tool-input))
+         (first-q (and (vectorp questions) (> (length questions) 0) (aref questions 0)))
+         (q-text (and first-q (alist-get 'question first-q)))
+         (header (and first-q (alist-get 'header first-q)))
+         (options (and first-q (alist-get 'options first-q)))
+         (choices (when (vectorp options)
+                    (cl-loop for i from 0 below (length options)
+                             for opt = (aref options i)
+                             for opt-label = (alist-get 'label opt)
+                             for desc = (alist-get 'description opt)
+                             collect (cons opt-label desc))))
+         (buf (get-buffer-create "*Claude Action: Question*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (format "Question — %s\n" label)
+                            'face 'claude-gravity-header-title))
+        (insert (make-string 60 ?─) "\n\n")
+        (when header
+          (insert (propertize (format "[%s]\n" header) 'face 'claude-gravity-detail-label)))
+        (insert (propertize (or q-text "?") 'face 'default) "\n\n")
+        (when choices
+          (cl-loop for i from 0
+                   for (clabel . desc) in choices
+                   do (insert (propertize (format "  %d" (1+ i)) 'face 'claude-gravity-tool-name)
+                              " " clabel
+                              (if desc (format "  (%s)" desc) "")
+                              "\n")))
+        (insert "\n" (make-string 60 ?─) "\n")
+        (insert (propertize "  1-4" 'face 'claude-gravity-tool-name) " Select option  "
+                (propertize "  o" 'face 'claude-gravity-tool-name) " Free text  "
+                (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n"))
+      (setq buffer-read-only t)
+      (goto-char (point-min))
+      (claude-gravity-question-action-mode 1)
+      (setq-local claude-gravity--action-inbox-item item)
+      (setq-local claude-gravity--question-choices choices))
+    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))))
+
+(defun claude-gravity--question-action-respond (answer-label)
+  "Send ANSWER-LABEL as the question response and clean up."
+  (let* ((item claude-gravity--action-inbox-item)
+         (proc (alist-get 'socket-proc item))
+         (data (alist-get 'data item))
+         (q-text (let* ((tool-input (alist-get 'tool_input data))
+                        (questions (alist-get 'questions tool-input))
+                        (first-q (and (vectorp questions) (> (length questions) 0) (aref questions 0))))
+                   (and first-q (alist-get 'question first-q))))
+         (tid (alist-get 'tool_use_id data))
+         (session-id (alist-get 'session-id item)))
+    ;; Send deny response with the answer
+    (let ((response `((hookSpecificOutput
+                       . ((hookEventName . "PreToolUse")
+                          (permissionDecision . "deny")
+                          (permissionDecisionReason
+                           . ,(format "User answered from Emacs: %s\nQuestion: %s\nAnswer: %s"
+                                      answer-label (or q-text "") answer-label)))))))
+      (claude-gravity--send-bidirectional-response proc response))
+    ;; Update prompt entry with answer
+    (let* ((session (claude-gravity--get-session session-id))
+           (prompts (when session (plist-get session :prompts))))
+      (when (and prompts tid)
+        (dotimes (i (length prompts))
+          (let ((p (aref prompts i)))
+            (when (and (equal (alist-get 'type p) 'question)
+                       (equal (alist-get 'tool_use_id p) tid))
+              (setf (alist-get 'answer p) answer-label)
+              (aset prompts i p))))))
+    ;; Clean up
+    (claude-gravity--inbox-remove (alist-get 'id item))
+    (let ((buf (current-buffer)))
+      (quit-window)
+      (kill-buffer buf))
+    (message "Answered: %s" answer-label)))
+
+(defun claude-gravity--question-action-select (n)
+  "Select option N (1-based) from the question choices."
+  (let ((choices claude-gravity--question-choices))
+    (if (and choices (>= n 1) (<= n (length choices)))
+        (claude-gravity--question-action-respond (car (nth (1- n) choices)))
+      (message "No option %d" n))))
+
+(defun claude-gravity-question-action-1 () "Select option 1." (interactive) (claude-gravity--question-action-select 1))
+(defun claude-gravity-question-action-2 () "Select option 2." (interactive) (claude-gravity--question-action-select 2))
+(defun claude-gravity-question-action-3 () "Select option 3." (interactive) (claude-gravity--question-action-select 3))
+(defun claude-gravity-question-action-4 () "Select option 4." (interactive) (claude-gravity--question-action-select 4))
+
+(defun claude-gravity-question-action-other ()
+  "Enter free text answer."
+  (interactive)
+  (let ((answer (read-string "Your answer: ")))
+    (unless (string-empty-p answer)
+      (claude-gravity--question-action-respond answer))))
+
+(defun claude-gravity-question-action-quit ()
+  "Close question action buffer without responding."
+  (interactive)
+  (let ((buf (current-buffer)))
+    (quit-window)
+    (kill-buffer buf)))
+
+;; --- Plan Review Action (reuse existing) ---
+
+(defun claude-gravity--inbox-act-plan-review (item)
+  "Open a plan review buffer for inbox ITEM.
+Reuses existing `claude-gravity--handle-plan-review', modified to
+remove the inbox item when plan review is acted on."
+  (let ((data (alist-get 'data item))
+        (proc (alist-get 'socket-proc item))
+        (session-id (alist-get 'session-id item))
+        (inbox-id (alist-get 'id item)))
+    (claude-gravity--handle-plan-review data proc session-id)
+    ;; Store inbox-id on the plan review buffer so approve/deny can clean up
+    (let ((buf (get-buffer (format "*Claude Plan Review: %s*"
+                                    (or (alist-get 'label item)
+                                        session-id "unknown")))))
+      (when buf
+        (with-current-buffer buf
+          (setq-local claude-gravity--plan-review-inbox-id inbox-id))))))
+
+;; --- Idle Session Action ---
+
+(defun claude-gravity--inbox-act-idle (item)
+  "Open the session buffer for an idle inbox ITEM."
+  (let ((session-id (alist-get 'session-id item)))
+    (claude-gravity--inbox-remove (alist-get 'id item))
+    (claude-gravity-open-session session-id)))
 
 ;;; ============================================================================
 ;;; Tmux-based Interactive Claude Sessions
