@@ -284,6 +284,11 @@ Returns the new item."
                (or snippet "idle"))))
     (_ "Unknown")))
 
+;;; Follow mode
+
+(defvar-local claude-gravity--follow-mode nil
+  "When non-nil, auto-tail the buffer after each refresh.")
+
 ;;; Refresh timers
 
 (defvar claude-gravity--refresh-timer nil
@@ -323,7 +328,10 @@ Returns the new item."
                       (and b (buffer-live-p b) b))
                     (get-buffer (claude-gravity--session-buffer-name session))))))
     (when buf
-      (claude-gravity--render-session-buffer session))))
+      (claude-gravity--render-session-buffer session)
+      (when (buffer-local-value 'claude-gravity--follow-mode buf)
+        (with-current-buffer buf
+          (claude-gravity-tail))))))
 
 ;;; Tool helpers
 
@@ -2808,6 +2816,7 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "a") 'claude-gravity-add-allow-pattern-to-settings)
 (define-key claude-gravity-mode-map (kbd "F") 'claude-gravity-open-plan-file)
 (define-key claude-gravity-mode-map (kbd "t") 'claude-gravity-tail)
+(define-key claude-gravity-mode-map (kbd "f") 'claude-gravity-follow-mode)
 (define-key claude-gravity-mode-map (kbd "k") 'claude-gravity-inbox-dismiss)
 
 (define-derived-mode claude-gravity-mode magit-section-mode "StructuredSessions"
@@ -2821,7 +2830,10 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "V") 'claude-gravity-open-agent-transcript)
 
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "StructuredSession"
-  "Major mode for a single Structured Claude Session buffer.")
+  "Major mode for a single Structured Claude Session buffer."
+  (setq mode-name '(:eval (if claude-gravity--follow-mode
+                              "StructuredSession[F]"
+                            "StructuredSession"))))
 
 (defun claude-gravity-visit-or-toggle ()
   "If on a session entry, open it.  On an inbox item, act on it.
@@ -2969,6 +2981,7 @@ Returns a list from most specific to most general, with nils removed."
    ("c" "Comment" claude-gravity-comment-at-point)
    ("g" "Refresh" claude-gravity-refresh)
    ("t" "Tail" claude-gravity-tail)
+   ("f" "Follow mode" claude-gravity-follow-mode)
    ("P" "Show Plan" claude-gravity-show-plan)
    ("F" "Open plan file" claude-gravity-open-plan-file)
    ("T" "Parse agent transcript" claude-gravity-view-agent-transcript)
@@ -3084,6 +3097,35 @@ Checks PID liveness when available, falls back to last-event-time staleness."
           (remhash sid claude-gravity--sessions)
           (message "Deleted session %s" (claude-gravity--session-short-id sid))
           (claude-gravity--render-overview))))))
+
+(defun claude-gravity-follow-mode ()
+  "Toggle follow mode in the current session buffer.
+When active, the buffer automatically tails after each refresh.
+Disables when you manually scroll or navigate."
+  (interactive)
+  (setq claude-gravity--follow-mode (not claude-gravity--follow-mode))
+  (if claude-gravity--follow-mode
+      (progn
+        (add-hook 'post-command-hook #'claude-gravity--follow-detect-manual nil t)
+        (claude-gravity-tail)
+        (message "Follow mode ON"))
+    (remove-hook 'post-command-hook #'claude-gravity--follow-detect-manual t)
+    (message "Follow mode OFF"))
+  (force-mode-line-update))
+
+(defun claude-gravity--follow-detect-manual ()
+  "Disable follow mode when user scrolls or navigates manually."
+  (when (and claude-gravity--follow-mode
+             (memq this-command '(scroll-up-command scroll-down-command
+                                  scroll-up scroll-down
+                                  beginning-of-buffer end-of-buffer
+                                  previous-line next-line
+                                  magit-section-forward magit-section-backward
+                                  magit-section-toggle)))
+    (setq claude-gravity--follow-mode nil)
+    (remove-hook 'post-command-hook #'claude-gravity--follow-detect-manual t)
+    (force-mode-line-update)
+    (message "Follow mode OFF (manual navigation)")))
 
 (defun claude-gravity-tail ()
   "Collapse all sections and focus on the tail of the latest turn.
