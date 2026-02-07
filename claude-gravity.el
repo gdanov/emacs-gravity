@@ -3521,12 +3521,13 @@ SESSION-ID and CWD identify the session."
              (claude-gravity--send-permission-response proc "deny")
            (claude-gravity--send-permission-response proc "deny" reason)))))))
 
-(defun claude-gravity--send-permission-response (proc behavior &optional message)
+(defun claude-gravity--send-permission-response (proc behavior &optional message permissions)
   "Send allow/deny response for a PermissionRequest.
-PROC is the socket, BEHAVIOR is \"allow\" or \"deny\", MESSAGE is optional reason."
-  (let* ((decision (if message
-                       `((behavior . ,behavior) (message . ,message))
-                     `((behavior . ,behavior))))
+PROC is the socket, BEHAVIOR is \"allow\" or \"deny\", MESSAGE is optional reason.
+PERMISSIONS is an optional vector of permission rules for updatedPermissions."
+  (let* ((decision `((behavior . ,behavior)
+                     ,@(when message `((message . ,message)))
+                     ,@(when permissions `((updatedPermissions . ,permissions)))))
          (response `((hookSpecificOutput
                       . ((hookEventName . "PermissionRequest")
                          (decision . ,decision))))))
@@ -3858,6 +3859,7 @@ No socket proc is attached — approve/deny will just message."
   "Keymap for `claude-gravity-permission-action-mode'.")
 (define-key claude-gravity-permission-action-mode-map (kbd "a") #'claude-gravity-permission-action-allow)
 (define-key claude-gravity-permission-action-mode-map (kbd "A") #'claude-gravity-permission-action-allow-always)
+(define-key claude-gravity-permission-action-mode-map (kbd "S") #'claude-gravity-permission-action-allow-with-permissions)
 (define-key claude-gravity-permission-action-mode-map (kbd "d") #'claude-gravity-permission-action-deny)
 (define-key claude-gravity-permission-action-mode-map (kbd "q") #'claude-gravity-permission-action-quit)
 
@@ -3894,6 +3896,7 @@ No socket proc is attached — approve/deny will just message."
         (insert (make-string 60 ?─) "\n")
         (insert (propertize "  a" 'face 'claude-gravity-tool-name) " Allow  "
                 (propertize "  A" 'face 'claude-gravity-tool-name) " Allow always  "
+                (propertize "  S" 'face 'claude-gravity-tool-name) " Session allow  "
                 (propertize "  d" 'face 'claude-gravity-tool-name) " Deny  "
                 (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n"))
       (setq buffer-read-only t)
@@ -3937,6 +3940,29 @@ No socket proc is attached — approve/deny will just message."
       (claude-gravity--write-allow-pattern-for-tool tool-name tool-input session-id cwd))
     (claude-gravity--permission-action-finish)
     (message "Permission allowed + pattern written")))
+
+(defun claude-gravity-permission-action-allow-with-permissions ()
+  "Allow and apply a session-scoped permission rule from suggestions."
+  (interactive)
+  (let* ((item claude-gravity--action-inbox-item)
+         (data (alist-get 'data item))
+         (proc (alist-get 'socket-proc item))
+         (suggestions (alist-get 'permission_suggestions data)))
+    (if (not suggestions)
+        (progn
+          (claude-gravity--send-permission-response proc "allow")
+          (message "No permission suggestions available, allowed without permissions"))
+      (let* ((labels (mapcar (lambda (s)
+                               (let ((type (alist-get 'type s))
+                                     (tool (alist-get 'tool s)))
+                                 (format "%s: %s" type (or tool "all"))))
+                             suggestions))
+             (chosen-label (completing-read "Permission rule: " labels nil t))
+             (idx (cl-position chosen-label labels :test #'equal))
+             (chosen (nth idx suggestions)))
+        (claude-gravity--send-permission-response proc "allow" nil (vector chosen))))
+    (claude-gravity--permission-action-finish)
+    (message "Permission allowed + session rule applied")))
 
 (defun claude-gravity-permission-action-deny ()
   "Deny the permission request."
