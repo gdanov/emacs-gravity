@@ -830,7 +830,24 @@ the model mutation API to update session state."
              (plist-put session :context-pct
                         (truncate .context_window\.used_percentage)))
            (when .model\.display_name
-             (plist-put session :model-name .model\.display_name)))
+             (plist-put session :model-name .model\.display_name))
+           (when .model\.id
+             (plist-put session :model-id .model\.id))
+           (when .context_window\.total_input_tokens
+             (plist-put session :sl-input-tokens
+                        (truncate .context_window\.total_input_tokens)))
+           (when .context_window\.total_output_tokens
+             (plist-put session :sl-output-tokens
+                        (truncate .context_window\.total_output_tokens)))
+           (when .cost\.total_duration_ms
+             (plist-put session :sl-duration-ms
+                        (truncate .cost\.total_duration_ms)))
+           (when .cost\.total_lines_added
+             (plist-put session :sl-lines-added
+                        (truncate .cost\.total_lines_added)))
+           (when .cost\.total_lines_removed
+             (plist-put session :sl-lines-removed
+                        (truncate .cost\.total_lines_removed))))
          (claude-gravity--schedule-refresh))))
 
     ("UserPromptSubmit"
@@ -2915,9 +2932,11 @@ overlays.  Since we render from timers, we must apply them manually."
                                                      (claude-gravity--format-token-count in-tokens)
                                                      (claude-gravity--format-token-count out-tokens))
                                              'face 'claude-gravity-detail-label)))))
-      ;; StatusLine data: cost and context window %
+      ;; StatusLine data: cost, context %, lines changed
       (let ((cost (plist-get session :cost))
-            (ctx-pct (plist-get session :context-pct)))
+            (ctx-pct (plist-get session :context-pct))
+            (lines-add (plist-get session :sl-lines-added))
+            (lines-rm (plist-get session :sl-lines-removed)))
         (when cost
           (setq parts (append parts
                               (list (propertize (format "  $%.2f" cost)
@@ -2928,7 +2947,11 @@ overlays.  Since we render from timers, we must apply them manually."
                             (t 'claude-gravity-detail-label))))
             (setq parts (append parts
                                 (list (propertize (format "  ctx:%d%%" ctx-pct)
-                                                 'face face)))))))
+                                                 'face face))))))
+        (when (and lines-add lines-rm (or (> lines-add 0) (> lines-rm 0)))
+          (setq parts (append parts
+                              (list (propertize (format "  +%d -%d" lines-add lines-rm)
+                                               'face 'claude-gravity-detail-label))))))
       (apply #'concat (delq nil parts)))))
 
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
