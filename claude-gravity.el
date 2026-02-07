@@ -4519,13 +4519,13 @@ in a read-only buffer."
       (if (and existing (buffer-live-p existing)
                 (get-buffer-process existing)
                 (process-live-p (get-buffer-process existing)))
-          (pop-to-buffer existing)
+          (switch-to-buffer existing)
         (when existing (kill-buffer existing))
         (let ((buf (make-term (substring buf-name 1 -1)
                               "tmux" nil "attach-session" "-t" tmux-name)))
           (with-current-buffer buf
             (term-char-mode))
-          (pop-to-buffer buf))))))
+          (switch-to-buffer buf))))))
 
 ;; Keybindings for session commands
 (define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-send-prompt)
