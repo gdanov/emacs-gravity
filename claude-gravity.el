@@ -810,15 +810,23 @@ the model mutation API to update session state."
                  (let ((new-name (claude-gravity--session-buffer-name temp-session)))
                    (with-current-buffer old-buf
                      (rename-buffer new-name t)
-                     (setq claude-gravity--buffer-session-id session-id)))))))))
+                     (setq claude-gravity--buffer-session-id session-id)))))
+            ;; Reset conversational state (essential for /clear re-keying)
+            (claude-gravity--reset-session temp-session)))))
      (claude-gravity--ensure-session session-id cwd))
 
     ("SessionEnd"
      (let ((session (claude-gravity--get-session session-id)))
        (when session
          (claude-gravity-model-session-end session)
-         ;; Clean up tmux session mapping (tmux process may already be dead)
-         (remhash session-id claude-gravity--tmux-sessions)))
+         ;; If tmux process is still alive, this is a /clear — preserve mapping
+         ;; for SessionStart re-keying.  Otherwise clean up.
+         (let ((tmux-name (gethash session-id claude-gravity--tmux-sessions)))
+           (if (and tmux-name (claude-gravity--tmux-alive-p tmux-name))
+               (let ((normalized-cwd (claude-gravity--normalize-cwd
+                                      (plist-get session :cwd))))
+                 (puthash normalized-cwd session-id claude-gravity--tmux-pending))
+             (remhash session-id claude-gravity--tmux-sessions)))))
      ;; Remove all inbox items for this session
      (claude-gravity--inbox-remove-for-session session-id)
      (claude-gravity--clear-notification-indicator))
@@ -3313,6 +3321,8 @@ Returns a list from most specific to most general, with nils removed."
     :inapt-if-not claude-gravity--current-session-tmux-p)
    ("<backtab>" "Cycle permission mode" claude-gravity-toggle-permission-mode
     :inapt-if-not claude-gravity--current-session-tmux-p)
+   ("C" "Reset/clear session" claude-gravity-reset-session
+    :inapt-if-not claude-gravity--current-session-tmux-p)
    ("K" "Stop session" claude-gravity-stop-session
     :inapt-if-not claude-gravity--current-session-tmux-p)
    ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
@@ -4796,11 +4806,34 @@ Sends Shift-Tab to the managed tmux session."
             (term-char-mode))
           (switch-to-buffer buf))))))
 
+(defun claude-gravity-reset-session (&optional session-id)
+  "Reset (clear) the managed tmux Claude session for SESSION-ID.
+Sends /clear to the running tmux session.  The resulting SessionEnd/SessionStart
+cycle will re-key the session automatically."
+  (interactive)
+  (let* ((sid (or session-id
+                  claude-gravity--buffer-session-id
+                  (let ((found nil))
+                    (maphash (lambda (id tmux-name)
+                               (when (and (not found)
+                                          (claude-gravity--tmux-alive-p tmux-name))
+                                 (setq found id)))
+                             claude-gravity--tmux-sessions)
+                    found)))
+         (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions))))
+    (unless tmux-name
+      (error "No tmux Claude session found for %s" (or sid "any")))
+    (unless (claude-gravity--tmux-alive-p tmux-name)
+      (error "Tmux session %s is not running" tmux-name))
+    (claude-gravity--tmux-send-keys tmux-name "/clear")
+    (message "Sent /clear to Claude [%s]" sid)))
+
 ;; Keybindings for session commands
 (define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-send-prompt)
 (define-key claude-gravity-mode-map (kbd "/") 'claude-gravity-slash-command)
 (define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-resume-session)
+(define-key claude-gravity-mode-map (kbd "C") 'claude-gravity-reset-session)
 (define-key claude-gravity-mode-map (kbd "$") 'claude-gravity-terminal-session)
 (define-key claude-gravity-mode-map (kbd "<backtab>") 'claude-gravity-toggle-permission-mode)
 
