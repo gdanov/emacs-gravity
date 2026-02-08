@@ -1224,8 +1224,8 @@ the model mutation API to update session state."
   :group 'claude-gravity)
 
 (defface claude-gravity-diff-removed
-  '((((background dark)) :foreground "#ee8888" :background "#3a1a1a" :strike-through t)
-    (((background light)) :foreground "#660000" :background "#ffdddd" :strike-through t))
+  '((((background dark)) :foreground "#ee8888" :background "#3a1a1a" :strike-through nil)
+    (((background light)) :foreground "#660000" :background "#ffdddd" :strike-through nil))
   "Face for removed text in inline Edit diffs."
   :group 'claude-gravity)
 
@@ -4727,6 +4727,107 @@ No socket proc is attached — approve/deny will just message."
 (defvar-local claude-gravity--action-inbox-item nil
   "The inbox item associated with this action buffer.")
 
+;;; Rich permission views for Edit/Write tools
+
+(defun claude-gravity--file-context-around (file-path search-string &optional context-lines)
+  "Return context lines from FILE-PATH around where SEARCH-STRING appears.
+Returns list of (LINE-NUM . LINE-TEXT) or nil if not found.
+CONTEXT-LINES defaults to 3."
+  (let ((ctx (or context-lines 3)))
+    (when (and file-path (file-exists-p file-path)
+               (not (string-match-p "[\x00-\x08]"
+                                    (with-temp-buffer
+                                      (insert-file-contents file-path nil 0 256)
+                                      (buffer-string)))))
+      (with-temp-buffer
+        (insert-file-contents file-path)
+        (goto-char (point-min))
+        (when (search-forward search-string nil t)
+          (let* ((match-start (match-beginning 0))
+                 (match-line (line-number-at-pos match-start))
+                 (match-end-line (line-number-at-pos (match-end 0)))
+                 (start-line (max 1 (- match-line ctx)))
+                 (end-line (+ match-end-line ctx))
+                 (result nil))
+            (goto-char (point-min))
+            (forward-line (1- start-line))
+            (let ((ln start-line))
+              (while (and (<= ln end-line) (not (eobp)))
+                (push (cons ln (buffer-substring-no-properties
+                                (line-beginning-position) (line-end-position)))
+                      result)
+                (setq ln (1+ ln))
+                (forward-line 1)))
+            (nreverse result)))))))
+
+(defun claude-gravity--permission-insert-edit-view (tool-input)
+  "Insert rich Edit tool view: file path, context, word-level diff."
+  (let ((file-path (alist-get 'file_path tool-input))
+        (old-str (alist-get 'old_string tool-input))
+        (new-str (alist-get 'new_string tool-input)))
+    ;; File path
+    (when file-path
+      (insert (propertize "File: " 'face 'claude-gravity-detail-label)
+              (propertize (abbreviate-file-name file-path)
+                          'face 'claude-gravity-tool-name)
+              "\n\n"))
+    ;; File context around old_string
+    (when old-str
+      (let ((context (claude-gravity--file-context-around file-path old-str)))
+        (when context
+          (insert (propertize "Context:\n" 'face 'claude-gravity-detail-label))
+          (dolist (entry context)
+            (insert (propertize (format "%4d " (car entry))
+                                'face 'claude-gravity-detail-label)
+                    (propertize (cdr entry)
+                                'face 'claude-gravity-diff-context)
+                    "\n"))
+          (insert "\n"))))
+    ;; Word-level diff
+    (when (and new-str (stringp new-str) (not (string-empty-p new-str)))
+      (claude-gravity--insert-inline-diff (or old-str "") new-str "Diff:")
+      (insert "\n"))))
+
+(defun claude-gravity--permission-insert-write-view (tool-input)
+  "Insert rich Write tool view: file path, diff or content preview."
+  (let ((file-path (alist-get 'file_path tool-input))
+        (content (alist-get 'content tool-input)))
+    ;; File path
+    (when file-path
+      (insert (propertize "File: " 'face 'claude-gravity-detail-label)
+              (propertize (abbreviate-file-name file-path)
+                          'face 'claude-gravity-tool-name)
+              "\n\n"))
+    (cond
+     ;; File exists: diff existing vs new content
+     ((and file-path (file-exists-p file-path) content)
+      (let ((existing (with-temp-buffer
+                        (insert-file-contents file-path)
+                        (buffer-string))))
+        (if (string-match-p "[\x00-\x08]" existing)
+            (insert (propertize "(binary file — diff not available)\n\n"
+                                'face 'claude-gravity-detail-label))
+          (claude-gravity--insert-inline-diff existing content "Diff:")
+          (insert "\n"))))
+     ;; New file: show content preview
+     (content
+      (insert (propertize "New file content:\n" 'face 'claude-gravity-detail-label))
+      (let* ((lines (split-string content "\n"))
+             (max-lines claude-gravity-diff-max-lines)
+             (show-lines (if (> (length lines) max-lines)
+                             (seq-take lines max-lines)
+                           lines)))
+        (dolist (line show-lines)
+          (insert "  " line "\n"))
+        (when (> (length lines) max-lines)
+          (insert (propertize (format "  ... (%d more lines)\n"
+                                      (- (length lines) max-lines))
+                              'face 'claude-gravity-detail-label)))
+        (insert "\n")))
+     ;; No content
+     (t
+      (insert (propertize "(no content)\n\n" 'face 'claude-gravity-detail-label))))))
+
 (defun claude-gravity--inbox-act-permission (item)
   "Open a permission action buffer for inbox ITEM."
   (let* ((data (alist-get 'data item))
@@ -4745,9 +4846,15 @@ No socket proc is attached — approve/deny will just message."
                 (propertize signature 'face 'claude-gravity-tool-name) "\n\n")
         ;; Show tool input details
         (when tool-input
-          (insert (propertize "Input:\n" 'face 'claude-gravity-detail-label))
-          (let ((json-encoding-pretty-print t))
-            (insert (json-encode tool-input) "\n\n")))
+          (cond
+           ((equal tool-name "Edit")
+            (claude-gravity--permission-insert-edit-view tool-input))
+           ((equal tool-name "Write")
+            (claude-gravity--permission-insert-write-view tool-input))
+           (t
+            (insert (propertize "Input:\n" 'face 'claude-gravity-detail-label))
+            (let ((json-encoding-pretty-print t))
+              (insert (json-encode tool-input) "\n\n")))))
         (insert (make-string 60 ?─) "\n")
         (insert (propertize "  a" 'face 'claude-gravity-tool-name) " Allow  "
                 (propertize "  A" 'face 'claude-gravity-tool-name) " Allow always  "
