@@ -831,7 +831,8 @@ the model mutation API to update session state."
                      (setq claude-gravity--buffer-session-id session-id)))))
              ;; Reset conversational state (essential for /clear re-keying)
              (claude-gravity--reset-session temp-session)))))
-     (claude-gravity--ensure-session session-id cwd))
+     (unless (equal (alist-get 'source data) "startup")
+       (claude-gravity--ensure-session session-id cwd)))
 
     ("SessionEnd"
      (let ((session (claude-gravity--get-session session-id)))
