@@ -4618,6 +4618,25 @@ Returns (ENV-VARS . CLI-ARGS) where ENV-VARS are strings like
        ;; cli args
        (list "--settings" settings-json)))))
 
+(defun claude-gravity--plugin-dirs (plugin-root)
+  "Return list of --plugin-dir args for all plugins in PLUGIN-ROOT.
+Reads marketplace.json and expands each plugin source path."
+  (let ((manifest (expand-file-name "marketplace.json" plugin-root)))
+    (if (file-exists-p manifest)
+        (let* ((json-object-type 'alist)
+               (json-array-type 'list)
+               (data (json-read-file manifest))
+               (plugins (alist-get 'plugins data)))
+          (cl-mapcan (lambda (p)
+                       (let ((src (alist-get 'source p)))
+                         (when src
+                           (let ((dir (expand-file-name src plugin-root)))
+                             (when (file-directory-p dir)
+                               (list "--plugin-dir" dir))))))
+                     plugins))
+      ;; Fallback: just emacs-bridge
+      (list "--plugin-dir" (expand-file-name "emacs-bridge" plugin-root)))))
+
 (defun claude-gravity-start-session (cwd &optional model permission-mode)
   "Start a new Claude session in CWD via tmux.
 Optional MODEL overrides the default.  PERMISSION-MODE sets the mode.
@@ -4636,13 +4655,12 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
                        (or load-file-name
                            (locate-library "claude-gravity")
                            (error "Cannot locate claude-gravity.el for --plugin-dir"))))
-         (plugin-dir (expand-file-name "emacs-bridge" plugin-root))
          (sl-parts (claude-gravity--statusline-parts plugin-root))
          (cmd-parts `("env"
 											"DUMMY=true"
 											;;"TERM=dumb"
                       ,@(car sl-parts)
-                      "claude" "--plugin-dir" ,plugin-dir)))
+                      "claude" ,@(claude-gravity--plugin-dirs plugin-root))))
     (when model
       (setq cmd-parts (append cmd-parts (list "--model" model))))
     (when permission-mode
@@ -4698,12 +4716,11 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
                        (or load-file-name
                            (locate-library "claude-gravity")
                            (error "Cannot locate claude-gravity.el for --plugin-dir"))))
-         (plugin-dir (expand-file-name "emacs-bridge" plugin-root))
          (sl-parts (claude-gravity--statusline-parts plugin-root))
          (cmd-parts `("env" "TERM=dumb"
                       ,@(car sl-parts)
                       "claude" "--resume" ,session-id
-                      "--plugin-dir" ,plugin-dir)))
+                      ,@(claude-gravity--plugin-dirs plugin-root))))
     (when model
       (setq cmd-parts (append cmd-parts (list "--model" model))))
     (when (cdr sl-parts)
