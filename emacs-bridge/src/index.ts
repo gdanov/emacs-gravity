@@ -2,11 +2,16 @@ import { createConnection } from "net";
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join, dirname, basename } from "path";
 
-// Debug logging
-function log(msg: string) {
+// Log levels
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+const LOG_LEVELS: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
+const CURRENT_LOG_LEVEL: LogLevel = (process.env.EMACS_BRIDGE_LOG_LEVEL as LogLevel) || 'warn';
+
+function log(msg: string, level: LogLevel = 'debug') {
+  if (LOG_LEVELS[level] < LOG_LEVELS[CURRENT_LOG_LEVEL]) return;
   try {
     const timestamp = new Date().toISOString();
-    appendFileSync("/tmp/emacs-bridge.log", `[${timestamp}] ${msg}\n`);
+    appendFileSync("/tmp/emacs-bridge.log", `[${timestamp}] [${level.toUpperCase()}] ${msg}\n`);
   } catch (e) {
     // ignore logging errors
   }
@@ -39,7 +44,7 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pi
     });
 
     client.on("error", (err) => {
-      log(`Socket error: ${err.message}`);
+      log(`Socket error: ${err.message}`, 'error');
       // Fail silently to avoid blocking Claude if Emacs is down
       resolve();
     });
@@ -65,7 +70,7 @@ async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: str
     const timer = setTimeout(() => {
       if (!responded) {
         responded = true;
-        log(`sendToEmacsAndWait timeout after ${timeoutMs}ms`);
+        log(`sendToEmacsAndWait timeout after ${timeoutMs}ms`, 'warn');
         client.destroy();
         resolve({});
       }
@@ -92,7 +97,7 @@ async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: str
             log(`Received response: ${JSON.stringify(response)}`);
             resolve(response);
           } catch (e) {
-            log(`Failed to parse response: ${e}`);
+            log(`Failed to parse response: ${e}`, 'error');
             resolve({});
           }
           client.end();
@@ -104,7 +109,7 @@ async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: str
       if (!responded) {
         responded = true;
         clearTimeout(timer);
-        log(`Socket error (wait): ${err.message}`);
+        log(`Socket error (wait): ${err.message}`, 'error');
         resolve({});
       }
     });
@@ -113,7 +118,7 @@ async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: str
       if (!responded) {
         responded = true;
         clearTimeout(timer);
-        log("Connection closed before response");
+        log("Connection closed before response", 'warn');
         resolve({});
       }
     });
@@ -202,7 +207,7 @@ export function extractPrecedingContent(transcriptPath: string, toolUseId: strin
     result.text = textParts.join("\n\n");
     return result;
   } catch (e) {
-    log(`extractPrecedingContent error: ${e}`);
+    log(`extractPrecedingContent error: ${e}`, 'error');
     return result;
   }
 }
@@ -234,9 +239,9 @@ export function extractTokenUsage(transcriptPath: string): {
         continue;
       }
     }
-    log(`extractTokenUsage: in=${result.input_tokens} out=${result.output_tokens} cache_read=${result.cache_read_input_tokens} cache_create=${result.cache_creation_input_tokens}`);
+    log(`extractTokenUsage: in=${result.input_tokens} out=${result.output_tokens} cache_read=${result.cache_read_input_tokens} cache_create=${result.cache_creation_input_tokens}`, 'info');
   } catch (e) {
-    log(`extractTokenUsage error: ${e}`);
+    log(`extractTokenUsage error: ${e}`, 'error');
   }
   return result;
 }
@@ -314,7 +319,7 @@ export function extractFollowingContent(transcriptPath: string, toolUseId: strin
     result.text = textParts.join("\n\n");
     return result;
   } catch (e) {
-    log(`extractFollowingContent error: ${e}`);
+    log(`extractFollowingContent error: ${e}`, 'error');
     return result;
   }
 }
@@ -386,7 +391,7 @@ export function extractTrailingText(transcriptPath: string): { text: string; thi
     log(`extractTrailingText result: ${result.text.length} chars text, ${result.thinking.length} chars thinking, stop=${stopReason}, parts=${textParts.length}`);
     return result;
   } catch (e) {
-    log(`extractTrailingText error: ${e}`);
+    log(`extractTrailingText error: ${e}`, 'error');
     return result;
   }
 }
@@ -432,7 +437,7 @@ function readAgentState(cwd: string): AgentState {
       return JSON.parse(readFileSync(p, "utf-8"));
     }
   } catch (e) {
-    log(`readAgentState error: ${e}`);
+    log(`readAgentState error: ${e}`, 'error');
   }
   return {};
 }
@@ -444,7 +449,7 @@ function writeAgentState(cwd: string, state: AgentState): void {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(p, JSON.stringify(state), "utf-8");
   } catch (e) {
-    log(`writeAgentState error: ${e}`);
+    log(`writeAgentState error: ${e}`, 'error');
   }
 }
 
@@ -473,7 +478,7 @@ function transcriptHasToolUseId(agentTranscript: string, toolUseId: string): boo
       } catch { continue; }
     }
   } catch (e) {
-    log(`transcriptHasToolUseId error: ${e}`);
+    log(`transcriptHasToolUseId error: ${e}`, 'error');
   }
   return false;
 }
@@ -498,7 +503,7 @@ function extractAgentToolIds(agentTranscript: string): string[] {
       } catch { continue; }
     }
   } catch (e) {
-    log(`extractAgentToolIds error: ${e}`);
+    log(`extractAgentToolIds error: ${e}`, 'error');
   }
   return ids;
 }
@@ -524,7 +529,7 @@ function attributeToolToAgent(
   }
 
   // Transcript lookup failed (race condition) — mark ambiguous
-  log(`Tool ${toolUseId} ambiguous among ${activeAgents.length} agents`);
+  log(`Tool ${toolUseId} ambiguous among ${activeAgents.length} agents`, 'warn');
   return { parentAgentId: "ambiguous", candidateAgentIds: [...activeAgents] };
 }
 
@@ -577,7 +582,7 @@ async function main() {
           state[sessionId].push(agentId);
         }
         writeAgentState(cwd, state);
-        log(`Agent ${agentId} started, active list: ${state[sessionId].join(", ")}`);
+        log(`Agent ${agentId} started, active list: ${state[sessionId].join(", ")}`, 'info');
         // Inject agent transcript path
         if (transcriptPath) {
           (inputData as any).agent_transcript_path = agentTranscriptPath(transcriptPath, sessionId, agentId);
@@ -595,14 +600,14 @@ async function main() {
           if (state[sessionId].length === 0) delete state[sessionId];
         }
         writeAgentState(cwd, state);
-        log(`Agent ${agentId} stopped, active list: ${state[sessionId]?.join(", ") || "(empty)"}`);
+        log(`Agent ${agentId} stopped, active list: ${state[sessionId]?.join(", ") || "(empty)"}`, 'info');
         // Extract all tool_use IDs from agent transcript for definitive fix-up
         if (transcriptPath) {
           const atp = agentTranscriptPath(transcriptPath, sessionId, agentId);
           const toolIds = extractAgentToolIds(atp);
           if (toolIds.length > 0) {
             (inputData as any).agent_tool_ids = toolIds;
-            log(`Agent ${agentId} had ${toolIds.length} tool calls`);
+            log(`Agent ${agentId} had ${toolIds.length} tool calls`, 'info');
           }
           (inputData as any).agent_transcript_path = atp;
           // Extract trailing text from agent transcript (agent's final summary)
@@ -626,7 +631,7 @@ async function main() {
               log(`Agent ${agentId} trailing thinking (${thinking.length} chars)`);
             }
           } catch (e) {
-            log(`Failed to extract agent trailing content: ${e}`);
+            log(`Failed to extract agent trailing content: ${e}`, 'error');
           }
         }
       }
@@ -639,7 +644,7 @@ async function main() {
         if (state[sessionId]) {
           delete state[sessionId];
           writeAgentState(cwd, state);
-          log(`Cleaned up agent state for session ${sessionId}`);
+          log(`Cleaned up agent state for session ${sessionId}`, 'info');
         }
       }
     }
@@ -685,7 +690,7 @@ async function main() {
             log(`Extracted thinking (${thinking.length} chars) for ${toolUseId}`);
           }
         } catch (e) {
-          log(`Failed to extract preceding content: ${e}`);
+          log(`Failed to extract preceding content: ${e}`, 'error');
         }
       }
     }
@@ -718,7 +723,7 @@ async function main() {
             log(`Extracted post-tool thinking (${thinking.length} chars) for ${toolUseId}`);
           }
         } catch (e) {
-          log(`Failed to extract following content: ${e}`);
+          log(`Failed to extract following content: ${e}`, 'error');
         }
       }
     }
@@ -749,14 +754,14 @@ async function main() {
             log(`Extracted trailing thinking (${thinking.length} chars)`);
           }
         } catch (e) {
-          log(`Failed to extract trailing content: ${e}`);
+          log(`Failed to extract trailing content: ${e}`, 'error');
         }
         // Extract cumulative token usage
         try {
           const tokenUsage = extractTokenUsage(transcriptPath);
           (inputData as any).token_usage = tokenUsage;
         } catch (e) {
-          log(`Failed to extract token usage: ${e}`);
+          log(`Failed to extract token usage: ${e}`, 'error');
         }
       }
     }

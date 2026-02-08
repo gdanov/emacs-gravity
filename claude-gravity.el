@@ -40,6 +40,19 @@ Diffs longer than this are truncated with an ellipsis indicator."
   :type 'integer
   :group 'claude-gravity)
 
+(defvar claude-gravity-log-level 'warn
+  "Minimum log level.  One of: debug, info, warn, error.
+Messages below this level are suppressed.")
+
+(defconst claude-gravity--log-levels '((debug . 0) (info . 1) (warn . 2) (error . 3))
+  "Numeric values for log levels.")
+
+(defun claude-gravity--log (level fmt &rest args)
+  "Log FMT with ARGS if LEVEL >= `claude-gravity-log-level'."
+  (when (>= (alist-get level claude-gravity--log-levels 0)
+            (alist-get claude-gravity-log-level claude-gravity--log-levels 0))
+    (apply #'message fmt args)))
+
 (defconst claude-gravity--indent-step 2
   "Indentation step (in spaces) per nesting level.")
 
@@ -96,8 +109,8 @@ Dynamically let-bound inside agent branches for nested tint selection.")
                (end (magit-section-end section))
                (text (read-string "Comment: ")))
           (claude-gravity--make-comment-overlay beg end text)
-          (message "Added comment: %s" text))
-      (message "No section selected"))))
+          (claude-gravity--log 'debug "Added comment: %s" text))
+      (claude-gravity--log 'debug "No section selected"))))
 
 ;;; Session Registry
 
@@ -181,7 +194,7 @@ Called when a session is restarted (e.g. via /reset or /clear)."
   (plist-put session :slug nil)
   (plist-put session :status 'active)
   (claude-gravity--load-allow-patterns session)
-  (message "Claude Gravity: session %s reset" (plist-get session :session-id))
+  (claude-gravity--log 'debug "Claude Gravity: session %s reset" (plist-get session :session-id))
   session)
 
 (defun claude-gravity--load-allow-patterns (session)
@@ -198,7 +211,7 @@ Stores the patterns list on SESSION's :allow-patterns property."
                    (allow (alist-get 'allow perms)))
               (plist-put session :allow-patterns (or allow nil)))
           (error
-           (message "Claude Gravity: failed to read allow patterns: %s" err)
+           (claude-gravity--log 'error "Claude Gravity: failed to read allow patterns: %s" err)
            (plist-put session :allow-patterns nil)))
       (plist-put session :allow-patterns nil))))
 
@@ -700,7 +713,7 @@ PROPS is a plist with optional keys:
             (setf (alist-get 'agent-tools agent)
                   (vconcat agent-tools (vconcat (nreverse to-move))))
             (aset agents idx agent)
-            (message "Claude Gravity: moved %d tools to agent %s"
+            (claude-gravity--log 'debug "Claude Gravity: moved %d tools to agent %s"
                      (length to-move) agent-id)))))))
 
 (defun claude-gravity-model-add-notification (session notif)
@@ -784,7 +797,7 @@ the model mutation API to update session state."
   (unless session-id
     (setq session-id "legacy")
     (setq cwd (or cwd "")))
-  (message "Handling event: %s for session: %s" event session-id)
+  (claude-gravity--log 'debug "Handling event: %s for session: %s" event session-id)
   ;; Update PID, last-event-time, and slug on every event
   (let ((existing (claude-gravity--get-session session-id)))
     (when existing
@@ -1057,8 +1070,7 @@ the model mutation API to update session state."
            (claude-gravity--reset-session session))
          ;; Update mode-line indicator
          (claude-gravity--update-notification-indicator ntype label))
-       ;; Always show in minibuffer
-       (message "Claude [%s]: %s" label msg))))
+       (claude-gravity--log 'debug "Claude [%s]: %s" label msg))))
 
   (claude-gravity--schedule-refresh)
   (when session-id
@@ -1990,7 +2002,7 @@ LABEL gets detail-label face, VALUE gets optional FACE."
          (session (when sid (claude-gravity--get-session sid))))
     (if (and session (plist-get session :plan))
         (claude-gravity--show-plan-buffer session)
-      (message "No plan available"))))
+      (claude-gravity--log 'debug "No plan available"))))
 
 (defun claude-gravity--current-overview-session-id ()
   "Return session-id at point in the overview buffer, or nil."
@@ -2026,8 +2038,8 @@ LABEL gets detail-label face, VALUE gets optional FACE."
          (fpath (when plan (plist-get plan :file-path))))
     (cond
      ((and fpath (file-exists-p fpath)) (find-file fpath))
-     (fpath (message "Plan file not found: %s" fpath))
-     (t (message "No plan file path available")))))
+     (fpath (claude-gravity--log 'debug "Plan file not found: %s" fpath))
+     (t (claude-gravity--log 'debug "No plan file path available")))))
 
 (defun claude-gravity-insert-plan (session)
   "Insert plan section for SESSION with inline preview."
@@ -2902,7 +2914,7 @@ the message under `message` with `role`, `content`, and `model`."
                 (cons 'model (or model ""))
                 (cons 'tool-count tool-count)))
       (error
-       (message "Claude Gravity: failed to parse transcript %s: %s" path err)
+       (claude-gravity--log 'error "Claude Gravity: failed to parse transcript %s: %s" path err)
        nil))))
 
 (defun claude-gravity-view-agent-transcript ()
@@ -2915,7 +2927,7 @@ the message under `message` with `role`, `content`, and `model`."
           (let ((tp (alist-get 'transcript_path val))
                 (agent-id (alist-get 'agent_id val)))
             (if (not tp)
-                (message "No transcript path for this agent")
+                (claude-gravity--log 'debug "No transcript path for this agent")
               (if (alist-get 'transcript_parsed val)
                   ;; Already parsed, just refresh
                   (claude-gravity-refresh)
@@ -2951,7 +2963,7 @@ the message under `message` with `role`, `content`, and `model`."
           (let ((tp (alist-get 'transcript_path val)))
             (if (and tp (file-exists-p tp))
                 (find-file tp)
-              (message "No transcript file available"))))))))
+              (claude-gravity--log 'debug "No transcript file available"))))))))
 
 
 (defun claude-gravity--insert-agent-item (agent)
@@ -3264,13 +3276,13 @@ Only idle items can be dismissed.  Bidirectional items need a response."
         (let* ((item-id (oref section value))
                (item (claude-gravity--inbox-find item-id)))
           (if (null item)
-              (message "Inbox item not found")
+              (claude-gravity--log 'debug "Inbox item not found")
             (if (eq (alist-get 'type item) 'idle)
                 (progn
                   (claude-gravity--inbox-remove item-id)
-                  (message "Dismissed"))
-              (message "Cannot dismiss — this item needs a response (use RET to act on it)"))))
-      (message "No inbox item at point"))))
+                  (claude-gravity--log 'debug "Dismissed"))
+              (claude-gravity--log 'debug "Cannot dismiss — this item needs a response (use RET to act on it)"))))
+      (claude-gravity--log 'debug "No inbox item at point"))))
 
 (defun claude-gravity--inbox-section-p (section)
   "Return non-nil if SECTION is an inbox-item."
@@ -3290,7 +3302,7 @@ Only idle items can be dismissed.  Bidirectional items need a response."
         (setq found t)))
     (unless found
       (goto-char start)
-      (message "No more inbox items"))))
+      (claude-gravity--log 'debug "No more inbox items"))))
 
 (defun claude-gravity-inbox-prev ()
   "Jump to the previous inbox item in the buffer."
@@ -3305,7 +3317,7 @@ Only idle items can be dismissed.  Bidirectional items need a response."
         (setq found t)))
     (unless found
       (goto-char start)
-      (message "No more inbox items"))))
+      (claude-gravity--log 'debug "No more inbox items"))))
 
 (defun claude-gravity-inbox-list ()
   "Jump to the first inbox item in the overview buffer."
@@ -3606,32 +3618,32 @@ Returns a list from most specific to most general, with nils removed."
   (interactive)
   (let ((item (claude-gravity--tool-item-at-point)))
     (if (not item)
-        (message "No tool at point")
+        (claude-gravity--log 'debug "No tool at point")
       (let* ((name (alist-get 'name item))
              (input (alist-get 'input item))
              (suggestions (claude-gravity--suggest-patterns name input)))
         (if (not suggestions)
-            (message "No pattern suggestions for %s" name)
+            (claude-gravity--log 'debug "No pattern suggestions for %s" name)
           (let ((chosen (completing-read "Allow pattern: " suggestions nil nil
                                          (car suggestions))))
             (kill-new chosen)
-            (message "Copied: %s" chosen)))))))
+            (claude-gravity--log 'debug "Copied: %s" chosen)))))))
 
 (defun claude-gravity-add-allow-pattern-to-settings ()
   "Add an allow pattern for the tool at point to settings.local.json."
   (interactive)
   (let ((item (claude-gravity--tool-item-at-point)))
     (if (not item)
-        (message "No tool at point")
+        (claude-gravity--log 'debug "No tool at point")
       (let* ((sid (or claude-gravity--buffer-session-id ""))
              (session (claude-gravity--get-session sid)))
         (if (not session)
-            (message "No session found")
+            (claude-gravity--log 'debug "No session found")
           (let* ((name (alist-get 'name item))
                  (input (alist-get 'input item))
                  (suggestions (claude-gravity--suggest-patterns name input)))
             (if (not suggestions)
-                (message "No pattern suggestions for %s" name)
+                (claude-gravity--log 'debug "No pattern suggestions for %s" name)
               (let* ((chosen (completing-read "Allow pattern to add: " suggestions nil nil
                                               (car suggestions)))
                      (cwd (plist-get session :cwd))
@@ -3647,7 +3659,7 @@ Returns a list from most specific to most general, with nils removed."
                                     (list (cons 'allow nil))))
                          (allow (or (alist-get 'allow perms) nil)))
                     (if (member chosen allow)
-                        (message "Pattern already exists: %s" chosen)
+                        (claude-gravity--log 'debug "Pattern already exists: %s" chosen)
                       (setf (alist-get 'allow perms) (append allow (list chosen)))
                       (setf (alist-get 'permissions data) perms)
                       (let ((dir (file-name-directory settings-path)))
@@ -3658,7 +3670,7 @@ Returns a list from most specific to most general, with nils removed."
                           (insert (json-encode data))))
                       (claude-gravity--load-allow-patterns session)
                       (claude-gravity-refresh)
-                      (message "Added: %s" chosen))))))))))))
+                      (claude-gravity--log 'debug "Added: %s" chosen))))))))))))
 
 ;;; Commands
 
@@ -3717,7 +3729,7 @@ Returns a list from most specific to most general, with nils removed."
           (let ((buf (get-buffer (claude-gravity--session-buffer-name session))))
             (when buf (kill-buffer buf)))))
       (remhash id claude-gravity--sessions))
-    (message "Removed %d ended session(s)" (length to-remove))
+    (claude-gravity--log 'debug "Removed %d ended session(s)" (length to-remove))
     (claude-gravity--render-overview)))
 
 (defun claude-gravity-reset-status ()
@@ -3730,7 +3742,7 @@ Returns a list from most specific to most general, with nils removed."
                  (plist-put session :claude-status 'idle)
                  (cl-incf count)))
              claude-gravity--sessions)
-    (message "Reset %d session(s) to idle" count)
+    (claude-gravity--log 'debug "Reset %d session(s) to idle" count)
     (claude-gravity--render-overview)))
 
 (defun claude-gravity--process-alive-p (pid)
@@ -3772,7 +3784,7 @@ Checks PID liveness when available, falls back to last-event-time staleness."
     ;; Clean up inbox items for dead sessions
     (dolist (id dead-ids)
       (claude-gravity--inbox-remove-for-session id))
-    (message "Marked %d dead session(s) as ended" count)
+    (claude-gravity--log 'debug "Marked %d dead session(s) as ended" count)
     (claude-gravity--render-overview)))
 
 (defun claude-gravity-delete-session ()
@@ -3783,13 +3795,13 @@ Checks PID liveness when available, falls back to last-event-time staleness."
       (let ((sid (and (eq (oref section type) 'session-entry)
                       (oref section value))))
         (if (not sid)
-            (message "No session at point")
+            (claude-gravity--log 'debug "No session at point")
           (let ((session (gethash sid claude-gravity--sessions)))
             (when session
               (let ((buf (get-buffer (claude-gravity--session-buffer-name session))))
                 (when buf (kill-buffer buf)))))
           (remhash sid claude-gravity--sessions)
-          (message "Deleted session %s" (claude-gravity--session-short-id sid))
+          (claude-gravity--log 'debug "Deleted session %s" (claude-gravity--session-short-id sid))
           (claude-gravity--render-overview))))))
 
 (defun claude-gravity-follow-mode ()
@@ -3802,9 +3814,9 @@ Disables when you manually scroll or navigate."
       (progn
         (add-hook 'post-command-hook #'claude-gravity--follow-detect-manual nil t)
         (claude-gravity-tail)
-        (message "Follow mode ON"))
+        (claude-gravity--log 'debug "Follow mode ON"))
     (remove-hook 'post-command-hook #'claude-gravity--follow-detect-manual t)
-    (message "Follow mode OFF"))
+    (claude-gravity--log 'debug "Follow mode OFF"))
   (force-mode-line-update))
 
 (defun claude-gravity--follow-detect-manual ()
@@ -3819,7 +3831,7 @@ Disables when you manually scroll or navigate."
     (setq claude-gravity--follow-mode nil)
     (remove-hook 'post-command-hook #'claude-gravity--follow-detect-manual t)
     (force-mode-line-update)
-    (message "Follow mode OFF (manual navigation)")))
+    (claude-gravity--log 'debug "Follow mode OFF (manual navigation)")))
 
 (defun claude-gravity-tail ()
   "Collapse all sections and focus on the tail of the latest turn.
@@ -3935,7 +3947,7 @@ If there are inbox items needing attention, shows the inbox indicator instead."
                       ('idle "Idle")
                       (_ "Notice")))
         (project (or (alist-get 'project item) "?")))
-    (message "Claude: %s from %s" type-label project)))
+    (claude-gravity--log 'debug "Claude: %s from %s" type-label project)))
 
 (defvar claude-gravity-server-sock-path
   (expand-file-name "claude-gravity.sock" (file-name-directory (or load-file-name buffer-file-name)))
@@ -3956,7 +3968,7 @@ Accumulates partial data per connection until complete lines arrive."
           (condition-case err
               (let* ((json-object-type 'alist)
                      (data (json-read-from-string line)))
-                (message "Claude Gravity received: %s" (alist-get 'event data))
+                (claude-gravity--log 'debug "Claude Gravity received: %s" (alist-get 'event data))
                 (let ((event (alist-get 'event data))
                       (session-id (alist-get 'session_id data))
                       (cwd (alist-get 'cwd data))
@@ -3980,7 +3992,7 @@ Accumulates partial data per connection until complete lines arrive."
                     (when event
                       (claude-gravity-handle-event event session-id cwd payload pid)))))
             (error
-             (message "Claude Gravity JSON error: %s" err))))))
+             (claude-gravity--log 'error "Claude Gravity JSON error: %s" err))))))
     ;; Store any remaining partial data
     (process-put proc 'claude-gravity--buffer buf)))
 
@@ -4010,7 +4022,7 @@ Accumulates partial data per connection until complete lines arrive."
   ;; Register notification indicator in mode-line
   (unless (memq 'claude-gravity--notification-indicator global-mode-string)
     (push 'claude-gravity--notification-indicator global-mode-string))
-  (message "Claude Gravity server started at %s" claude-gravity-server-sock-path))
+  (claude-gravity--log 'info "Claude Gravity server started at %s" claude-gravity-server-sock-path))
 
 (defun claude-gravity-server-stop ()
   "Stop the Claude Gravity server."
@@ -4020,7 +4032,7 @@ Accumulates partial data per connection until complete lines arrive."
     (setq claude-gravity-server-process nil))
   (when (file-exists-p claude-gravity-server-sock-path)
     (delete-file claude-gravity-server-sock-path))
-  (message "Claude Gravity server stopped"))
+  (claude-gravity--log 'info "Claude Gravity server stopped"))
 
 ;;; Plan Review Mode
 
@@ -4131,7 +4143,7 @@ TID the tool_use_id for updating prompts."
                        (equal (alist-get 'tool_use_id p) tid))
               (setf (alist-get 'answer p) answer-label)
               (aset prompts i p))))))
-    (message "Answered: %s" answer-label)))
+    (claude-gravity--log 'debug "Answered: %s" answer-label)))
 
 ;;; Tool Permission Requests
 
@@ -4197,7 +4209,7 @@ SESSION-ID and CWD identify the session project."
                         (list (cons 'allow nil))))
              (allow (or (alist-get 'allow perms) nil)))
         (if (member chosen allow)
-            (message "Pattern already exists: %s" chosen)
+            (claude-gravity--log 'debug "Pattern already exists: %s" chosen)
           (setf (alist-get 'allow perms) (append allow (list chosen)))
           (setf (alist-get 'permissions data) perms)
           (let ((dir (file-name-directory settings-path)))
@@ -4209,7 +4221,7 @@ SESSION-ID and CWD identify the session project."
           (let ((session (claude-gravity--get-session session-id)))
             (when session
               (claude-gravity--load-allow-patterns session)))
-          (message "Added allow pattern: %s" chosen))))))
+          (claude-gravity--log 'debug "Added allow pattern: %s" chosen))))))
 
 ;;; Plan Revision Diff (git-gutter-style margin indicators)
 
@@ -4355,7 +4367,7 @@ DIFF-DATA is a list of (LINE-NUM . STATUS) from `claude-gravity--plan-revision-d
   "Toggle visibility of plan revision margin indicators."
   (interactive)
   (if (null claude-gravity--plan-review-margin-overlays)
-      (message "No revision margin indicators in this buffer")
+      (claude-gravity--log 'debug "No revision margin indicators in this buffer")
     (let* ((first-ov (car claude-gravity--plan-review-margin-overlays))
            (visible (overlay-get first-ov 'before-string)))
       (dolist (ov claude-gravity--plan-review-margin-overlays)
@@ -4373,7 +4385,7 @@ DIFF-DATA is a list of (LINE-NUM . STATUS) from `claude-gravity--plan-revision-d
             (overlay-put ov 'before-string
                          (propertize "x" 'display
                                      `(left-fringe ,bitmap ,face))))))
-      (message "Plan margin indicators %s" (if visible "hidden" "shown")))))
+      (claude-gravity--log 'debug "Plan margin indicators %s" (if visible "hidden" "shown")))))
 
 (defun claude-gravity--handle-plan-review (event-data proc session-id)
   "Open a plan review buffer for EVENT-DATA.
@@ -4434,8 +4446,8 @@ SESSION-ID identifies the Claude Code session."
     ;; Display in current window
     (switch-to-buffer buf)
     (if claude-gravity--plan-review-prev-content
-        (message "Plan REVISION: gutter shows changes | C-c C-c approve | C-c C-k deny | C-c C-g toggle")
-      (message "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff"))))
+        (claude-gravity--log 'debug "Plan REVISION: gutter shows changes | C-c C-c approve | C-c C-k deny | C-c C-g toggle")
+      (claude-gravity--log 'debug "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff"))))
 
 (defun claude-gravity--send-bidirectional-response (proc response)
   "Send RESPONSE JSON to the bridge via socket PROC, then close."
@@ -4443,7 +4455,7 @@ SESSION-ID identifies the Claude Code session."
       (progn
         (process-send-string proc (concat (json-encode response) "\n"))
         (run-at-time 0.1 nil (lambda (p) (when (process-live-p p) (delete-process p))) proc))
-    (message "Claude Gravity: bridge connection lost. Response not sent.")))
+    (claude-gravity--log 'error "Claude Gravity: bridge connection lost. Response not sent.")))
 
 (defun claude-gravity--plan-review-send-response (response)
   "Send RESPONSE JSON to the bridge via the stored socket proc."
@@ -4497,7 +4509,7 @@ Returns the diff string or nil if no changes."
             (overlay . ,ov)
             (context . ,line-text))
           claude-gravity--plan-review-comments)
-    (message "Comment added on line %d" line-num)))
+    (claude-gravity--log 'debug "Comment added on line %d" line-num)))
 
 (defun claude-gravity--plan-review-collect-feedback ()
   "Collect inline comments from `claude-gravity--plan-review-comments'.
@@ -4608,14 +4620,14 @@ incorporate the feedback (the allow channel cannot carry feedback)."
                                              (message . ,deny-message))))))))
             (claude-gravity--plan-review-send-response response))
           (claude-gravity--plan-review-cleanup-and-close)
-          (message "Feedback detected — denied for revision"))
+          (claude-gravity--log 'debug "Feedback detected — denied for revision"))
       ;; No feedback — clean approve
       (let ((response `((hookSpecificOutput
                          . ((hookEventName . "PermissionRequest")
                             (decision . ((behavior . "allow"))))))))
         (claude-gravity--plan-review-send-response response))
       (claude-gravity--plan-review-cleanup-and-close)
-      (message "Plan approved"))))
+      (claude-gravity--log 'debug "Plan approved"))))
 
 (defun claude-gravity-plan-review-deny ()
   "Deny the plan and send feedback to Claude Code.
@@ -4633,7 +4645,7 @@ Collects inline comments, @claude markers, diff, and a general comment."
                                        (message . ,deny-message))))))))
       (claude-gravity--plan-review-send-response response))
     (claude-gravity--plan-review-cleanup-and-close)
-    (message "Plan denied with feedback")))
+    (claude-gravity--log 'debug "Plan denied with feedback")))
 
 (defun claude-gravity-plan-review-diff ()
   "Show a diff between the original plan and current edits."
@@ -4649,7 +4661,7 @@ Collects inline comments, @claude markers, diff, and a general comment."
             (goto-char (point-min))
             (setq buffer-read-only t))
           (display-buffer buf))
-      (message "No changes from original plan"))))
+      (claude-gravity--log 'debug "No changes from original plan"))))
 
 (defun claude-gravity--plan-review-on-kill ()
   "Handle plan review buffer being killed without explicit decision.
@@ -4748,7 +4760,7 @@ No socket proc is attached — approve/deny will just message."
          (proc (alist-get 'socket-proc item)))
     (claude-gravity--send-permission-response proc "allow")
     (claude-gravity--permission-action-finish)
-    (message "Permission allowed")))
+    (claude-gravity--log 'debug "Permission allowed")))
 
 (defun claude-gravity-permission-action-allow-always ()
   "Allow the permission and write an allow pattern."
@@ -4765,7 +4777,7 @@ No socket proc is attached — approve/deny will just message."
     (when cwd
       (claude-gravity--write-allow-pattern-for-tool tool-name tool-input session-id cwd))
     (claude-gravity--permission-action-finish)
-    (message "Permission allowed + pattern written")))
+    (claude-gravity--log 'debug "Permission allowed + pattern written")))
 
 (defun claude-gravity-permission-action-allow-with-permissions ()
   "Allow and apply a session-scoped permission rule from suggestions."
@@ -4777,12 +4789,12 @@ No socket proc is attached — approve/deny will just message."
     (if (not suggestions)
         (progn
           (claude-gravity--send-permission-response proc "allow")
-          (message "No permission suggestions available, allowed without permissions"))
+          (claude-gravity--log 'debug "No permission suggestions available, allowed without permissions"))
       (let ((chosen (elt suggestions 0)))
         (claude-gravity--send-permission-response proc "allow" nil (vector chosen))
         (let ((type (alist-get 'type chosen))
               (tool (alist-get 'tool chosen)))
-          (message "Permission allowed + session rule: %s: %s" type (or tool "all")))))
+          (claude-gravity--log 'debug "Permission allowed + session rule: %s: %s" type (or tool "all")))))
     (claude-gravity--permission-action-finish)))
 
 (defun claude-gravity-permission-action-deny ()
@@ -4795,7 +4807,7 @@ No socket proc is attached — approve/deny will just message."
         (claude-gravity--send-permission-response proc "deny")
       (claude-gravity--send-permission-response proc "deny" reason))
     (claude-gravity--permission-action-finish)
-    (message "Permission denied")))
+    (claude-gravity--log 'debug "Permission denied")))
 
 (defun claude-gravity-permission-action-add-pattern ()
   "Interactively select and add an allow pattern for the current tool.
@@ -4822,7 +4834,7 @@ Does not approve/deny — just writes the pattern to settings.local.json."
                         (list (cons 'allow nil))))
              (allow (or (alist-get 'allow perms) nil)))
         (if (member chosen allow)
-            (message "Pattern already exists: %s" chosen)
+            (claude-gravity--log 'debug "Pattern already exists: %s" chosen)
           (setf (alist-get 'allow perms) (append allow (list chosen)))
           (setf (alist-get 'permissions file-data) perms)
           (let ((dir (file-name-directory settings-path)))
@@ -4833,7 +4845,7 @@ Does not approve/deny — just writes the pattern to settings.local.json."
               (insert (json-encode file-data))))
           (when session
             (claude-gravity--load-allow-patterns session))
-          (message "Added allow pattern: %s" chosen))))))
+          (claude-gravity--log 'debug "Added allow pattern: %s" chosen))))))
 
 (defun claude-gravity-permission-action-quit ()
   "Close action buffer without responding."
@@ -4941,14 +4953,14 @@ Does not approve/deny — just writes the pattern to settings.local.json."
     (let ((buf (current-buffer)))
       (quit-window)
       (kill-buffer buf))
-    (message "Answered: %s" answer-label)))
+    (claude-gravity--log 'debug "Answered: %s" answer-label)))
 
 (defun claude-gravity--question-action-select (n)
   "Select option N (1-based) from the question choices."
   (let ((choices claude-gravity--question-choices))
     (if (and choices (>= n 1) (<= n (length choices)))
         (claude-gravity--question-action-respond (car (nth (1- n) choices)))
-      (message "No option %d" n))))
+      (claude-gravity--log 'debug "No option %d" n))))
 
 (defun claude-gravity-question-action-1 () "Select option 1." (interactive) (claude-gravity--question-action-select 1))
 (defun claude-gravity-question-action-2 () "Select option 2." (interactive) (claude-gravity--question-action-select 2))
@@ -5142,7 +5154,7 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
         (claude-gravity-model-set-claude-status session 'idle))
       (claude-gravity--tmux-ensure-heartbeat)
       (claude-gravity--schedule-refresh)
-      (message "Claude tmux session starting in %s" cwd)
+      (claude-gravity--log 'debug "Claude tmux session starting in %s" cwd)
       temp-id)))
 
 (defun claude-gravity-resume-session (session-id &optional cwd model)
@@ -5206,7 +5218,7 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
         (claude-gravity-model-set-claude-status session 'idle))
       (claude-gravity--tmux-ensure-heartbeat)
       (claude-gravity--schedule-refresh)
-      (message "Claude tmux session resuming %s" session-id)
+      (claude-gravity--log 'debug "Claude tmux session resuming %s" session-id)
       session-id)))
 
 (defun claude-gravity-send-prompt (prompt &optional session-id)
@@ -5240,7 +5252,7 @@ If SESSION-ID is nil, uses the current buffer's session."
                        (cons 'elapsed nil)))
         (claude-gravity-model-set-claude-status session 'responding)
         (claude-gravity--schedule-session-refresh sid)))
-    (message "Sent prompt to Claude [%s]" sid)))
+    (claude-gravity--log 'debug "Sent prompt to Claude [%s]" sid)))
 
 (defun claude-gravity-slash-command (command &optional session-id)
   "Send slash COMMAND to the tmux Claude session and display output.
@@ -5294,7 +5306,7 @@ Sends Shift-Tab to the managed tmux session."
     (unless tmux-name
       (user-error "No tmux session at point"))
     (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "BTab")
-    (message "Sent Shift-Tab (cycle permission mode) to %s" tmux-name)))
+    (claude-gravity--log 'debug "Sent Shift-Tab (cycle permission mode) to %s" tmux-name)))
 
 (defun claude-gravity-send-escape ()
   "Send Escape to the managed tmux session (interrupt current operation)."
@@ -5307,7 +5319,7 @@ Sends Shift-Tab to the managed tmux session."
     (unless tmux-name
       (user-error "No tmux session at point"))
     (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "Escape")
-    (message "Sent Escape to %s" tmux-name)))
+    (claude-gravity--log 'debug "Sent Escape to %s" tmux-name)))
 
 (defun claude-gravity-stop-session (&optional session-id)
   "Stop the tmux Claude session for SESSION-ID."
@@ -5330,7 +5342,7 @@ Sends Shift-Tab to the managed tmux session."
         (when session
           (claude-gravity-model-session-end session)))
       (claude-gravity--schedule-refresh)
-      (message "Stopped tmux Claude session [%s]" sid))))
+      (claude-gravity--log 'debug "Stopped tmux Claude session [%s]" sid))))
 
 ;;; Tmux heartbeat — detect dead sessions
 
@@ -5414,7 +5426,7 @@ cycle will re-key the session automatically."
     (unless (claude-gravity--tmux-alive-p tmux-name)
       (error "Tmux session %s is not running" tmux-name))
     (claude-gravity--tmux-send-keys tmux-name "/clear")
-    (message "Sent /clear to Claude [%s]" sid)))
+    (claude-gravity--log 'debug "Sent /clear to Claude [%s]" sid)))
 
 ;; Keybindings for session commands
 (define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-send-prompt)
