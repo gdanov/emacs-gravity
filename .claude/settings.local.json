@@ -47,7 +47,16 @@
       "Bash(git -C /Users/gdanov/work/playground/emacs-gravity log --oneline -5)",
       "Bash(cat ~/.claude/settings.json 2>/dev/null | python3 -m json.tool 2>/dev/null || echo \"No settings.json found\")",
       "Bash(git -C /Users/gdanov/work/playground/emacs-gravity status -u)",
-      "mcp__cloudflare-docs__search_cloudflare_documentation"
+      "mcp__cloudflare-docs__search_cloudflare_documentation",
+      "Bash(xargs:*)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:www.anthropic.com)",
+      "WebFetch(domain:cognition.ai)",
+      "WebFetch(domain:microsoft.github.io)",
+      "WebFetch(domain:claudelog.com)",
+      "WebFetch(domain:docs.langchain.com)",
+      "Bash(osascript:*)",
+      "Bash(screencapture:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

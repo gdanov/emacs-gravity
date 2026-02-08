@@ -1223,17 +1223,93 @@ Use as the argument to `magit-insert-heading'."
          (line (make-string width ?╌)))
     (insert indent (propertize line 'face 'claude-gravity-divider) "\n")))
 
+(defun claude-gravity--table-line-p (line)
+  "Return non-nil if LINE looks like a markdown table row."
+  (string-match-p "^\\s-*|" line))
+
+(defun claude-gravity--box-table-line-p (line)
+  "Return non-nil if LINE is a rendered box-drawing table line."
+  (string-match-p "^[┌├└│─┬┼┴┤┐┘ ]" line))
+
+(defun claude-gravity--render-markdown-table (table-lines)
+  "Render TABLE-LINES (list of markdown pipe-delimited strings) as a box-drawn table."
+  (let* ((data-rows
+          (mapcar (lambda (line)
+                    (let ((cells (split-string
+                                 (string-trim line "\\s-*|" "|\\s-*") "|")))
+                      (mapcar #'string-trim cells)))
+                  (seq-remove (lambda (l) (string-match-p "^\\s-*|[-:|]+|" l))
+                              table-lines)))
+         (ncols (if data-rows (length (car data-rows)) 0))
+         (widths (let ((ws (make-list ncols 0)))
+                   (dolist (row data-rows ws)
+                     (dotimes (i (min ncols (length row)))
+                       (setf (nth i ws)
+                             (max (nth i ws) (length (nth i row))))))))
+         (make-sep (lambda (left mid right)
+                     (concat left
+                             (mapconcat (lambda (w) (make-string (+ w 2) ?─))
+                                        widths mid)
+                             right)))
+         (fmt-row (lambda (row)
+                    (concat "│"
+                            (mapconcat
+                             (lambda (pair)
+                               (let ((cell (car pair)) (w (cdr pair)))
+                                 (concat " " cell
+                                         (make-string (max 0 (- w (length cell))) ?\s)
+                                         " ")))
+                             (cl-mapcar #'cons row widths) "│")
+                            "│"))))
+    (when (and data-rows (> ncols 0))
+      (concat (funcall make-sep "┌" "┬" "┐") "\n"
+              (funcall fmt-row (car data-rows)) "\n"
+              (funcall make-sep "├" "┼" "┤") "\n"
+              (mapconcat fmt-row (cdr data-rows) "\n")
+              (when (cdr data-rows) "\n")
+              (funcall make-sep "└" "┴" "┘")))))
+
+(defun claude-gravity--render-tables-in-text (text)
+  "Replace markdown tables in TEXT with box-drawn rendered tables."
+  (let ((lines (split-string text "\n"))
+        result
+        table-acc)
+    (dolist (line lines)
+      (if (claude-gravity--table-line-p line)
+          (push line table-acc)
+        ;; Flush accumulated table
+        (when table-acc
+          (let ((rendered (claude-gravity--render-markdown-table (nreverse table-acc))))
+            (if rendered
+                (push rendered result)
+              ;; Fallback: emit raw lines
+              (dolist (tl (nreverse table-acc))
+                (push tl result))))
+          (setq table-acc nil))
+        (push line result)))
+    ;; Flush trailing table
+    (when table-acc
+      (let ((rendered (claude-gravity--render-markdown-table (nreverse table-acc))))
+        (if rendered
+            (push rendered result)
+          (dolist (tl (nreverse table-acc))
+            (push tl result)))))
+    (mapconcat #'identity (nreverse result) "\n")))
+
 (defun claude-gravity--fontify-markdown (text)
-  "Return TEXT with markdown fontification and markup hiding applied.
-Uses `markdown-mode' if available; returns TEXT unchanged otherwise."
-  (if (fboundp 'markdown-mode)
-      (with-temp-buffer
-        (insert text)
-        (markdown-mode)
-        (let ((markdown-hide-markup t))
-          (font-lock-ensure))
-        (buffer-string))
-    text))
+  "Return TEXT with markdown fontification, markup hiding, and table rendering.
+Renders markdown tables as box-drawn tables.
+Uses `markdown-mode' if available for inline markup; returns TEXT with
+tables rendered regardless."
+  (let ((text (claude-gravity--render-tables-in-text text)))
+    (if (fboundp 'markdown-mode)
+        (with-temp-buffer
+          (insert text)
+          (markdown-mode)
+          (let ((markdown-hide-markup t))
+            (font-lock-ensure))
+          (buffer-string))
+      text)))
 
 (defun claude-gravity--insert-wrapped-with-margin (text indent-or-nil face)
   "Insert TEXT with word-wrap and a ┊ margin indicator.
@@ -1247,11 +1323,15 @@ INDENT-OR-NIL and FACE work like `claude-gravity--insert-wrapped'."
            (prefix (concat (make-string indent ?\s) margin))
            (start (point))
            (fill-column (max 40 (- (or (window-width) 80) 2)))
-           (fill-prefix prefix))
+           (fill-prefix prefix)
+           (plain-prefix (make-string (+ indent 2) ?\s)))
       (dolist (para (split-string text "\n"))
-        (let ((para-start (point)))
-          (insert prefix para "\n")
-          (when (> (length para) (- fill-column indent 2))
+        (let ((para-start (point))
+              (is-box (claude-gravity--box-table-line-p para)))
+          (insert (if is-box plain-prefix prefix) para "\n")
+          (when (and (not is-box)
+                     (> (length para) (- fill-column indent 2))
+                     (not (claude-gravity--table-line-p para)))
             (fill-region para-start (point)))))
       (when face
         (add-face-text-property start (point) face)))))
@@ -1275,7 +1355,8 @@ Uses current section depth for indentation."
                 (dolist (para (split-string text "\n"))
                   (let ((para-start (point)))
                     (insert prefix para "\n")
-                    (when (> (length para) (- fc indent 2))
+                    (when (and (> (length para) (- fc indent 2))
+                               (not (claude-gravity--table-line-p para)))
                       (fill-region para-start (point))))))
               (when face
                 (add-face-text-property (point-min) (point-max) face))
@@ -1331,7 +1412,8 @@ is applied to the inserted text."
       (dolist (para (split-string text "\n"))
         (let ((para-start (point)))
           (insert prefix para "\n")
-          (when (> (length para) (- fill-column indent))
+          (when (and (> (length para) (- fill-column indent))
+                     (not (claude-gravity--table-line-p para)))
             (fill-region para-start (point)))))
       (when face
         (add-face-text-property start (point) face)))))

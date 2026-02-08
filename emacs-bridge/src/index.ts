@@ -346,7 +346,9 @@ export function extractTrailingText(transcriptPath: string): { text: string; thi
 
     const textParts: string[] = [];
     let stopReason = "exhausted";
-    // Walk backwards from end, collecting trailing assistant text/thinking
+    // Walk backwards from end, collecting trailing assistant text/thinking.
+    // Each assistant message may contain multiple content blocks (e.g.
+    // [thinking, text]) so we iterate over ALL blocks, not just c[0].
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(lines[i]);
@@ -355,22 +357,27 @@ export function extractTrailingText(transcriptPath: string): { text: string; thi
         if (obj.type === "user") { stopReason = `user@${i}`; break; }
         const c = obj.message?.content;
         if (!Array.isArray(c) || c.length === 0) continue;
-        const blockType = c[0].type;
-        if (blockType === "text") {
-          const text = c[0].text || "";
-          if (text && text !== "(no content)") {
-            textParts.unshift(text); // prepend to maintain order
+        let hasThinking = false;
+        let hasToolUse = false;
+        // Process all blocks in this message first, then decide boundary
+        for (const block of c) {
+          if (block.type === "text") {
+            const text = block.text || "";
+            if (text && text !== "(no content)") {
+              textParts.unshift(text);
+            }
+          } else if (block.type === "thinking") {
+            result.thinking = block.thinking || "";
+            stopReason = `thinking@${i}`;
+            hasThinking = true;
+          } else {
+            // tool_use or other — we've gone past the trailing text
+            stopReason = `${block.type}@${i}`;
+            hasToolUse = true;
           }
-          continue;
         }
-        if (blockType === "thinking") {
-          result.thinking = c[0].thinking || "";
-          stopReason = `thinking@${i}`;
-          break; // thinking is always first
-        }
-        // tool_use or other — we've gone past the trailing text
-        stopReason = `${blockType}@${i}`;
-        break;
+        // Thinking is always the first block in a turn — stop walking back
+        if (hasThinking || hasToolUse) break;
       } catch {
         continue;
       }
