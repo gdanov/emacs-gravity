@@ -1524,6 +1524,269 @@ is applied to the inserted text."
     (let ((name (file-name-nondirectory path)))
       (if (string-empty-p name) path name))))
 
+;;; ---- Inline diff helpers for Edit tool (word-level LCS) ----
+
+(defun claude-gravity--word-tokenize (text)
+  "Split TEXT into a list of word, whitespace, and punctuation tokens.
+Newlines are separate tokens.  Runs of spaces/tabs are single tokens.
+Word characters [a-zA-Z0-9_] form word tokens."
+  (let ((pos 0)
+        (len (length text))
+        tokens)
+    (while (< pos len)
+      (let ((ch (aref text pos)))
+        (cond
+         ;; Newline
+         ((= ch ?\n)
+          (push "\n" tokens)
+          (setq pos (1+ pos)))
+         ;; Whitespace (non-newline)
+         ((memq ch '(?\s ?\t))
+          (let ((start pos))
+            (while (and (< pos len)
+                        (memq (aref text pos) '(?\s ?\t)))
+              (setq pos (1+ pos)))
+            (push (substring text start pos) tokens)))
+         ;; Word characters
+         ((or (and (>= ch ?a) (<= ch ?z))
+              (and (>= ch ?A) (<= ch ?Z))
+              (and (>= ch ?0) (<= ch ?9))
+              (= ch ?_))
+          (let ((start pos))
+            (while (and (< pos len)
+                        (let ((c (aref text pos)))
+                          (or (and (>= c ?a) (<= c ?z))
+                              (and (>= c ?A) (<= c ?Z))
+                              (and (>= c ?0) (<= c ?9))
+                              (= c ?_))))
+              (setq pos (1+ pos)))
+            (push (substring text start pos) tokens)))
+         ;; Everything else (punctuation) — single char
+         (t
+          (push (substring text pos (1+ pos)) tokens)
+          (setq pos (1+ pos))))))
+    (nreverse tokens)))
+
+(defun claude-gravity--lcs-diff (old-tokens new-tokens)
+  "Compute word-level diff between OLD-TOKENS and NEW-TOKENS.
+Returns a list of (TAG . TOKEN) where TAG is `equal', `added', or `removed'.
+Falls back to bulk add/remove if token product exceeds 250000."
+  (let ((n (length old-tokens))
+        (m (length new-tokens)))
+    (if (> (* n m) 250000)
+        ;; Too large — mark all old as removed, all new as added
+        (append (mapcar (lambda (tok) (cons 'removed tok)) old-tokens)
+                (mapcar (lambda (tok) (cons 'added tok)) new-tokens))
+      ;; Standard LCS with DP table
+      (let ((old-vec (vconcat old-tokens))
+            (new-vec (vconcat new-tokens))
+            (dp (make-vector (1+ n) nil)))
+        ;; Initialize DP table
+        (dotimes (i (1+ n))
+          (aset dp i (make-vector (1+ m) 0)))
+        ;; Fill DP table
+        (dotimes (i n)
+          (dotimes (j m)
+            (if (equal (aref old-vec i) (aref new-vec j))
+                (aset (aref dp (1+ i)) (1+ j)
+                      (1+ (aref (aref dp i) j)))
+              (aset (aref dp (1+ i)) (1+ j)
+                    (max (aref (aref dp i) (1+ j))
+                         (aref (aref dp (1+ i)) j))))))
+        ;; Backtrace
+        (let ((i n) (j m) result)
+          (while (or (> i 0) (> j 0))
+            (cond
+             ((and (> i 0) (> j 0)
+                   (equal (aref old-vec (1- i)) (aref new-vec (1- j)))
+                   (= (aref (aref dp i) j)
+                      (1+ (aref (aref dp (1- i)) (1- j)))))
+              (push (cons 'equal (aref old-vec (1- i))) result)
+              (setq i (1- i) j (1- j)))
+             ((and (> j 0)
+                   (or (= i 0)
+                       (>= (aref (aref dp i) (1- j))
+                            (aref (aref dp (1- i)) j))))
+              (push (cons 'added (aref new-vec (1- j))) result)
+              (setq j (1- j)))
+             (t
+              (push (cons 'removed (aref old-vec (1- i))) result)
+              (setq i (1- i)))))
+          result)))))
+
+(defun claude-gravity--propertize-diff (diff-ops)
+  "Convert DIFF-OPS list of (TAG . TOKEN) into a propertized string.
+Added tokens get `claude-gravity-diff-added' face.
+Removed tokens get `claude-gravity-diff-removed' face."
+  (let (parts)
+    (dolist (op diff-ops)
+      (let ((tag (car op))
+            (tok (cdr op)))
+        (push (pcase tag
+                ('added (propertize tok 'face 'claude-gravity-diff-added))
+                ('removed (propertize tok 'face 'claude-gravity-diff-removed))
+                (_ tok))
+              parts)))
+    (apply #'concat (nreverse parts))))
+
+(defun claude-gravity--insert-edit-diff (input result status)
+  "Insert inline word-level diff for an Edit tool.
+When STATUS is \"running\", uses `old_string'/`new_string' from INPUT.
+When STATUS is \"done\", uses `structuredPatch' from RESULT if available,
+falling back to INPUT fields."
+  (let (old-str new-str patch label)
+    ;; Extract data based on phase
+    (cond
+     ;; Done — try structuredPatch first
+     ((equal status "done")
+      (setq patch (and (listp result) (alist-get 'structuredPatch result)))
+      (unless patch
+        ;; Fallback to camelCase result fields, then input fields
+        (setq old-str (or (and (listp result) (alist-get 'oldString result))
+                          (alist-get 'old_string input))
+              new-str (or (and (listp result) (alist-get 'newString result))
+                          (alist-get 'new_string input))))
+      (setq label "Diff:"))
+     ;; Running — use input fields
+     (t
+      (setq old-str (alist-get 'old_string input)
+            new-str (alist-get 'new_string input))
+      (setq label "Diff (pending):")))
+    ;; Render
+    (cond
+     ;; structuredPatch available — unified style with word-level refinement
+     (patch
+      (claude-gravity--insert-structured-patch patch label))
+     ;; old/new strings available — inline diff
+     ((and new-str (stringp new-str) (not (string-empty-p new-str)))
+      (claude-gravity--insert-inline-diff old-str new-str label))
+     ;; Nothing to show
+     (t nil))))
+
+(defun claude-gravity--insert-inline-diff (old-str new-str label)
+  "Insert inline word-level diff between OLD-STR and NEW-STR.
+LABEL is the section header like \"Diff:\" or \"Diff (pending):\"."
+  (let* ((prefix (claude-gravity--indent))
+         (old-str (or old-str ""))
+         (old-tokens (claude-gravity--word-tokenize old-str))
+         (new-tokens (claude-gravity--word-tokenize new-str))
+         (diff-ops (claude-gravity--lcs-diff old-tokens new-tokens))
+         (diff-text (claude-gravity--propertize-diff diff-ops))
+         (lines (split-string diff-text "\n"))
+         (nlines (length lines))
+         (max-lines claude-gravity-diff-max-lines)
+         (show-lines (if (> nlines max-lines)
+                         (seq-take lines max-lines)
+                       lines)))
+    (claude-gravity--insert-label (concat label "\n"))
+    (dolist (line show-lines)
+      (insert prefix "  " line "\n"))
+    (when (> nlines max-lines)
+      (insert (propertize (format "%s  ... (%d more lines)\n"
+                                  prefix (- nlines max-lines))
+                          'face 'claude-gravity-detail-label)))))
+
+(defun claude-gravity--insert-structured-patch (patch label)
+  "Insert PATCH (vector of hunk objects) in unified style with word-level refinement.
+LABEL is the section header."
+  (let ((prefix (claude-gravity--indent))
+        (total-lines 0))
+    (claude-gravity--insert-label (concat label "\n"))
+    (let ((hunks (if (vectorp patch) (append patch nil) patch)))
+      (dolist (hunk hunks)
+        (when (< total-lines claude-gravity-diff-max-lines)
+          (let ((old-start (alist-get 'oldStart hunk))
+                (old-lines (alist-get 'oldLines hunk))
+                (new-start (alist-get 'newStart hunk))
+                (new-lines (alist-get 'newLines hunk))
+                (lines-vec (alist-get 'lines hunk)))
+            ;; Hunk header
+            (insert prefix "  "
+                    (propertize (format "@@ -%d,%d +%d,%d @@"
+                                        (or old-start 0) (or old-lines 0)
+                                        (or new-start 0) (or new-lines 0))
+                                'face 'claude-gravity-diff-header)
+                    "\n")
+            (setq total-lines (1+ total-lines))
+            ;; Process lines — collect adjacent -/+ groups for word-level refinement
+            (let* ((raw-lines (if (vectorp lines-vec)
+                                  (append lines-vec nil)
+                                lines-vec))
+                   (i 0)
+                   (n (length raw-lines)))
+              (while (and (< i n) (< total-lines claude-gravity-diff-max-lines))
+                (let ((line (nth i raw-lines)))
+                  (cond
+                   ;; Context line
+                   ((string-prefix-p " " line)
+                    (insert prefix "  "
+                            (propertize line 'face 'claude-gravity-diff-context)
+                            "\n")
+                    (setq total-lines (1+ total-lines))
+                    (setq i (1+ i)))
+                   ;; Removed line — collect adjacent group
+                   ((string-prefix-p "-" line)
+                    (let (removed-lines added-lines)
+                      ;; Collect all adjacent - lines
+                      (while (and (< i n) (string-prefix-p "-" (nth i raw-lines)))
+                        (push (nth i raw-lines) removed-lines)
+                        (setq i (1+ i)))
+                      (setq removed-lines (nreverse removed-lines))
+                      ;; Collect any immediately following + lines
+                      (while (and (< i n) (string-prefix-p "+" (nth i raw-lines)))
+                        (push (nth i raw-lines) added-lines)
+                        (setq i (1+ i)))
+                      (setq added-lines (nreverse added-lines))
+                      ;; If paired, do word-level refinement
+                      (if (and removed-lines added-lines)
+                          (claude-gravity--insert-refined-hunk-lines
+                           removed-lines added-lines prefix)
+                        ;; Unpaired — render directly
+                        (dolist (rl removed-lines)
+                          (when (< total-lines claude-gravity-diff-max-lines)
+                            (insert prefix "  "
+                                    (propertize rl 'face 'claude-gravity-diff-removed)
+                                    "\n")
+                            (setq total-lines (1+ total-lines))))
+                        (dolist (al added-lines)
+                          (when (< total-lines claude-gravity-diff-max-lines)
+                            (insert prefix "  "
+                                    (propertize al 'face 'claude-gravity-diff-added)
+                                    "\n")
+                            (setq total-lines (1+ total-lines)))))
+                      (setq total-lines (+ total-lines
+                                           (length removed-lines)
+                                           (length added-lines)))))
+                   ;; Added line (standalone, no preceding -)
+                   ((string-prefix-p "+" line)
+                    (insert prefix "  "
+                            (propertize line 'face 'claude-gravity-diff-added)
+                            "\n")
+                    (setq total-lines (1+ total-lines))
+                    (setq i (1+ i)))
+                   ;; Unknown prefix — just insert
+                   (t
+                    (insert prefix "  " line "\n")
+                    (setq total-lines (1+ total-lines))
+                    (setq i (1+ i))))))))))
+    (when (>= total-lines claude-gravity-diff-max-lines)
+      (insert (propertize (format "%s  ... (truncated)\n" prefix)
+                          'face 'claude-gravity-detail-label))))))
+
+(defun claude-gravity--insert-refined-hunk-lines (removed-lines added-lines prefix)
+  "Insert REMOVED-LINES and ADDED-LINES with word-level refinement.
+Pairs lines 1:1 and runs word-diff on each pair.  PREFIX is indent string."
+  ;; Join all removed into one text, all added into one text
+  (let* ((old-text (mapconcat (lambda (l) (substring l 1)) removed-lines "\n"))
+         (new-text (mapconcat (lambda (l) (substring l 1)) added-lines "\n"))
+         (old-tokens (claude-gravity--word-tokenize old-text))
+         (new-tokens (claude-gravity--word-tokenize new-text))
+         (diff-ops (claude-gravity--lcs-diff old-tokens new-tokens))
+         (diff-text (claude-gravity--propertize-diff diff-ops))
+         (lines (split-string diff-text "\n")))
+    (dolist (line lines)
+      (insert prefix "  " line "\n"))))
+
 (defun claude-gravity--tool-summary (name input)
   "Produce a short one-line summary for tool NAME with INPUT alist."
   (pcase name
@@ -1598,8 +1861,8 @@ LABEL gets detail-label face, VALUE gets optional FACE."
           (if face (propertize value face) value)
           "\n"))
 
-(defun claude-gravity--insert-tool-detail (name input result)
-  "Insert expanded detail for tool NAME with INPUT and RESULT."
+(defun claude-gravity--insert-tool-detail (name input result &optional status)
+  "Insert expanded detail for tool NAME with INPUT, RESULT, and STATUS."
   (pcase name
     ("Bash"
      (let ((cmd (alist-get 'command input)))
@@ -1612,7 +1875,9 @@ LABEL gets detail-label face, VALUE gets optional FACE."
     ((or "Edit" "Write")
      (let ((path (alist-get 'file_path input)))
        (when path
-         (claude-gravity--insert-label-value "File: " path))))
+         (claude-gravity--insert-label-value "File: " path)))
+     (when (equal name "Edit")
+       (claude-gravity--insert-edit-diff input result status)))
     ((or "Grep" "Glob")
      (let ((pattern (alist-get 'pattern input))
            (path (alist-get 'path input)))
@@ -2494,7 +2759,7 @@ When AGENT-LOOKUP is provided and ITEM is a Task tool, annotate with agent info.
           (let ((sig (claude-gravity--tool-signature name input)))
             (claude-gravity--insert-wrapped sig nil 'claude-gravity-tool-signature)))
         (insert "\n")
-        (claude-gravity--insert-tool-detail name input result)
+        (claude-gravity--insert-tool-detail name input result status)
         ;; Post-tool text and thinking (text generated after this tool completes)
         (let ((post-think (alist-get 'post_thinking item))
               (post-text (alist-get 'post_text item)))
