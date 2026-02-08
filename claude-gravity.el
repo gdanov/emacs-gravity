@@ -546,32 +546,35 @@ Optionally store STOP-TEXT and STOP-THINKING."
 (defun claude-gravity-model-add-tool (session tool agent-id candidate-ids)
   "Add TOOL to SESSION, routing based on AGENT-ID.
 AGENT-ID can be a string (definitive agent), \"ambiguous\", or nil (root).
-CANDIDATE-IDS is a list of possible agent IDs when ambiguous."
-  (cond
-   ;; Definitively attributed to an agent
-   ((and agent-id (not (equal agent-id "ambiguous")))
-    (let ((agent-tools (claude-gravity--agent-tools-vector session agent-id)))
-      (if agent-tools
-          (claude-gravity--set-agent-tools-vector
-           session agent-id (vconcat agent-tools (vector tool)))
-        ;; Agent not found — fall back to root
+CANDIDATE-IDS is a list of possible agent IDs when ambiguous.
+Deduplicates by tool_use_id — skips if a tool with the same ID already exists."
+  (let ((tid (alist-get 'tool_use_id tool)))
+    (when (or (null tid) (null (claude-gravity-model-find-tool session tid)))
+      (cond
+       ;; Definitively attributed to an agent
+       ((and agent-id (not (equal agent-id "ambiguous")))
+        (let ((agent-tools (claude-gravity--agent-tools-vector session agent-id)))
+          (if agent-tools
+              (claude-gravity--set-agent-tools-vector
+               session agent-id (vconcat agent-tools (vector tool)))
+            ;; Agent not found — fall back to root
+            (let ((root-tools (alist-get 'tools (plist-get session :state))))
+              (setf (alist-get 'tools (plist-get session :state))
+                    (vconcat root-tools (vector tool)))))))
+       ;; Ambiguous — store in root with ambiguous flag
+       ((equal agent-id "ambiguous")
+        (setf (alist-get 'ambiguous tool) t)
+        (when candidate-ids
+          (setf (alist-get 'candidate-agents tool)
+                (append candidate-ids nil)))
         (let ((root-tools (alist-get 'tools (plist-get session :state))))
           (setf (alist-get 'tools (plist-get session :state))
-                (vconcat root-tools (vector tool)))))))
-   ;; Ambiguous — store in root with ambiguous flag
-   ((equal agent-id "ambiguous")
-    (setf (alist-get 'ambiguous tool) t)
-    (when candidate-ids
-      (setf (alist-get 'candidate-agents tool)
-            (append candidate-ids nil)))
-    (let ((root-tools (alist-get 'tools (plist-get session :state))))
-      (setf (alist-get 'tools (plist-get session :state))
-            (vconcat root-tools (vector tool)))))
-   ;; No agent context — root tool
-   (t
-    (let ((root-tools (alist-get 'tools (plist-get session :state))))
-      (setf (alist-get 'tools (plist-get session :state))
-            (vconcat root-tools (vector tool)))))))
+                (vconcat root-tools (vector tool)))))
+       ;; No agent context — root tool
+       (t
+        (let ((root-tools (alist-get 'tools (plist-get session :state))))
+          (setf (alist-get 'tools (plist-get session :state))
+                (vconcat root-tools (vector tool)))))))))
 
 (defun claude-gravity-model-complete-tool (session tool-use-id agent-id result)
   "Mark tool TOOL-USE-ID as done in SESSION with RESULT.
@@ -3500,10 +3503,12 @@ Accumulates partial data per connection until complete lines arrive."
                       (payload (alist-get 'data data))
                       (needs-response (alist-get 'needs_response data)))
                   (if needs-response
-                      ;; Bidirectional: queue in inbox instead of stealing focus
+                      ;; Bidirectional: queue in inbox.
+                      ;; Do NOT call handle-event "PreToolUse" here — the generic
+                      ;; PreToolUse hook already fires for every tool and will
+                      ;; register it in session state separately.
                       (let ((tool-name (alist-get 'tool_name payload)))
-                        ;; Fire PreToolUse to update session state
-                        (claude-gravity-handle-event "PreToolUse" session-id cwd payload pid)
+                        (claude-gravity--ensure-session session-id cwd)
                         (cond
                          ((equal tool-name "AskUserQuestion")
                           (claude-gravity--inbox-add 'question session-id payload proc))
