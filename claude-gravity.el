@@ -3005,6 +3005,25 @@ overlays.  Since we render from timers, we must apply them manually."
                     (walk child))))
       (walk magit-root-section))))
 
+(defun claude-gravity--insert-session-inbox (session)
+  "Insert actionable inbox items for SESSION into the session buffer.
+Only shows permission, question, and plan-review items (not idle)."
+  (let* ((sid (plist-get session :session-id))
+         (items (cl-remove-if-not
+                 (lambda (item)
+                   (and (equal (alist-get 'session-id item) sid)
+                        (memq (alist-get 'type item)
+                              '(permission question plan-review))))
+                 claude-gravity--inbox)))
+    (when items
+      (magit-insert-section (session-inbox nil t)
+        (magit-insert-heading
+          (propertize (format "Inbox (%d)" (length items))
+                      'face 'claude-gravity-question))
+        (dolist (item items)
+          (claude-gravity--insert-inbox-item item))
+        (insert "\n")))))
+
 (defun claude-gravity--render-session-buffer (session)
   "Render the magit-section UI for SESSION into its buffer."
   (let* ((state (plist-get session :state))
@@ -3018,6 +3037,7 @@ overlays.  Since we render from timers, we must apply them manually."
           (erase-buffer)
           (magit-insert-section (root)
             (claude-gravity-insert-header session)
+            (claude-gravity--insert-session-inbox session)
             (claude-gravity-insert-plan session)
             (claude-gravity-insert-streaming-text session)
             (claude-gravity-insert-turns session)
@@ -3147,6 +3167,10 @@ overlays.  Since we render from timers, we must apply them manually."
           (setq parts (append parts
                               (list (propertize (format "  +%d -%d" lines-add lines-rm)
                                                'face 'claude-gravity-detail-label))))))
+      ;; Inbox badges for actionable items
+      (let ((inbox-badge (claude-gravity--inbox-badges sid)))
+        (unless (string-empty-p inbox-badge)
+          (setq parts (append parts (list inbox-badge)))))
       (apply #'concat (delq nil parts)))))
 
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
