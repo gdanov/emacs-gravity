@@ -3289,9 +3289,24 @@ Only idle items can be dismissed.  Bidirectional items need a response."
   "Return non-nil if SECTION is an inbox-item."
   (and section (eq (oref section type) 'inbox-item)))
 
+(defun claude-gravity--ensure-inbox-visible ()
+  "Expand any collapsed inbox sections so navigation can reach items."
+  (save-excursion
+    (goto-char (point-min))
+    (while (not (eobp))
+      (let ((section (magit-current-section)))
+        (when (and section
+                   (memq (oref section type) '(session-inbox inbox-summary))
+                   (oref section hidden))
+          (magit-section-show section)))
+      (condition-case nil
+          (magit-section-forward)
+        (error (goto-char (point-max)))))))
+
 (defun claude-gravity-inbox-next ()
   "Jump to the next inbox item in the buffer."
   (interactive)
+  (claude-gravity--ensure-inbox-visible)
   (let ((start (point))
         (found nil))
     ;; Move forward through sections until we find an inbox-item
@@ -3308,6 +3323,7 @@ Only idle items can be dismissed.  Bidirectional items need a response."
 (defun claude-gravity-inbox-prev ()
   "Jump to the previous inbox item in the buffer."
   (interactive)
+  (claude-gravity--ensure-inbox-visible)
   (let ((start (point))
         (found nil))
     (while (and (not found)
@@ -3323,6 +3339,7 @@ Only idle items can be dismissed.  Bidirectional items need a response."
 (defun claude-gravity-inbox-list ()
   "Jump to the first inbox item in the overview buffer."
   (interactive)
+  (claude-gravity--ensure-inbox-visible)
   (goto-char (point-min))
   (if (claude-gravity--inbox-section-p (magit-current-section))
       t  ; already on one
