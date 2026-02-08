@@ -56,7 +56,8 @@
       "WebFetch(domain:claudelog.com)",
       "WebFetch(domain:docs.langchain.com)",
       "Bash(osascript:*)",
-      "Bash(screencapture:*)"
+      "Bash(screencapture:*)",
+      "Bash(gzcat:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

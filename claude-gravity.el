@@ -1228,6 +1228,42 @@ the model mutation API to update session state."
   "Face for @@ hunk headers in Edit diffs."
   :group 'claude-gravity)
 
+(defface claude-gravity-plan-margin-added
+  '((((background dark)) :foreground "#88ee88")
+    (((background light)) :foreground "#22aa22"))
+  "Fringe face for added lines in plan revision diff."
+  :group 'claude-gravity)
+
+(defface claude-gravity-plan-margin-modified
+  '((((background dark)) :foreground "#eeaa44")
+    (((background light)) :foreground "#cc8800"))
+  "Fringe face for modified lines in plan revision diff."
+  :group 'claude-gravity)
+
+(defface claude-gravity-plan-margin-deleted
+  '((((background dark)) :foreground "#ee8888")
+    (((background light)) :foreground "#cc4444"))
+  "Fringe face for deleted-region markers in plan revision diff."
+  :group 'claude-gravity)
+
+(when (display-graphic-p)
+  (define-fringe-bitmap 'claude-gravity-plan-added
+    [#b00011100] nil nil '(center repeated))
+  (define-fringe-bitmap 'claude-gravity-plan-modified
+    [#b00011100] nil nil '(center repeated))
+  (define-fringe-bitmap 'claude-gravity-plan-deleted
+    [#b00010000
+     #b00011000
+     #b00011100
+     #b00011000
+     #b00010000] nil nil '(center t)))
+
+(defface claude-gravity-phase-boundary
+  '((((background dark)) :foreground "#66dd66" :background "#2a2a00")
+    (((background light)) :foreground "#228822" :background "#ffffdd"))
+  "Face for plan-approved phase boundary prompts."
+  :group 'claude-gravity)
+
 (defface claude-gravity-header-title
   '((t :weight bold :foreground "white"))
   "Face for the main buffer header title."
@@ -2413,7 +2449,7 @@ Each turn groups its prompt, tools, agents, and tasks together."
                             (alist-get 'elapsed prompt-entry)))
                  (elapsed-str (claude-gravity--format-elapsed elapsed))
                  (indicator (cond (is-phase-boundary
-                                   (propertize "→" 'face 'claude-gravity-detail-label))
+                                   (propertize "→" 'face 'claude-gravity-phase-boundary))
                                   (is-question
                                    (propertize "?" 'face 'claude-gravity-question))
                                   (t
@@ -2423,7 +2459,7 @@ Each turn groups its prompt, tools, agents, and tasks together."
                  (answer-suffix (if answer
                                     (format "  → %s" (claude-gravity--truncate answer 40))
                                   ""))
-                 (prompt-face (cond (is-phase-boundary 'claude-gravity-detail-label)
+                 (prompt-face (cond (is-phase-boundary 'claude-gravity-phase-boundary)
                                     (is-question 'claude-gravity-question)
                                     (t 'claude-gravity-prompt)))
                  (_heading-parts (list indicator
@@ -4008,6 +4044,12 @@ Each entry is an alist with keys: line, text, overlay, context.")
 (defvar-local claude-gravity--plan-review-inbox-id nil
   "Inbox item ID associated with this plan review buffer, if any.")
 
+(defvar-local claude-gravity--plan-review-margin-overlays nil
+  "List of fringe overlays for plan revision margin indicators.")
+
+(defvar-local claude-gravity--plan-review-prev-content nil
+  "Previous plan content string, set when revision indicators are shown.")
+
 
 (defvar claude-gravity-plan-review-mode-map (make-sparse-keymap)
   "Keymap for `claude-gravity-plan-review-mode'.")
@@ -4016,6 +4058,7 @@ Each entry is an alist with keys: line, text, overlay, context.")
 (define-key claude-gravity-plan-review-mode-map (kbd "C-c C-d") #'claude-gravity-plan-review-diff)
 (define-key claude-gravity-plan-review-mode-map (kbd "C-c ;") #'claude-gravity-plan-review-comment)
 (define-key claude-gravity-plan-review-mode-map (kbd "C-c ?") #'claude-gravity-plan-review-menu)
+(define-key claude-gravity-plan-review-mode-map (kbd "C-c C-g") #'claude-gravity-plan-review-toggle-margins)
 
 (transient-define-prefix claude-gravity-plan-review-menu ()
   "Plan review commands."
@@ -4024,7 +4067,8 @@ Each entry is an alist with keys: line, text, overlay, context.")
    ("C-c C-k" "Deny with feedback" claude-gravity-plan-review-deny)]
   ["Annotate"
    ("C-c ;" "Inline comment" claude-gravity-plan-review-comment)
-   ("C-c C-d" "Show diff" claude-gravity-plan-review-diff)])
+   ("C-c C-d" "Show diff" claude-gravity-plan-review-diff)
+   ("C-c C-g" "Toggle revision gutter" claude-gravity-plan-review-toggle-margins)])
 
 (define-minor-mode claude-gravity-plan-review-mode
   "Minor mode for reviewing Claude Code plans.
@@ -4167,6 +4211,170 @@ SESSION-ID and CWD identify the session project."
               (claude-gravity--load-allow-patterns session)))
           (message "Added allow pattern: %s" chosen))))))
 
+;;; Plan Revision Diff (git-gutter-style margin indicators)
+
+(defun claude-gravity--plan-revision-diff (old-content new-content)
+  "Compute line-level diff between OLD-CONTENT and NEW-CONTENT.
+Returns list of (LINE-NUM . STATUS) where STATUS is `added', `modified',
+or `deleted'.  Returns nil if OLD-CONTENT is nil or contents are identical."
+  (when (and old-content (stringp old-content) (not (string= old-content new-content)))
+    (let ((orig-file (make-temp-file "plan-rev-old"))
+          (new-file (make-temp-file "plan-rev-new")))
+      (unwind-protect
+          (progn
+            (with-temp-file orig-file (insert old-content))
+            (with-temp-file new-file (insert new-content))
+            (let ((diff-output
+                   (with-temp-buffer
+                     (call-process "diff" nil t nil "-u" orig-file new-file)
+                     (buffer-string))))
+              (claude-gravity--parse-unified-diff-for-margins diff-output)))
+        (delete-file orig-file)
+        (delete-file new-file)))))
+
+(defun claude-gravity--parse-unified-diff-for-margins (diff-output)
+  "Parse DIFF-OUTPUT (unified diff) into margin indicator data.
+Returns list of (LINE-NUM . STATUS) for the new file, where STATUS is
+`added', `modified', or `deleted'.
+
+Approach: collect lines into groups.  An adjacent block of `-' lines
+followed by `+' lines is a modification (the `+' lines are `modified').
+A `+' block with no preceding `-' block is pure addition.  A `-' block
+with no following `+' block is a deletion (marked at the next new-file
+line)."
+  (let ((diff-lines nil)
+        (new-line 0))
+    ;; Pass 1: parse into a flat list of (TYPE . NEW-LINE-NUM-OR-NIL)
+    (with-temp-buffer
+      (insert diff-output)
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((line (buffer-substring-no-properties
+                     (line-beginning-position) (line-end-position))))
+          (cond
+           ((string-match "^@@ -[0-9]+\\(?:,[0-9]+\\)? \\+\\([0-9]+\\)" line)
+            (setq new-line (1- (string-to-number (match-string 1 line))))
+            (push (cons 'hunk new-line) diff-lines))
+           ((or (string-prefix-p "---" line) (string-prefix-p "+++" line)
+                (string-prefix-p "diff " line) (string-prefix-p "index " line)))
+           ((string-prefix-p "+" line)
+            (setq new-line (1+ new-line))
+            (push (cons 'add new-line) diff-lines))
+           ((string-prefix-p "-" line)
+            (push (cons 'del new-line) diff-lines))
+           ((string-prefix-p " " line)
+            (setq new-line (1+ new-line))
+            (push (cons 'ctx new-line) diff-lines))))
+        (forward-line 1)))
+    (setq diff-lines (nreverse diff-lines))
+    ;; Pass 2: walk groups and classify
+    (let ((result nil)
+          (lines diff-lines))
+      (while lines
+        (let ((entry (car lines)))
+          (cond
+           ;; Skip context and hunk headers
+           ((memq (car entry) '(ctx hunk))
+            (setq lines (cdr lines)))
+           ;; Deletion group: collect consecutive del entries
+           ((eq (car entry) 'del)
+            (let ((del-count 0)
+                  (del-pos (cdr entry)))
+              (while (and lines (eq (car (car lines)) 'del))
+                (setq del-count (1+ del-count))
+                (setq del-pos (cdr (car lines)))
+                (setq lines (cdr lines)))
+              ;; Check if followed by add group → modification
+              (if (and lines (eq (car (car lines)) 'add))
+                  ;; Modification: mark the add lines as modified
+                  (let ((add-count 0))
+                    (while (and lines (eq (car (car lines)) 'add))
+                      (push (cons (cdr (car lines)) 'modified) result)
+                      (setq add-count (1+ add-count))
+                      (setq lines (cdr lines)))
+                    ;; If more lines were deleted than added, mark deletion
+                    ;; at the last modified line position
+                    (when (> del-count add-count)
+                      (let ((last-mod-line (car (car result))))
+                        (push (cons last-mod-line 'deleted) result))))
+                ;; Pure deletion: mark at the next new-file line position
+                ;; (del-pos is the new-file line *before* the deletion point)
+                (push (cons (max 1 (1+ del-pos)) 'deleted) result))))
+           ;; Pure addition group (no preceding del)
+           ((eq (car entry) 'add)
+            (while (and lines (eq (car (car lines)) 'add))
+              (push (cons (cdr (car lines)) 'added) result)
+              (setq lines (cdr lines))))
+           ;; Anything else: skip
+           (t (setq lines (cdr lines))))))
+      ;; Deduplicate: prefer modified > added > deleted per line
+      (let ((line-map (make-hash-table :test #'eql))
+            (priority '((modified . 3) (added . 2) (deleted . 1))))
+        (dolist (entry result)
+          (let* ((ln (car entry))
+                 (st (cdr entry))
+                 (existing (gethash ln line-map))
+                 (new-pri (alist-get st priority))
+                 (old-pri (and existing (alist-get existing priority))))
+            (when (or (not existing) (> (or new-pri 0) (or old-pri 0)))
+              (puthash ln st line-map))))
+        (let ((final nil))
+          (maphash (lambda (k v) (push (cons k v) final)) line-map)
+          (sort final (lambda (a b) (< (car a) (car b)))))))))
+
+(defun claude-gravity--plan-review-apply-margin-indicators (diff-data)
+  "Apply left-fringe overlays to current buffer based on DIFF-DATA.
+DIFF-DATA is a list of (LINE-NUM . STATUS) from `claude-gravity--plan-revision-diff'."
+  (let (overlays)
+    (save-excursion
+      (dolist (entry diff-data)
+        (let* ((line-num (car entry))
+               (status (cdr entry))
+               (bitmap (pcase status
+                         ('added 'claude-gravity-plan-added)
+                         ('modified 'claude-gravity-plan-modified)
+                         ('deleted 'claude-gravity-plan-deleted)))
+               (face (pcase status
+                       ('added 'claude-gravity-plan-margin-added)
+                       ('modified 'claude-gravity-plan-margin-modified)
+                       ('deleted 'claude-gravity-plan-margin-deleted))))
+          (when (and bitmap face)
+            (goto-char (point-min))
+            (when (zerop (forward-line (1- line-num)))
+              (let ((ov (make-overlay (line-beginning-position)
+                                      (line-end-position) nil t nil)))
+                (overlay-put ov 'before-string
+                             (propertize "x" 'display
+                                         `(left-fringe ,bitmap ,face)))
+                (overlay-put ov 'claude-margin-status status)
+                (overlay-put ov 'evaporate t)
+                (push ov overlays)))))))
+    (setq-local claude-gravity--plan-review-margin-overlays (nreverse overlays))))
+
+(defun claude-gravity-plan-review-toggle-margins ()
+  "Toggle visibility of plan revision margin indicators."
+  (interactive)
+  (if (null claude-gravity--plan-review-margin-overlays)
+      (message "No revision margin indicators in this buffer")
+    (let* ((first-ov (car claude-gravity--plan-review-margin-overlays))
+           (visible (overlay-get first-ov 'before-string)))
+      (dolist (ov claude-gravity--plan-review-margin-overlays)
+        (if visible
+            (overlay-put ov 'before-string nil)
+          (let* ((status (overlay-get ov 'claude-margin-status))
+                 (bitmap (pcase status
+                           ('added 'claude-gravity-plan-added)
+                           ('modified 'claude-gravity-plan-modified)
+                           ('deleted 'claude-gravity-plan-deleted)))
+                 (face (pcase status
+                         ('added 'claude-gravity-plan-margin-added)
+                         ('modified 'claude-gravity-plan-margin-modified)
+                         ('deleted 'claude-gravity-plan-margin-deleted))))
+            (overlay-put ov 'before-string
+                         (propertize "x" 'display
+                                     `(left-fringe ,bitmap ,face))))))
+      (message "Plan margin indicators %s" (if visible "hidden" "shown")))))
+
 (defun claude-gravity--handle-plan-review (event-data proc session-id)
   "Open a plan review buffer for EVENT-DATA.
 PROC is the socket connection to respond on.
@@ -4205,13 +4413,29 @@ SESSION-ID identifies the Claude Code session."
       (setq-local claude-gravity--plan-review-proc proc)
       (setq-local claude-gravity--plan-review-original plan-content)
       (setq-local claude-gravity--plan-review-session-id session-id)
+      ;; Compute and apply revision diff margin indicators.
+      ;; Use :last-reviewed-plan (set on every review open, not just approval)
+      ;; so deny-revise-resubmit flow also shows diffs.
+      (let* ((prev-content (when session
+                             (or (plist-get session :last-reviewed-plan)
+                                 (plist-get (plist-get session :plan) :content))))
+             (diff-data (when prev-content
+                          (claude-gravity--plan-revision-diff prev-content plan-content))))
+        (when diff-data
+          (claude-gravity--plan-review-apply-margin-indicators diff-data)
+          (setq-local claude-gravity--plan-review-prev-content prev-content))
+        ;; Always store current plan for next review's diff
+        (when session
+          (plist-put session :last-reviewed-plan plan-content)))
       ;; Kill hook to handle buffer closed without decision
       (add-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill nil t)
       (goto-char (point-min))
       (set-buffer-modified-p nil))
     ;; Display in current window
     (switch-to-buffer buf)
-    (message "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff")))
+    (if claude-gravity--plan-review-prev-content
+        (message "Plan REVISION: gutter shows changes | C-c C-c approve | C-c C-k deny | C-c C-g toggle")
+      (message "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff"))))
 
 (defun claude-gravity--send-bidirectional-response (proc response)
   "Send RESPONSE JSON to the bridge via socket PROC, then close."
