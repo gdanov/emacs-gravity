@@ -34,6 +34,12 @@ nil -- no override; use the global statusline from settings.json."
                  (const :tag "No override" nil))
   :group 'claude-gravity)
 
+(defcustom claude-gravity-diff-max-lines 30
+  "Maximum number of lines to show in inline Edit diffs.
+Diffs longer than this are truncated with an ellipsis indicator."
+  :type 'integer
+  :group 'claude-gravity)
+
 (defconst claude-gravity--indent-step 2
   "Indentation step (in spaces) per nesting level.")
 
@@ -152,6 +158,7 @@ Each session plist has keys:
                            :tasks (make-hash-table :test 'equal)
                            :current-turn 0
                            :permission-mode nil
+                           :session-mode nil
                            :slug nil
                            :buffer nil)))
         (puthash session-id session claude-gravity--sessions)
@@ -172,6 +179,7 @@ Called when a session is restarted (e.g. via /reset or /clear)."
   (plist-put session :tasks (make-hash-table :test 'equal))
   (plist-put session :current-turn 0)
   (plist-put session :permission-mode nil)
+  (plist-put session :session-mode nil)
   (plist-put session :slug nil)
   (plist-put session :status 'active)
   (claude-gravity--load-allow-patterns session)
@@ -490,6 +498,10 @@ If AGENT-ID is nil, set root tools."
 (defun claude-gravity-model-set-permission-mode (session mode)
   "Set SESSION's :permission-mode to MODE."
   (plist-put session :permission-mode mode))
+
+(defun claude-gravity-model-set-session-mode (session mode)
+  "Set SESSION's :session-mode to MODE (nil, \\='planning, or \\='acting)."
+  (plist-put session :session-mode mode))
 
 (defun claude-gravity-model-set-token-usage (session usage)
   "Set SESSION's :token-usage to USAGE alist."
@@ -874,7 +886,8 @@ the model mutation API to update session state."
             session (list (cons 'text prompt-text)
                           (cons 'submitted (current-time))
                           (cons 'elapsed nil)))))
-       (claude-gravity-model-set-claude-status session 'responding))
+       (claude-gravity-model-set-claude-status session 'responding)
+       (claude-gravity-model-set-session-mode session nil))
      ;; Session is responding — remove idle inbox items
      (claude-gravity--inbox-remove-for-session session-id 'idle)
      (claude-gravity--clear-notification-indicator))
@@ -940,6 +953,8 @@ the model mutation API to update session state."
         (alist-get 'candidate_agent_ids data))
        (claude-gravity-model-set-permission-mode
         session (alist-get 'permission_mode data))
+       (when (equal (alist-get 'tool_name data) "EnterPlanMode")
+         (claude-gravity-model-set-session-mode session 'planning))
        (claude-gravity-model-set-claude-status session 'responding)
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
        (claude-gravity--track-task session "PreToolUse" (alist-get 'tool_name data)
@@ -990,6 +1005,9 @@ the model mutation API to update session state."
           (claude-gravity--extract-ask-answer (alist-get 'tool_response data))))
        ;; Detect plan presentation
        (when (equal (alist-get 'tool_name data) "ExitPlanMode")
+         ;; Fallback transition for auto-approved plans
+         (when (eq (plist-get session :session-mode) 'planning)
+           (claude-gravity-model-set-session-mode session 'acting))
          (let ((plan-content (alist-get 'plan (alist-get 'tool_input data)))
                (file-path (alist-get 'filePath (alist-get 'tool_response data)))
                (allowed-prompts (alist-get 'allowedPrompts (alist-get 'tool_input data))))
@@ -1198,6 +1216,30 @@ the model mutation API to update session state."
   "Face for margin indicator (┃) inside agent response cycles."
   :group 'claude-gravity)
 
+(defface claude-gravity-diff-added
+  '((((background dark)) :foreground "#88ee88" :background "#1a3a1a")
+    (((background light)) :foreground "#006600" :background "#ddffdd"))
+  "Face for added text in inline Edit diffs."
+  :group 'claude-gravity)
+
+(defface claude-gravity-diff-removed
+  '((((background dark)) :foreground "#ee8888" :background "#3a1a1a" :strike-through t)
+    (((background light)) :foreground "#660000" :background "#ffdddd" :strike-through t))
+  "Face for removed text in inline Edit diffs."
+  :group 'claude-gravity)
+
+(defface claude-gravity-diff-context
+  '((((background dark)) :foreground "#888888")
+    (((background light)) :foreground "#666666"))
+  "Face for context lines in unified-style Edit diffs."
+  :group 'claude-gravity)
+
+(defface claude-gravity-diff-header
+  '((((background dark)) :foreground "#7799cc")
+    (((background light)) :foreground "#336699"))
+  "Face for @@ hunk headers in Edit diffs."
+  :group 'claude-gravity)
+
 (defface claude-gravity-header-title
   '((t :weight bold :foreground "white"))
   "Face for the main buffer header title."
@@ -1206,6 +1248,16 @@ the model mutation API to update session state."
 (defface claude-gravity-slug
   '((t :foreground "dark gray" :slant italic))
   "Face for the session slug shown in the header."
+  :group 'claude-gravity)
+
+(defface claude-gravity-mode-planning
+  '((t :foreground "#d0a0ff"))
+  "Face for planning session mode badge."
+  :group 'claude-gravity)
+
+(defface claude-gravity-mode-acting
+  '((t :foreground "#88cc88"))
+  "Face for acting session mode badge."
   :group 'claude-gravity)
 
 ;;; Divider helpers
@@ -2856,17 +2908,23 @@ Groups non-idle items by session and shows badge counts."
                                (if (eq claude-st 'responding)
                                    (propertize "responding" 'face 'claude-gravity-status-responding)
                                  (propertize (concat "idle" (or idle-str ""))
-                                             'face 'claude-gravity-status-idle)))))
+                                             'face 'claude-gravity-status-idle))))
+                            (mode-badge
+                             (pcase (plist-get session :session-mode)
+                               ('planning (propertize " [planning]" 'face 'claude-gravity-mode-planning))
+                               ('acting (propertize " [acting]" 'face 'claude-gravity-mode-acting))
+                               (_ ""))))
                        (let ((tmux-badge (if (gethash sid claude-gravity--tmux-sessions)
                                                 (propertize " [tmux]" 'face 'claude-gravity-detail-label)
                                               ""))
                              (inbox-badge (claude-gravity--inbox-badges sid)))
                          (magit-insert-section (session-entry sid)
                            (magit-insert-heading
-                             (format "%s%s%s %s  %s  [%d tools]%s"
+                             (format "%s%s%s %s  %s%s  [%d tools]%s"
                                      (claude-gravity--indent)
                                      indicator tmux-badge label
                                      (or status-label "")
+                                     mode-badge
                                      n-tools inbox-badge))
                            ;; Inline inbox items for this session
                            (let ((session-items
@@ -3127,11 +3185,17 @@ Only shows permission, question, and plan-review items (not idle)."
                            (or (alist-get 'cache_creation_input_tokens usage) 0))))
            (out-tokens (when usage (or (alist-get 'output_tokens usage) 0)))
            (perm-mode (plist-get session :permission-mode))
+           (sess-mode (plist-get session :session-mode))
            (model-name (plist-get session :model-name))
            (parts (list " " dot " " status-word "  " slug
                         (when perm-mode
                           (propertize (format "  [%s]" perm-mode)
                                      'face 'claude-gravity-detail-label))
+                        (when sess-mode
+                          (propertize (format "  [%s]" sess-mode)
+                                     'face (if (eq sess-mode 'planning)
+                                               'claude-gravity-mode-planning
+                                             'claude-gravity-mode-acting)))
                         (when model-name
                           (propertize (format "  %s" model-name)
                                      'face 'claude-gravity-detail-label))
@@ -4081,6 +4145,9 @@ incorporate the feedback (the allow channel cannot carry feedback)."
                          . ((hookEventName . "PermissionRequest")
                             (decision . ((behavior . "allow"))))))))
         (claude-gravity--plan-review-send-response response))
+      ;; Transition to acting mode
+      (when-let* ((session (claude-gravity--get-session claude-gravity--plan-review-session-id)))
+        (claude-gravity-model-set-session-mode session 'acting))
       (claude-gravity--plan-review-cleanup-and-close)
       (message "Plan approved"))))
 
@@ -4128,7 +4195,11 @@ Sends a deny response and cleans up inbox item."
                        . ((hookEventName . "PermissionRequest")
                           (decision . ((behavior . "deny")
                                        (message . "Plan review cancelled (buffer closed)"))))))))
-      (claude-gravity--plan-review-send-response response))))
+      (claude-gravity--plan-review-send-response response)))
+  ;; Reset session mode since plan was cancelled
+  (when claude-gravity--plan-review-session-id
+    (when-let* ((session (claude-gravity--get-session claude-gravity--plan-review-session-id)))
+      (claude-gravity-model-set-session-mode session nil))))
 
 (defun claude-gravity-test-plan-review ()
   "Open a simulated plan review buffer for testing.
