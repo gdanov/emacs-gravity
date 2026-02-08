@@ -2636,6 +2636,71 @@ the message under `message` with `role`, `content`, and `model`."
 
 ;;; Overview Buffer
 
+(defun claude-gravity--inbox-badges (session-id)
+  "Return badge string for inbox items belonging to SESSION-ID.
+Only counts non-idle items.  Returns empty string if none."
+  (let ((perms 0) (questions 0) (plans 0))
+    (dolist (item claude-gravity--inbox)
+      (when (equal (alist-get 'session-id item) session-id)
+        (pcase (alist-get 'type item)
+          ('permission (cl-incf perms))
+          ('question (cl-incf questions))
+          ('plan-review (cl-incf plans))
+          (_ nil))))
+    (let ((parts nil))
+      (when (> plans 0)
+        (push (propertize (format "P%d" plans) 'face 'claude-gravity-question) parts))
+      (when (> questions 0)
+        (push (propertize (format "?%d" questions) 'face 'claude-gravity-status-responding) parts))
+      (when (> perms 0)
+        (push (propertize (format "!%d" perms) 'face 'claude-gravity-question) parts))
+      (if parts (concat " " (string-join parts " ")) ""))))
+
+(defun claude-gravity--insert-inbox-summary ()
+  "Insert a one-line summary strip of all pending inbox items.
+Groups non-idle items by session and shows badge counts."
+  (let ((by-session (make-hash-table :test 'equal)))
+    ;; Group non-idle items by session-id
+    (dolist (item claude-gravity--inbox)
+      (unless (eq (alist-get 'type item) 'idle)
+        (let ((sid (alist-get 'session-id item)))
+          (puthash sid (cons item (gethash sid by-session nil)) by-session))))
+    (when (> (hash-table-count by-session) 0)
+      (let ((parts nil)
+            (total 0))
+        (maphash
+         (lambda (sid items)
+           (let ((session (claude-gravity--get-session sid))
+                 (perms 0) (questions 0) (plans 0))
+             (dolist (item items)
+               (cl-incf total)
+               (pcase (alist-get 'type item)
+                 ('permission (cl-incf perms))
+                 ('question (cl-incf questions))
+                 ('plan-review (cl-incf plans))))
+             (let ((label (if session
+                              (format "%s/%s"
+                                      (plist-get session :project)
+                                      (claude-gravity--session-label session))
+                            (substring sid 0 (min 4 (length sid)))))
+                   (badges nil))
+               (when (> perms 0)
+                 (push (propertize (format "!%d" perms) 'face 'claude-gravity-question) badges))
+               (when (> questions 0)
+                 (push (propertize (format "?%d" questions) 'face 'claude-gravity-status-responding) badges))
+               (when (> plans 0)
+                 (push (propertize (format "P%d" plans) 'face 'claude-gravity-question) badges))
+               (push (concat (propertize label 'face 'claude-gravity-detail-label)
+                              " " (string-join badges " "))
+                     parts))))
+         by-session)
+        (magit-insert-section (inbox-summary)
+          (magit-insert-heading
+            (format "  %s: %s"
+                    (propertize (format "%d pending" total) 'face 'claude-gravity-question)
+                    (string-join (nreverse parts) (propertize " · " 'face 'claude-gravity-detail-label)))))
+        (insert "\n")))))
+
 (defun claude-gravity--render-overview ()
   "Render the overview buffer with all sessions grouped by project."
   (let ((buf (get-buffer claude-gravity-buffer-name)))
@@ -2663,30 +2728,8 @@ the message under `message` with `role`, `content`, and `model`."
                           (propertize "Structured Claude Sessions" 'face 'claude-gravity-header-title)
                           (propertize (format "  ◆ %d sessions" total-count) 'face 'claude-gravity-detail-label)))
                 (insert (propertize top-line 'face 'claude-gravity-divider) "\n\n")))
-            ;; Inbox: Attention Required (permission, question, plan-review)
-            (let ((attention (cl-remove-if
-                              (lambda (item) (eq (alist-get 'type item) 'idle))
-                              claude-gravity--inbox)))
-              (when attention
-                (magit-insert-section (inbox-attention nil t)
-                  (magit-insert-heading
-                    (propertize (format "Attention Required (%d)" (length attention))
-                                'face 'claude-gravity-question))
-                  (dolist (item attention)
-                    (claude-gravity--insert-inbox-item item)))
-                (insert "\n")))
-            ;; Inbox: Waiting for Input (idle sessions)
-            (let ((waiting (cl-remove-if-not
-                            (lambda (item) (eq (alist-get 'type item) 'idle))
-                            claude-gravity--inbox)))
-              (when waiting
-                (magit-insert-section (inbox-waiting nil t)
-                  (magit-insert-heading
-                    (propertize (format "Waiting for Input (%d)" (length waiting))
-                                'face 'claude-gravity-status-idle))
-                  (dolist (item waiting)
-                    (claude-gravity--insert-inbox-item item)))
-                (insert "\n")))
+            ;; Inbox: summary strip at top
+            (claude-gravity--insert-inbox-summary)
             (if (= (hash-table-count claude-gravity--sessions) 0)
                 (insert (propertize "  No sessions.\n" 'face 'claude-gravity-detail-label))  ;; static text, not a section
               (maphash
@@ -2723,14 +2766,23 @@ the message under `message` with `role`, `content`, and `model`."
                                              'face 'claude-gravity-status-idle)))))
                        (let ((tmux-badge (if (gethash sid claude-gravity--tmux-sessions)
                                                 (propertize " [tmux]" 'face 'claude-gravity-detail-label)
-                                              "")))
+                                              ""))
+                             (inbox-badge (claude-gravity--inbox-badges sid)))
                          (magit-insert-section (session-entry sid)
                            (magit-insert-heading
-                             (format "%s%s%s %s  %s  [%d tools]"
+                             (format "%s%s%s %s  %s  [%d tools]%s"
                                      (claude-gravity--indent)
                                      indicator tmux-badge label
                                      (or status-label "")
-                                     n-tools))))))))
+                                     n-tools inbox-badge))
+                           ;; Inline inbox items for this session
+                           (let ((session-items
+                                  (cl-remove-if-not
+                                   (lambda (item)
+                                     (equal (alist-get 'session-id item) sid))
+                                   claude-gravity--inbox)))
+                             (dolist (item session-items)
+                               (claude-gravity--insert-inbox-item item)))))))))
                projects)))
           (goto-char (min pos (point-max)))
           (claude-gravity--apply-visibility))))))
@@ -2762,9 +2814,8 @@ the message under `message` with `role`, `content`, and `model`."
                    (t (format "%dh" (truncate (/ secs 3600)))))))))
     (magit-insert-section (inbox-item id)
       (magit-insert-heading
-        (format "  %s [%s] %-60s %s"
+        (format "    %s %-60s %s"
                 (propertize icon 'face icon-face)
-                (propertize project 'face 'claude-gravity-detail-label)
                 summary
                 (propertize (or age "") 'face 'claude-gravity-detail-label))))))
 
@@ -2784,6 +2835,49 @@ Only idle items can be dismissed.  Bidirectional items need a response."
                   (message "Dismissed"))
               (message "Cannot dismiss — this item needs a response (use RET to act on it)"))))
       (message "No inbox item at point"))))
+
+(defun claude-gravity--inbox-section-p (section)
+  "Return non-nil if SECTION is an inbox-item."
+  (and section (eq (oref section type) 'inbox-item)))
+
+(defun claude-gravity-inbox-next ()
+  "Jump to the next inbox item in the buffer."
+  (interactive)
+  (let ((start (point))
+        (found nil))
+    ;; Move forward through sections until we find an inbox-item
+    (while (and (not found)
+                (condition-case nil
+                    (progn (magit-section-forward) t)
+                  (error nil)))
+      (when (claude-gravity--inbox-section-p (magit-current-section))
+        (setq found t)))
+    (unless found
+      (goto-char start)
+      (message "No more inbox items"))))
+
+(defun claude-gravity-inbox-prev ()
+  "Jump to the previous inbox item in the buffer."
+  (interactive)
+  (let ((start (point))
+        (found nil))
+    (while (and (not found)
+                (condition-case nil
+                    (progn (magit-section-backward) t)
+                  (error nil)))
+      (when (claude-gravity--inbox-section-p (magit-current-section))
+        (setq found t)))
+    (unless found
+      (goto-char start)
+      (message "No more inbox items"))))
+
+(defun claude-gravity-inbox-list ()
+  "Jump to the first inbox item in the overview buffer."
+  (interactive)
+  (goto-char (point-min))
+  (if (claude-gravity--inbox-section-p (magit-current-section))
+      t  ; already on one
+    (claude-gravity-inbox-next)))
 
 ;;; Per-Session Buffer
 
@@ -2860,6 +2954,14 @@ overlays.  Since we render from timers, we must apply them manually."
 (define-key claude-gravity-mode-map (kbd "t") 'claude-gravity-tail)
 (define-key claude-gravity-mode-map (kbd "f") 'claude-gravity-follow-mode)
 (define-key claude-gravity-mode-map (kbd "k") 'claude-gravity-inbox-dismiss)
+
+;; Inbox navigation prefix map
+(defvar claude-gravity-inbox-map (make-sparse-keymap)
+  "Keymap for inbox navigation commands under the `i' prefix.")
+(define-key claude-gravity-mode-map (kbd "i") claude-gravity-inbox-map)
+(define-key claude-gravity-inbox-map (kbd "n") 'claude-gravity-inbox-next)
+(define-key claude-gravity-inbox-map (kbd "p") 'claude-gravity-inbox-prev)
+(define-key claude-gravity-inbox-map (kbd "l") 'claude-gravity-inbox-list)
 
 (define-derived-mode claude-gravity-mode magit-section-mode "Claude"
   "Major mode for Structured Claude Sessions overview.
