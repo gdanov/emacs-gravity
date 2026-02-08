@@ -3651,6 +3651,8 @@ Returns a list from most specific to most general, with nils removed."
     :inapt-if-not claude-gravity--current-session-tmux-p)
    ("K" "Stop session" claude-gravity-stop-session
     :inapt-if-not claude-gravity--current-session-tmux-p)
+   ("E" "Send Escape" claude-gravity-send-escape
+    :inapt-if-not claude-gravity--current-session-tmux-p)
    ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
    ("R" "Reset all status to idle" claude-gravity-reset-status)
    ("X" "Detect dead sessions" claude-gravity-detect-dead-sessions)
@@ -5064,6 +5066,19 @@ Sends Shift-Tab to the managed tmux session."
     (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "BTab")
     (message "Sent Shift-Tab (cycle permission mode) to %s" tmux-name)))
 
+(defun claude-gravity-send-escape ()
+  "Send Escape to the managed tmux session (interrupt current operation)."
+  (interactive)
+  (let* ((sid (or claude-gravity--buffer-session-id
+                  (let ((section (magit-current-section)))
+                    (when (and section (eq (oref section type) 'session-entry))
+                      (oref section value)))))
+         (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions))))
+    (unless tmux-name
+      (user-error "No tmux session at point"))
+    (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "Escape")
+    (message "Sent Escape to %s" tmux-name)))
+
 (defun claude-gravity-stop-session (&optional session-id)
   "Stop the tmux Claude session for SESSION-ID."
   (interactive)
@@ -5179,6 +5194,8 @@ cycle will re-key the session automatically."
 (define-key claude-gravity-mode-map (kbd "C") 'claude-gravity-reset-session)
 (define-key claude-gravity-mode-map (kbd "$") 'claude-gravity-terminal-session)
 (define-key claude-gravity-mode-map (kbd "<backtab>") 'claude-gravity-toggle-permission-mode)
+(define-key claude-gravity-mode-map (kbd "E") 'claude-gravity-send-escape)
+(define-key claude-gravity-mode-map (kbd "K") 'claude-gravity-stop-session)
 
 (provide 'claude-gravity)
 ;;; claude-gravity.el ends here

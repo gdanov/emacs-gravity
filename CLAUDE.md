@@ -88,6 +88,8 @@ Multi-session support: each Claude Code session gets its own buffer, identified 
 | `V` | `claude-gravity-open-agent-transcript` | Open agent transcript file |
 | `A` | `claude-gravity-add-allow-pattern` | Copy allow pattern to kill ring |
 | `a` | `claude-gravity-add-allow-pattern-to-settings` | Add pattern to settings.local.json |
+| `E` | `claude-gravity-send-escape` | Send Escape to managed session |
+| `K` | `claude-gravity-stop-session` | Stop/kill managed session |
 | `D` | `claude-gravity-cleanup-sessions` | Remove ended sessions |
 | `R` | `claude-gravity-reset-status` | Reset all status to idle |
 | `X` | `claude-gravity-detect-dead-sessions` | Detect dead sessions |
