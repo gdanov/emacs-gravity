@@ -3695,39 +3695,41 @@ Returns a list from most specific to most general, with nils removed."
 ;;;###autoload (autoload 'claude-gravity-menu "claude-gravity" nil t)
 (transient-define-prefix claude-gravity-menu ()
   "Interactions with Claude Code."
-  ["Actions"
-   ("c" "Comment" claude-gravity-comment-at-point)
-   ("g" "Refresh" claude-gravity-refresh)
-   ("t" "Tail" claude-gravity-tail)
-   ("f" "Follow mode" claude-gravity-follow-mode)
-   ("P" "Show Plan" claude-gravity-show-plan)
-   ("F" "Open plan file" claude-gravity-open-plan-file)
-   ("T" "Parse agent transcript" claude-gravity-view-agent-transcript)
-   ("V" "Open agent transcript file" claude-gravity-open-agent-transcript)]
-  ["Permissions"
-   ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
-   ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]
-  ["Sessions"
-   ("S" "Start session (tmux)" claude-gravity-start-session)
-   ("s" "Send prompt" claude-gravity-send-prompt
-    :inapt-if-not claude-gravity--current-session-tmux-p)
-   ("/" "Slash command" claude-gravity-slash-command
-    :inapt-if-not claude-gravity--current-session-tmux-p)
-   ("r" "Resume session" claude-gravity-resume-session)
-   ("$" "Terminal" claude-gravity-terminal-session
-    :inapt-if-not claude-gravity--current-session-tmux-p)
-   ("<backtab>" "Cycle permission mode" claude-gravity-toggle-permission-mode
-    :inapt-if-not claude-gravity--current-session-tmux-p)
-   ("C" "Reset/clear session" claude-gravity-reset-session
-    :inapt-if-not claude-gravity--current-session-tmux-p)
-   ("K" "Stop session" claude-gravity-stop-session
-    :inapt-if-not claude-gravity--current-session-tmux-p)
-   ("E" "Send Escape" claude-gravity-send-escape
-    :inapt-if-not claude-gravity--current-session-tmux-p)
-   ("D" "Remove ended sessions" claude-gravity-cleanup-sessions)
-   ("R" "Reset all status to idle" claude-gravity-reset-status)
-   ("X" "Detect dead sessions" claude-gravity-detect-dead-sessions)
-   ("d" "Delete session" claude-gravity-delete-session)]
+  [["Actions"
+    ("c" "Comment" claude-gravity-comment-at-point)
+    ("g" "Refresh" claude-gravity-refresh)
+    ("t" "Tail" claude-gravity-tail)
+    ("f" "Follow mode" claude-gravity-follow-mode)
+    ("P" "Show Plan" claude-gravity-show-plan)
+    ("F" "Open plan file" claude-gravity-open-plan-file)
+    ("T" "Parse transcript" claude-gravity-view-agent-transcript)
+    ("V" "Open transcript" claude-gravity-open-agent-transcript)]
+   ["Sessions"
+    ("S" "Start (tmux)" claude-gravity-start-session)
+    ("s" "Send prompt" claude-gravity-send-prompt
+     :inapt-if-not claude-gravity--current-session-tmux-p)
+    ("/" "Slash command" claude-gravity-slash-command
+     :inapt-if-not claude-gravity--current-session-tmux-p)
+    ("r" "Resume session" claude-gravity-resume-session)
+    ("$" "Terminal" claude-gravity-terminal-session
+     :inapt-if-not claude-gravity--current-session-tmux-p)
+    ("<backtab>" "Cycle perm mode" claude-gravity-toggle-permission-mode
+     :inapt-if-not claude-gravity--current-session-tmux-p)
+    ("C" "Reset/clear" claude-gravity-reset-session
+     :inapt-if-not claude-gravity--current-session-tmux-p)
+    ("K" "Stop session" claude-gravity-stop-session
+     :inapt-if-not claude-gravity--current-session-tmux-p)
+    ("E" "Send Escape" claude-gravity-send-escape
+     :inapt-if-not claude-gravity--current-session-tmux-p)]
+   ["Manage"
+    ("D" "Remove ended" claude-gravity-cleanup-sessions)
+    ("R" "Reset all idle" claude-gravity-reset-status)
+    ("X" "Detect dead" claude-gravity-detect-dead-sessions)
+    ("d" "Delete session" claude-gravity-delete-session)
+    ""
+    "Permissions"
+    ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
+    ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]]
   ["Navigation"
    ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)
    ("TAB" "Toggle section" magit-section-toggle)
