@@ -296,10 +296,11 @@ Returns the new item."
     ('plan-review "Plan ready for review")
     ('idle
      (let* ((turn (alist-get 'turn data))
-            (snippet (alist-get 'snippet data)))
+            (snippet (replace-regexp-in-string "[\n\r\t]+" " "
+                       (or (alist-get 'snippet data) "idle"))))
        (format "Turn %s — %s"
                (or turn "?")
-               (or snippet "idle"))))
+               snippet)))
     (_ "Unknown")))
 
 ;;; Follow mode
@@ -794,22 +795,20 @@ the model mutation API to update session state."
      (let ((existing (claude-gravity--get-session session-id)))
        (when existing
          (claude-gravity--reset-session existing)))
-     ;; Re-key tmux pending session: match cwd to find temp session
-     (let* ((normalized-cwd (claude-gravity--normalize-cwd cwd))
-            (pending-temp-id (gethash normalized-cwd claude-gravity--tmux-pending)))
-       (when pending-temp-id
-         (remhash normalized-cwd claude-gravity--tmux-pending)
-         (let ((temp-session (gethash pending-temp-id claude-gravity--sessions))
-               (tmux-name (gethash pending-temp-id claude-gravity--tmux-sessions)))
+     ;; Re-key tmux pending session: match temp-id from bridge payload
+     (let* ((temp-id (alist-get 'temp_id data))
+            (tmux-name (and temp-id (gethash temp-id claude-gravity--tmux-pending))))
+       (when tmux-name
+         (remhash temp-id claude-gravity--tmux-pending)
+         (let ((temp-session (gethash temp-id claude-gravity--sessions)))
            (when temp-session
              ;; Re-key session from temp-id to real session-id
-             (remhash pending-temp-id claude-gravity--sessions)
+             (remhash temp-id claude-gravity--sessions)
              (plist-put temp-session :session-id session-id)
+             (plist-put temp-session :temp-id temp-id)
              (puthash session-id temp-session claude-gravity--sessions)
-             ;; Re-key tmux session mapping
-             (when tmux-name
-               (remhash pending-temp-id claude-gravity--tmux-sessions)
-               (puthash session-id tmux-name claude-gravity--tmux-sessions))
+             ;; Register tmux mapping under real session-id
+             (puthash session-id tmux-name claude-gravity--tmux-sessions)
              ;; Rename buffer
              (let ((old-buf (plist-get temp-session :buffer)))
                (when (and old-buf (buffer-live-p old-buf))
@@ -817,8 +816,8 @@ the model mutation API to update session state."
                    (with-current-buffer old-buf
                      (rename-buffer new-name t)
                      (setq claude-gravity--buffer-session-id session-id)))))
-            ;; Reset conversational state (essential for /clear re-keying)
-            (claude-gravity--reset-session temp-session)))))
+             ;; Reset conversational state (essential for /clear re-keying)
+             (claude-gravity--reset-session temp-session)))))
      (claude-gravity--ensure-session session-id cwd))
 
     ("SessionEnd"
@@ -829,9 +828,10 @@ the model mutation API to update session state."
          ;; for SessionStart re-keying.  Otherwise clean up.
          (let ((tmux-name (gethash session-id claude-gravity--tmux-sessions)))
            (if (and tmux-name (claude-gravity--tmux-alive-p tmux-name))
-               (let ((normalized-cwd (claude-gravity--normalize-cwd
-                                      (plist-get session :cwd))))
-                 (puthash normalized-cwd session-id claude-gravity--tmux-pending))
+               ;; /clear — put temp-id back into pending for next SessionStart
+               (let ((temp-id (plist-get session :temp-id)))
+                 (when temp-id
+                   (puthash temp-id tmux-name claude-gravity--tmux-pending)))
              (remhash session-id claude-gravity--tmux-sessions)))))
      ;; Remove all inbox items for this session
      (claude-gravity--inbox-remove-for-session session-id)
@@ -1802,7 +1802,8 @@ Pairs lines 1:1 and runs word-diff on each pair.  PREFIX is indent string."
 Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
   (pcase name
     ("Bash"
-     (let ((cmd (or (alist-get 'command input) "")))
+     (let ((cmd (replace-regexp-in-string "[\n\r\t]+" " "
+                 (or (alist-get 'command input) ""))))
        (format "Bash(%s)" cmd)))
     ((or "Edit" "Write")
      (let ((path (or (alist-get 'file_path input) "")))
@@ -1822,7 +1823,8 @@ Returns a string like \"Bash(npm run build)\" or \"Edit(/path/to/file)\"."
        (format "%s(%s)" name pattern)))
     ("Task"
      (let ((subtype (or (alist-get 'subagent_type input) ""))
-           (desc (or (alist-get 'description input) "")))
+           (desc (replace-regexp-in-string "[\n\r\t]+" " "
+                   (or (alist-get 'description input) ""))))
        (if (not (string-empty-p desc))
            (format "Task(%s · %s)" subtype desc)
          (format "Task(%s)" subtype))))
@@ -3187,7 +3189,10 @@ Groups non-idle items by session and shows badge counts."
   (let* ((id (alist-get 'id item))
          (type (alist-get 'type item))
          (project (or (alist-get 'project item) "?"))
-         (summary (or (alist-get 'summary item) ""))
+         (summary (truncate-string-to-width
+                   (replace-regexp-in-string "[\n\r\t]+" " "
+                     (or (alist-get 'summary item) ""))
+                   60))
          (timestamp (alist-get 'timestamp item))
          (icon (pcase type
                  ('permission "!")
@@ -4778,7 +4783,7 @@ remove the inbox item when plan review is acted on."
   "Map of session-id → tmux session name for Emacs-managed Claude sessions.")
 
 (defvar claude-gravity--tmux-pending (make-hash-table :test 'equal)
-  "Map of cwd → temp-id for tmux sessions awaiting SessionStart re-keying.")
+  "Map of temp-id → tmux-name for tmux sessions awaiting SessionStart re-keying.")
 
 (defvar claude-gravity--tmux-heartbeat-timer nil
   "Timer for periodic tmux session liveness checks.")
@@ -4879,9 +4884,6 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
   (claude-gravity--tmux-check)
   (claude-gravity--ensure-server)
   (setq cwd (claude-gravity--normalize-cwd cwd))
-  ;; Prevent concurrent same-cwd sessions
-  (when (gethash cwd claude-gravity--tmux-pending)
-    (error "A tmux session is already pending for %s" cwd))
   (let* ((temp-id (format "tmux-%s" (format-time-string "%s%3N")))
          (tmux-name (format "claude-%s" temp-id))
          (plugin-root (file-name-directory
@@ -4891,6 +4893,7 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
          (sl-parts (claude-gravity--statusline-parts plugin-root))
          (cmd-parts `("env"
 											"DUMMY=true"
+                      ,(format "CLAUDE_GRAVITY_TEMP_ID=%s" temp-id)
 											;;"TERM=dumb"
                       ,@(car sl-parts)
                       "claude" ,@(claude-gravity--plugin-dirs plugin-root))))
@@ -4906,12 +4909,12 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
                          cmd-parts)))
       (unless (= result 0)
         (error "Failed to create tmux session %s" tmux-name))
-      ;; Register pending re-key by cwd
-      (puthash cwd temp-id claude-gravity--tmux-pending)
-      (puthash temp-id tmux-name claude-gravity--tmux-sessions)
+      ;; Register pending re-key by temp-id (allows multiple sessions per cwd)
+      (puthash temp-id tmux-name claude-gravity--tmux-pending)
       ;; Create session with temp ID
       (let ((session (claude-gravity--ensure-session temp-id cwd)))
         (plist-put session :tmux-session tmux-name)
+        (plist-put session :temp-id temp-id)
         (claude-gravity-model-set-claude-status session 'idle))
       (claude-gravity--tmux-ensure-heartbeat)
       (claude-gravity--schedule-refresh)
@@ -4943,6 +4946,7 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
                (or cwd
                    (and existing (plist-get existing :cwd))
                    (read-directory-name "Project directory: "))))
+         (temp-id (format "tmux-%s" (format-time-string "%s%3N")))
          (tmux-name (format "claude-resume-%s"
                             (substring session-id 0 (min 8 (length session-id)))))
          (plugin-root (file-name-directory
@@ -4951,6 +4955,7 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
                            (error "Cannot locate claude-gravity.el for --plugin-dir"))))
          (sl-parts (claude-gravity--statusline-parts plugin-root))
          (cmd-parts `("env" "TERM=dumb"
+                      ,(format "CLAUDE_GRAVITY_TEMP_ID=%s" temp-id)
                       ,@(car sl-parts)
                       "claude" "--resume" ,session-id
                       ,@(claude-gravity--plugin-dirs plugin-root))))
@@ -4958,14 +4963,14 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
       (setq cmd-parts (append cmd-parts (list "--model" model))))
     (when (cdr sl-parts)
       (setq cmd-parts (append cmd-parts (cdr sl-parts))))
-    ;; Register pending re-key by cwd (SessionStart will arrive with real ID)
-    (puthash cwd session-id claude-gravity--tmux-pending)
+    ;; Register pending re-key by temp-id (allows multiple sessions per cwd)
+    (puthash temp-id tmux-name claude-gravity--tmux-pending)
     (let ((result (apply #'call-process "tmux" nil nil nil
                          "new-session" "-d" "-s" tmux-name
                          "-c" cwd
                          cmd-parts)))
       (unless (= result 0)
-        (remhash cwd claude-gravity--tmux-pending)
+        (remhash temp-id claude-gravity--tmux-pending)
         (error "Failed to create tmux session %s" tmux-name))
       (puthash session-id tmux-name claude-gravity--tmux-sessions)
       ;; Update or create session
@@ -4973,6 +4978,7 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
         (when (eq (plist-get session :status) 'ended)
           (plist-put session :status 'active))
         (plist-put session :tmux-session tmux-name)
+        (plist-put session :temp-id temp-id)
         (claude-gravity-model-set-claude-status session 'idle))
       (claude-gravity--tmux-ensure-heartbeat)
       (claude-gravity--schedule-refresh)

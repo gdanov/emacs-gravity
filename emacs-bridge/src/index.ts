@@ -551,6 +551,10 @@ async function main() {
     const sessionId = (inputData as any).session_id || "unknown";
     const cwd = (inputData as any).cwd || "";
     const pid = parseInt(process.env.CLAUDE_PID || "0", 10) || null;
+    const tempId = process.env.CLAUDE_GRAVITY_TEMP_ID || null;
+    if (tempId) {
+      (inputData as any).temp_id = tempId;
+    }
 
     // Extract session slug from transcript
     const transcriptPath = (inputData as any).transcript_path;
