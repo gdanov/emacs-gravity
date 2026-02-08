@@ -2817,7 +2817,7 @@ Groups non-idle items by session and shows badge counts."
                    (t (format "%dh" (truncate (/ secs 3600)))))))))
     (magit-insert-section (inbox-item id)
       (magit-insert-heading
-        (format "    %s %-60s %s"
+        (format "      %s %-60s %s"
                 (propertize icon 'face icon-face)
                 summary
                 (propertize (or age "") 'face 'claude-gravity-detail-label))))))
