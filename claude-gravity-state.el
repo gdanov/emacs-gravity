@@ -451,6 +451,7 @@ PROPS is a plist with optional keys:
   :transcript-path, :stop-text, :stop-thinking."
   (let ((agent (claude-gravity--find-agent session agent-id)))
     (when agent
+      (message "[model-complete-agent] agent=%s has-props=%s props=%S" agent-id (> (length props) 0) props)
       (setf (alist-get 'status agent) "done")
       (let ((ts (alist-get 'timestamp agent)))
         (when ts
@@ -459,9 +460,13 @@ PROPS is a plist with optional keys:
       (let ((tp (plist-get props :transcript-path)))
         (when tp (setf (alist-get 'transcript_path agent) tp)))
       (let ((st (plist-get props :stop-text)))
-        (when st (setf (alist-get 'stop_text agent) st)))
+        (message "[model-complete-agent] stop-text: got=%s len=%s" (not (null st)) (if st (length st) nil))
+        (when st (setf (alist-get 'stop_text agent) st))
+        (message "[model-complete-agent] stop-text: set=%s" (not (null (alist-get 'stop_text agent)))))
       (let ((sth (plist-get props :stop-thinking)))
-        (when sth (setf (alist-get 'stop_thinking agent) sth))))))
+        (message "[model-complete-agent] stop-thinking: got=%s len=%s" (not (null sth)) (if sth (length sth) nil))
+        (when sth (setf (alist-get 'stop_thinking agent) sth))
+        (message "[model-complete-agent] stop-thinking: set=%s" (not (null (alist-get 'stop_thinking agent))))))))
 
 
 (defun claude-gravity-model-move-tools-to-agent (session agent-id tool-ids)
