@@ -27,4 +27,4 @@
 (require 'claude-gravity-debug)
 
 (provide 'claude-gravity)
-;;; claude-gravity.el ends here
+;;; clatude-gravity.el ends here

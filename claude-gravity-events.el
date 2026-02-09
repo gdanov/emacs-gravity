@@ -194,12 +194,16 @@ the model mutation API to update session state."
 
     ("SubagentStop"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
-            (agent-id (alist-get 'agent_id data)))
+            (agent-id (alist-get 'agent_id data))
+            (stop-text (alist-get 'agent_stop_text data))
+            (stop-thinking (alist-get 'agent_stop_thinking data)))
+       (message "[SUBAGENT_STOP_HANDLER] agent=%s has_stop_text=%s has_stop_thinking=%s"
+                agent-id (not (null stop-text)) (not (null stop-thinking)))
        (claude-gravity-model-complete-agent
         session agent-id
         :transcript-path (alist-get 'agent_transcript_path data)
-        :stop-text (alist-get 'agent_stop_text data)
-        :stop-thinking (alist-get 'agent_stop_thinking data))
+        :stop-text stop-text
+        :stop-thinking stop-thinking)
        (claude-gravity-model-move-tools-to-agent
         session agent-id (alist-get 'agent_tool_ids data))))
 

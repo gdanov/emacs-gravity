@@ -1,158 +1,87 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+**IMPORTANT:** This file is your entry point. For detailed information on specific topics, use @path references below to load the relevant documentation file.
 
 ## Project Overview
 
 Emacs UI for Claude Code, inspired by Google's AntiGravity and Cursor. Provides a Magit-style working memory interface that displays Claude Code's plan, tasks, tool execution status, and supports commenting/annotations.
 
-## Architecture
+## Quick Architecture
 
 ```
 Claude Code
-    ↓ (hooks: PreToolUse, PostToolUse, PostToolUseFailure, Stop,
-    │         UserPromptSubmit, SubagentStart, SubagentStop,
-    │         SessionStart, SessionEnd, Notification, PermissionRequest)
+    ↓ (11 hook events)
 emacs-bridge (Node.js)
-    ↕ (JSON over Unix domain socket — bidirectional for PermissionRequest)
+    ↕ (Unix domain socket)
 claude-gravity.el (Emacs)
+    ↓
+magit-section UI
 ```
 
-- **emacs-bridge/**: Claude Code plugin. Shell hook scripts invoke `dist/index.js` which reads event JSON from stdin and forwards it over a Unix socket to Emacs.
-- **claude-gravity-*.el**: Emacs package split into 13 modules (see Module Structure below). Runs a Unix socket server, receives tool events, maintains state, and renders a Magit-section based UI with transient menus.
+One-shot event forwarding: Claude Code hooks invoke the bridge with event JSON, bridge forwards over socket to Emacs, then exits. All state persists in Emacs hash tables and a JSON file (`.claude/emacs-bridge-agents.json`).
 
-The socket path is `claude-gravity.sock` in the package directory (resolved via `CLAUDE_PLUGIN_ROOT` or relative to `load-file-name`). The bridge always returns valid JSON to stdout to avoid breaking Claude Code, even on errors. Plugin registration is in `marketplace.json`.
+For detailed architecture including view model, state API, and module interactions, see @ARCHITECTURE.md.
 
-## Build Commands
+## Module Structure (Summary)
 
-```bash
-# Build the Node.js bridge (required after editing emacs-bridge/src/index.ts)
-cd emacs-bridge && npm run build
+The Emacs package is split into 13 modular files:
 
-# Install Node.js dependencies (first time setup)
-cd emacs-bridge && npm install
+| Module | Purpose |
+|--------|---------|
+| `claude-gravity-core.el` | Utilities, logging, custom variables |
+| `claude-gravity-faces.el` | 37 faces and fringe bitmaps |
+| `claude-gravity-session.el` | Session state CRUD |
+| `claude-gravity-state.el` | Model API, mutation functions |
+| `claude-gravity-events.el` | Event dispatcher (11 hook types) |
+| `claude-gravity-text.el` | Text rendering: dividers, markdown, wrapping |
+| `claude-gravity-diff.el` | Inline diffs, tool/plan display |
+| `claude-gravity-render.el` | UI section rendering |
+| `claude-gravity-ui.el` | Buffers, keymaps, transient menu |
+| `claude-gravity-socket.el` | Socket server, plan review |
+| `claude-gravity-actions.el` | Permission and question buffers |
+| `claude-gravity-tmux.el` | Tmux session management |
+| `claude-gravity.el` | Thin loader |
 
-# Run bridge tests
-cd emacs-bridge && npm test
-```
+**Load order:** `core → {faces,session} → state → events → {text,diff} → render → ui ↔ socket → {actions,tmux}`
 
-For the Emacs Lisp code we use the `emacs` MCP to re-evaluate code.
-
-## Emacs Dependencies
-
-- `emacs >= 27.1`
-- `magit-section >= 3.0.0` (hierarchical collapsible sections)
-- `transient >= 0.3.0` (menu UI)
-
-## Module Structure
-
-The Emacs package is split into 13 files loaded via `claude-gravity.el` (thin loader):
-
-| Module | Lines | Purpose |
-|--------|-------|---------|
-| `claude-gravity-core.el` | ~150 | defgroup, defcustom, logging, utility helpers |
-| `claude-gravity-faces.el` | ~250 | All 37 defface declarations + fringe bitmaps |
-| `claude-gravity-session.el` | ~190 | Session hash table, CRUD, migration |
-| `claude-gravity-state.el` | ~530 | Inbox queue, file/task/agent tracking, model mutation API |
-| `claude-gravity-events.el` | ~340 | Event dispatcher (`handle-event`) |
-| `claude-gravity-text.el` | ~370 | Dividers, tables, markdown, text wrapping, labels, plan display |
-| `claude-gravity-diff.el` | ~650 | Inline diffs, tool display helpers, plan revision diff |
-| `claude-gravity-render.el` | ~990 | Section renderers, turn grouping, agent/tool/task rendering |
-| `claude-gravity-ui.el` | ~920 | Overview/session buffers, modes, keymaps, transient menu, commands |
-| `claude-gravity-socket.el` | ~700 | Socket server, plan review, permissions, AskUserQuestion |
-| `claude-gravity-actions.el` | ~480 | Permission/question action buffers |
-| `claude-gravity-tmux.el` | ~610 | Tmux session management, compose buffer, heartbeat |
-| `claude-gravity.el` | ~30 | Thin loader: requires all modules, provides `claude-gravity` |
-
-**Load order (dependency DAG):**
-```
-core → faces, session → state → events → text → diff → render → ui
-                                                  ↘ socket → actions, tmux
-```
-
-Cross-module forward references use `declare-function` and bare `defvar`.
+For line counts, key functions, and dependency details, see @ARCHITECTURE.md.
 
 ## Hook System
 
-Hook scripts in `emacs-bridge/hooks/` are registered via `hooks.json`. Each hook is a shell script that pipes stdin to the Node.js bridge with the event name as an argument. Handles 11 events:
+11 events: `SessionStart`, `SessionEnd`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, `Stop`, `Notification`, `PermissionRequest`.
 
-- **Session lifecycle**: `SessionStart`, `SessionEnd`
-- **Tool lifecycle**: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`
-- **Agent lifecycle**: `SubagentStart`, `SubagentStop`
-- **Interaction**: `UserPromptSubmit`, `Stop`, `Notification`
-- **Bidirectional**: `PermissionRequest` — Emacs sends approval/denial back over the socket (matcher: `ExitPlanMode`, timeout: 96h)
+Fire-and-forget except `PermissionRequest` (bidirectional, waits for user response in Emacs).
 
-## UI Sections
+Registered in `hooks.json` and forwarded by shell scripts to the Node.js bridge.
 
-The Emacs UI (magit-section based) displays:
-- **Overview buffer**: All sessions grouped by project, with status (idle/responding/ended)
-- **Session detail buffer**: Per-session view with header (project, status, elapsed, token usage)
-- **Turn-based response cycles**: Tools and assistant text grouped by turn with collapse
-- **Plan review**: Bidirectional PermissionRequest flow. Opens editable markdown buffer (`*Claude Plan Review: <slug>*`) with inline comments (`c`), `@claude` marker scanning, and diff view (`C-c C-d`). Approve (`C-c C-c`) auto-denies with structured feedback if any edits, comments, or `@claude` markers are detected
-- **Task tracking**: TaskCreate/TaskUpdate/TaskList lifecycle with status indicators
-- **File tracking**: Tracks read/edit/write operations per file
-- **Agent tracking**: Subagent status with nested rendering, tool attribution, transcript viewing
-- **Prompt history**: User prompts, questions (AskUserQuestion), plan approvals
-- **Permission patterns**: Generate and write allow patterns to settings.local.json
-- **Comment overlays**: Annotate tools/items with wave-underline comments
-- **Transient menu** (`?`): Full command palette — Actions, Permissions, Sessions, Navigation
+## Key Features
 
-Multi-session support: each Claude Code session gets its own buffer, identified by session ID.
+- Multi-session tracking with per-session buffers
+- Live turn-based response cycles with collapsible sections
+- Agent tracking and transcript viewing
+- Plan review with inline comments and diff
+- Task and file operation tracking
+- Permission management with pattern generation
+- Comment overlays on tools and items
+- Managed Claude Code subprocess (experimental)
 
-**Entry point**: `M-x claude-gravity-status` opens the overview buffer. Requires `(require 'claude-gravity)` and `(claude-gravity-server-start)` in init.el.
+For complete visual specification and keybindings, see @UI-SPEC.md.
 
-## Keybindings
+## Development
 
-### Main mode (`claude-gravity-mode-map`)
+For build commands, dependencies, debugging, and testing, see @DEVELOPMENT.md.
 
-| Key | Command | Description |
-|-----|---------|-------------|
-| `g` | `claude-gravity-refresh` | Refresh buffer |
-| `c` | `claude-gravity-comment-at-point` | Add comment overlay on section |
-| `P` | `claude-gravity-show-plan` | Show plan in side buffer |
-| `F` | `claude-gravity-open-plan-file` | Open plan file |
-| `t` | `claude-gravity-tail` | Collapse all, focus latest turn |
-| `T` | `claude-gravity-view-agent-transcript` | Parse agent transcript |
-| `V` | `claude-gravity-open-agent-transcript` | Open agent transcript file |
-| `A` | `claude-gravity-add-allow-pattern` | Copy allow pattern to kill ring |
-| `a` | `claude-gravity-add-allow-pattern-to-settings` | Add pattern to settings.local.json |
-| `E` | `claude-gravity-send-escape` | Send Escape to managed session |
-| `K` | `claude-gravity-stop-session` | Stop/kill managed session |
-| `D` | `claude-gravity-cleanup-sessions` | Remove ended sessions |
-| `R` | `claude-gravity-reset-status` | Reset all status to idle |
-| `X` | `claude-gravity-detect-dead-sessions` | Detect dead sessions |
-| `d` | `claude-gravity-delete-session` | Delete session at point |
-| `?` | `claude-gravity-menu` | Open transient menu |
-| `TAB` | `magit-section-toggle` | Toggle section |
-| `RET` | `claude-gravity-visit-or-toggle` | Visit session/agent or toggle |
-
-### Transient menu experiment commands (`?` then `e`)
-
-| Key | Command | Description |
-|-----|---------|-------------|
-| `e S` | `claude-gravity-experiment-eat-session` | Start hidden eat session with hooks |
-| `e s` | `claude-gravity-experiment-send-prompt` | Send prompt to eat session |
-| `e o` | `claude-gravity-experiment-show-output` | Display eat buffer output |
-| `e k` | `claude-gravity-experiment-kill-session` | Kill eat experiment session |
-
-### Plan review mode (`claude-gravity-plan-review-mode-map`)
-
-| Key | Command | Description |
-|-----|---------|-------------|
-| `C-c C-c` | `claude-gravity-plan-review-approve` | Approve (auto-denies if feedback detected) |
-| `C-c C-k` | `claude-gravity-plan-review-deny` | Deny with feedback |
-| `C-c C-d` | `claude-gravity-plan-review-diff` | Show diff vs original |
-| `c` | `claude-gravity-plan-review-comment` | Add inline comment on line |
+Use `npm run build` for the bridge and `M-x eval-defun` for Emacs Lisp changes.
 
 ## Related Documentation
 
-- `UI-SPEC.md` — visual specification for all UI states and sections
-- `plan.md` — project roadmap, current features, and open items
+Use @path to read detailed information on specific topics:
 
-## Debugging & testing
-
-The Node.js bridge logs all activity to `/tmp/emacs-bridge.log`.
-
-Agent state is persisted to `{cwd}/.claude/emacs-bridge-agents.json` (gitignored) to track active agents across bridge invocations.
-
-The emacs MCP can inspect buffers. Use that to feedback loop changes.
+- @README.md — User-facing overview for GitHub
+- @ARCHITECTURE.md — System design: modules, hooks, state API, migration history
+- @DEVELOPMENT.md — Build, debug, test workflows and dependencies
+- @UI-SPEC.md — Visual specification for all UI states and keybindings
+- @AGENTS.md — Agent workflow and landing-the-plane protocol
+- @plan.md — Project roadmap and feature backlog
+- @docs/emacs-driven-sessions.md — Managed sessions research and implementation
+- @docs/tmux-interactive-sessions.md — Tmux integration approach

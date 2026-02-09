@@ -1,5 +1,7 @@
 # Research: Sending Prompts to Claude Code from Emacs
 
+> **See also:** @/Users/gdanov/work/playground/emacs-gravity/ARCHITECTURE.md for system architecture overview and module structure.
+
 ## TL;DR
 
 Emacs can fully control a Claude Code session by spawning `claude -p --input-format stream-json --output-format stream-json` as a subprocess. Multi-turn prompts via JSON on stdin, structured responses on stdout, all hooks fire normally so gravity UI works. Can `--resume <session-id>` to take over an existing terminal session.

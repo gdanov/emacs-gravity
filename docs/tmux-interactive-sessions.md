@@ -1,5 +1,7 @@
 # Tmux-based Interactive Claude Sessions
 
+> **See also:** @/Users/gdanov/work/playground/emacs-gravity/DEVELOPMENT.md for testing procedures and tmux integration notes.
+
 ## Overview
 
 This document describes the validated approach for controlling interactive Claude CLI (without `-p` flag) from Emacs using tmux and send-keys, and compares it with the programmatic JSON I/O approach.

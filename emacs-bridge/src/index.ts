@@ -366,6 +366,56 @@ export function extractFollowingContent(transcriptPath: string, toolUseId: strin
   }
 }
 
+// Extract trailing text from agent (sidechain) transcripts.
+// Agent transcripts have isSidechain:true and different message structure.
+// Final assistant messages may contain text blocks even if preceded by tool_use.
+function extractTrailingTextFromAgent(lines: string[]): { text: string; thinking: string } {
+  const result = { text: "", thinking: "" };
+  try {
+    // Find the last non-progress assistant message by walking backwards
+    let foundThinking = false;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const obj = JSON.parse(lines[i]);
+        if (obj.type !== "assistant") continue;
+
+        const c = obj.message?.content;
+        if (!Array.isArray(c) || c.length === 0) continue;
+
+        // Extract all text and first thinking block from this message
+        // (Don't stop at tool_use - agent messages can have both)
+        for (const block of c) {
+          if (block.type === "text") {
+            const text = block.text || "";
+            if (text && text !== "(no content)") {
+              // Only use the first non-empty text block found (from walking backwards)
+              if (!result.text) {
+                result.text = text;
+              }
+            }
+          } else if (block.type === "thinking" && !foundThinking) {
+            result.thinking = block.thinking || "";
+            foundThinking = true;
+          }
+        }
+
+        // Found text or thinking - stop here
+        if (result.text || result.thinking) {
+          log(`extractTrailingTextFromAgent: found text=${!!result.text} (${result.text.length} chars), thinking=${!!result.thinking} (${result.thinking.length} chars)`);
+          return result;
+        }
+      } catch {
+        continue;
+      }
+    }
+    log(`extractTrailingTextFromAgent: no text/thinking found in ${lines.length} lines`);
+    return result;
+  } catch (e) {
+    log(`extractTrailingTextFromAgent error: ${e}`, 'error');
+    return result;
+  }
+}
+
 // Called on Stop events to capture the conclusion text.
 // The maxBytes parameter limits how much of the transcript to read,
 // preventing the next turn's data from contaminating the result.
@@ -385,6 +435,24 @@ export function extractTrailingText(transcriptPath: string, maxBytes?: number): 
       ? readHead(transcriptPath, maxBytes)
       : readTail(transcriptPath, 10 * 1024 * 1024);
     const lines = content.split("\n").filter((l) => l.length > 0);
+
+    // Detect sidechain format (agent transcripts) by checking first non-progress line
+    let isSidechain = false;
+    for (const line of lines.slice(0, 10)) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj.isSidechain !== undefined) {
+          isSidechain = obj.isSidechain === true;
+          break;
+        }
+      } catch { }
+    }
+
+    // If sidechain (agent transcript), use specialized extraction
+    if (isSidechain) {
+      log(`extractTrailingText: detected sidechain format, using agent extraction`, 'info');
+      return extractTrailingTextFromAgent(lines);
+    }
 
     // Diagnostic: log the last N transcript entries
     const diagCount = Math.min(10, lines.length);
@@ -655,7 +723,9 @@ async function main() {
 
     // SubagentStop: remove agent from active list, extract all tool IDs for fix-up
     if (eventName === "SubagentStop") {
+      log(`[SUBAGENT_STOP_ENTERED] event processing started`, 'warn');
       const agentId = (inputData as any).agent_id;
+
       if (agentId && cwd) {
         const state = readAgentState(cwd);
         if (state[sessionId]) {
@@ -663,58 +733,54 @@ async function main() {
           if (state[sessionId].length === 0) delete state[sessionId];
         }
         writeAgentState(cwd, state);
-        log(`Agent ${agentId} stopped, active list: ${state[sessionId]?.join(", ") || "(empty)"}`, 'info');
-        // Extract all tool_use IDs from agent transcript for definitive fix-up
-        if (transcriptPath) {
-          const atp = agentTranscriptPath(transcriptPath, sessionId, agentId);
-          log(`SubagentStop: expected agent transcript at ${atp}`);
+        log(`Agent ${agentId} stopped, active list: ${state[sessionId]?.join(", ") || "(empty)"}`, 'warn');
 
+        // Use agent_transcript_path provided by Claude Code (don't construct)
+        const providedAtp = (inputData as any).agent_transcript_path;
+        log(`SubagentStop: agent_id=${agentId}, has_atp=${!!providedAtp}`, 'warn');
+        if (providedAtp) {
           // Check if agent transcript file exists
-          const atpExists = existsSync(atp);
-          if (!atpExists) {
-            const parentDir = dirname(atp);
-            const parentExists = existsSync(parentDir);
-            log(`SubagentStop diagnostics: file_exists=${atpExists}, parent_dir_exists=${parentExists}`, 'warn');
-            if (!parentExists) {
-              log(`SubagentStop: parent directory does not exist: ${parentDir}`, 'error');
-              log(`SubagentStop: Claude Code may not be creating agent transcript files in expected location`, 'error');
-            }
-          }
+          const atpExists = existsSync(providedAtp);
+          log(`SubagentStop: atp_exists=${atpExists}, path=${providedAtp}`, 'warn');
 
-          const toolIds = extractAgentToolIds(atp);
+          // Extract all tool_use IDs from agent transcript for definitive fix-up
+          const toolIds = extractAgentToolIds(providedAtp);
           if (toolIds.length > 0) {
             (inputData as any).agent_tool_ids = toolIds;
-            log(`Agent ${agentId} had ${toolIds.length} tool calls`, 'info');
+            log(`Agent ${agentId} had ${toolIds.length} tool calls`, 'warn');
           }
-          (inputData as any).agent_transcript_path = atp;
 
           // Extract trailing text from agent transcript (agent's final summary)
           try {
-            let { text, thinking } = extractTrailingText(atp);
-            if (!text && !thinking && atpExists) {
-              // File exists but content not found yet — retry for transient condition
+            let { text, thinking } = extractTrailingText(providedAtp);
+            log(`SubagentStop: initial extraction: text=${text.length}B, thinking=${thinking.length}B`, 'warn');
+            if (!text && !thinking) {
+              // File doesn't exist yet OR content not found — retry to wait for file flush
               const maxRetries = 5;
               const delayMs = 250;
+              log(`SubagentStop: no text/thinking found, starting retries (max=${maxRetries}, delay=${delayMs}ms)`, 'warn');
               for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
                 await new Promise(r => setTimeout(r, delayMs));
-                ({ text, thinking } = extractTrailingText(atp));
-                log(`SubagentStop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`);
+                ({ text, thinking } = extractTrailingText(providedAtp));
+                log(`SubagentStop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`, 'warn');
               }
             }
             if (text) {
               (inputData as any).agent_stop_text = text;
-              log(`Agent ${agentId} trailing text (${text.length} chars)`);
+              log(`Agent ${agentId} stop_text set (${text.length} chars)`, 'warn');
             }
             if (thinking) {
               (inputData as any).agent_stop_thinking = thinking;
-              log(`Agent ${agentId} trailing thinking (${thinking.length} chars)`);
+              log(`Agent ${agentId} stop_thinking set (${thinking.length} chars)`, 'warn');
             }
-            if (!text && !thinking && !atpExists) {
-              log(`SubagentStop: no trailing content found and transcript file missing`, 'warn');
+            if (!text && !thinking) {
+              log(`SubagentStop: FAILED to extract any text/thinking for agent ${agentId}`, 'warn');
             }
           } catch (e) {
             log(`Failed to extract agent trailing content: ${e}`, 'error');
           }
+        } else {
+          log(`SubagentStop: Claude Code did not provide agent_transcript_path`, 'warn');
         }
       }
     }
@@ -885,6 +951,10 @@ async function main() {
         console.log(JSON.stringify({}));
       }
     } else {
+      // Debug: log what we're sending for SubagentStop
+      if (eventName === "SubagentStop") {
+        log(`[FINAL_CHECK_BEFORE_SEND] agent_stop_text=${typeof (inputData as any).agent_stop_text === 'string' ? `"${((inputData as any).agent_stop_text as string).substring(0, 40)}"` : (inputData as any).agent_stop_text}`, 'warn');
+      }
       await sendToEmacs(eventName, sessionId, cwd, pid, inputData);
       // Always output valid JSON to stdout as expected by Claude Code
       console.log(JSON.stringify({}));
