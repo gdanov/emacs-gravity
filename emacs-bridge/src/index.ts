@@ -755,15 +755,24 @@ async function main() {
             let { text, thinking } = extractTrailingText(providedAtp);
             log(`SubagentStop: initial extraction: text=${text.length}B, thinking=${thinking.length}B`, 'warn');
             if (!text && !thinking) {
-              // File doesn't exist yet OR content not found — retry to wait for file flush
-              // Some agents have slow transcript flush (up to several seconds), so use longer waits
-              const maxRetries = 15;
-              const delayMs = 500;
-              log(`SubagentStop: no text/thinking found, starting retries (max=${maxRetries}, delay=${delayMs}ms, total ~${maxRetries * delayMs}ms)`, 'warn');
-              for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
-                await new Promise(r => setTimeout(r, delayMs));
-                ({ text, thinking } = extractTrailingText(providedAtp));
-                log(`SubagentStop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`, 'warn');
+              // Only retry if the parent directory doesn't exist yet (session still initializing)
+              // If dir exists but file doesn't, agent probably won't produce a transcript
+              const parentDir = dirname(providedAtp);
+              const dirExists = existsSync(parentDir);
+              log(`SubagentStop: parent dir exists=${dirExists}, path=${parentDir}`, 'warn');
+
+              if (!dirExists) {
+                // Directory doesn't exist yet — session is still being initialized, retry
+                const maxRetries = 15;
+                const delayMs = 500;
+                log(`SubagentStop: no text/thinking found, parent dir missing, starting retries (max=${maxRetries}, delay=${delayMs}ms, total ~${maxRetries * delayMs}ms)`, 'warn');
+                for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
+                  await new Promise(r => setTimeout(r, delayMs));
+                  ({ text, thinking } = extractTrailingText(providedAtp));
+                  log(`SubagentStop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`, 'warn');
+                }
+              } else {
+                log(`SubagentStop: parent dir exists but file doesn't — agent probably won't produce transcript`, 'warn');
               }
             }
             if (text) {
