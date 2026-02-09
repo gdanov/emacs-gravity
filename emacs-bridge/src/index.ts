@@ -372,6 +372,12 @@ export function extractFollowingContent(transcriptPath: string, toolUseId: strin
 export function extractTrailingText(transcriptPath: string, maxBytes?: number): { text: string; thinking: string } {
   const result = { text: "", thinking: "" };
   try {
+    // Check if file exists before attempting to read
+    if (!existsSync(transcriptPath)) {
+      log(`extractTrailingText: file not found: ${transcriptPath}`, 'warn');
+      return result;
+    }
+
     // When maxBytes is specified (from Stop handler snapshot), read from the
     // START of the file to exclude data appended by subsequent turns.
     // Otherwise fall back to reading the tail.
@@ -661,16 +667,32 @@ async function main() {
         // Extract all tool_use IDs from agent transcript for definitive fix-up
         if (transcriptPath) {
           const atp = agentTranscriptPath(transcriptPath, sessionId, agentId);
+          log(`SubagentStop: expected agent transcript at ${atp}`);
+
+          // Check if agent transcript file exists
+          const atpExists = existsSync(atp);
+          if (!atpExists) {
+            const parentDir = dirname(atp);
+            const parentExists = existsSync(parentDir);
+            log(`SubagentStop diagnostics: file_exists=${atpExists}, parent_dir_exists=${parentExists}`, 'warn');
+            if (!parentExists) {
+              log(`SubagentStop: parent directory does not exist: ${parentDir}`, 'error');
+              log(`SubagentStop: Claude Code may not be creating agent transcript files in expected location`, 'error');
+            }
+          }
+
           const toolIds = extractAgentToolIds(atp);
           if (toolIds.length > 0) {
             (inputData as any).agent_tool_ids = toolIds;
             log(`Agent ${agentId} had ${toolIds.length} tool calls`, 'info');
           }
           (inputData as any).agent_transcript_path = atp;
+
           // Extract trailing text from agent transcript (agent's final summary)
           try {
             let { text, thinking } = extractTrailingText(atp);
-            if (!text && !thinking) {
+            if (!text && !thinking && atpExists) {
+              // File exists but content not found yet — retry for transient condition
               const maxRetries = 5;
               const delayMs = 250;
               for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
@@ -686,6 +708,9 @@ async function main() {
             if (thinking) {
               (inputData as any).agent_stop_thinking = thinking;
               log(`Agent ${agentId} trailing thinking (${thinking.length} chars)`);
+            }
+            if (!text && !thinking && !atpExists) {
+              log(`SubagentStop: no trailing content found and transcript file missing`, 'warn');
             }
           } catch (e) {
             log(`Failed to extract agent trailing content: ${e}`, 'error');
