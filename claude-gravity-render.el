@@ -312,17 +312,30 @@ Tools are grouped into response cycles (each assistant message + its tool calls)
   "Insert top-level completion messages for done agents.
 AGENTS is the list of agents for this turn.
 Shows stop_thinking and stop_text for all agents with status='done'."
+  (message "[insert-agent-completions] ENTRY: %d agents" (length agents))
   (dolist (agent agents)
+    (message "[insert-agent-completions] checking agent=%s status=%s" (alist-get 'id agent) (alist-get 'status agent))
     (when (equal (alist-get 'status agent) "done")
       (let ((agent-type (alist-get 'type agent))
             (stop-think (alist-get 'stop_thinking agent))
             (stop-text (alist-get 'stop_text agent)))
+        (message "[insert-agent-completions] agent done: id=%s has-stop-text=%s has-stop-thinking=%s"
+                 (alist-get 'id agent) (not (null stop-text)) (not (null stop-think)))
+        ;; Debug stop-text condition checks
+        (when (null stop-text)
+          (message "[insert-agent-completions] SKIP stop-text: null"))
+        (when (not (null stop-text))
+          (message "[insert-agent-completions] stop-text stringp? %s (type=%s)" (stringp stop-text) (type-of stop-text))
+          (when (stringp stop-text)
+            (message "[insert-agent-completions] stop-text empty? %s (len=%d)" (string-empty-p stop-text) (length stop-text))))
         ;; Render thinking if present
         (when (and stop-think (stringp stop-think) (not (string-empty-p stop-think)))
           (claude-gravity--insert-wrapped-with-margin
            stop-think nil 'claude-gravity-thinking))
         ;; Render text with agent type label
         (when (and stop-text (stringp stop-text) (not (string-empty-p stop-text)))
+          (message "[insert-agent-completions] RENDERING stop-text for agent=%s (len=%d)"
+                   (alist-get 'id agent) (length stop-text))
           (let ((label (format "Agent \"%s\" completed:"
                               (or agent-type "unknown"))))
             (insert (claude-gravity--indent)
