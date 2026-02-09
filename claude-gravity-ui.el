@@ -12,6 +12,7 @@
 (declare-function claude-gravity--write-allow-pattern-for-tool "claude-gravity-socket")
 (declare-function claude-gravity--send-permission-response "claude-gravity-socket")
 (declare-function claude-gravity--current-session-tmux-p "claude-gravity-tmux")
+(declare-function claude-gravity-debug-show "claude-gravity-debug")
 (defvar claude-gravity--tmux-sessions)
 
 
@@ -694,7 +695,8 @@ Returns a list from most specific to most general, with nils removed."
     ("P" "Show Plan" claude-gravity-show-plan)
     ("F" "Open plan file" claude-gravity-open-plan-file)
     ("T" "Parse transcript" claude-gravity-view-agent-transcript)
-    ("V" "Open transcript" claude-gravity-open-agent-transcript)]
+    ("V" "Open transcript" claude-gravity-open-agent-transcript)
+    ("M" "Debug messages" claude-gravity-debug-show)]
    ["Sessions"
     ("S" "Start (tmux)" claude-gravity-start-session)
     ("s" "Compose prompt" claude-gravity-compose-prompt
@@ -920,6 +922,8 @@ final reply text."
 (define-key claude-gravity-mode-map (kbd "E") 'claude-gravity-send-escape)
 
 (define-key claude-gravity-mode-map (kbd "K") 'claude-gravity-stop-session)
+
+(define-key claude-gravity-mode-map (kbd "M") 'claude-gravity-debug-show)
 
 (provide 'claude-gravity-ui)
 ;;; claude-gravity-ui.el ends here

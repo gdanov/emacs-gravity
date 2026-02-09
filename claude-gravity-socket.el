@@ -15,6 +15,8 @@
 (declare-function claude-gravity--inbox-act-question "claude-gravity-actions")
 (declare-function claude-gravity--inbox-act-plan-review "claude-gravity-actions")
 (declare-function claude-gravity--inbox-act-idle "claude-gravity-actions")
+(declare-function claude-gravity--debug-capture-message "claude-gravity-debug")
+(defvar claude-gravity--debug-messages-enabled)
 
 
 ;;; Socket Server
@@ -106,6 +108,8 @@ Accumulates partial data per connection until complete lines arrive."
         (when (> (length line) 0)
           (condition-case err
               (let* ((data (json-parse-string line :object-type 'alist :array-type 'array)))
+                (when claude-gravity--debug-messages-enabled
+                  (claude-gravity--debug-capture-message line data nil))
                 (claude-gravity--log 'debug "Claude Gravity received: %s" (alist-get 'event data))
                 (let ((event (alist-get 'event data))
                       (session-id (alist-get 'session_id data))
@@ -130,6 +134,8 @@ Accumulates partial data per connection until complete lines arrive."
                     (when event
                       (claude-gravity-handle-event event session-id cwd payload pid)))))
             (error
+             (when claude-gravity--debug-messages-enabled
+               (claude-gravity--debug-capture-message line nil err))
              (claude-gravity--log 'error "Claude Gravity JSON error: %s" err))))))
     ;; Store any remaining partial data
     (process-put proc 'claude-gravity--buffer buf)))
