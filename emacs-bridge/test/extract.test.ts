@@ -170,6 +170,51 @@ describe("extractTrailingText", () => {
     const result = extractTrailingText(f, Buffer.byteLength(content));
     expect(result.text).toBe("Here are the results.\n\nEverything looks good.");
   });
+
+  it("extracts agent summary from main transcript (SubagentStop fallback)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "agent_summary_in_main.jsonl");
+    // Simulate: agent completed and wrote summary to main transcript instead of sidechain
+    const content = [
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "explore_1", name: "Glob", input: {} }] } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "explore_1", content: "files found" }] } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Excellent! The Explore agent verified the codebase structure. Found 42 files across 5 modules." }] } }),
+    ];
+    writeFileSync(f, content.join("\n") + "\n");
+    const result = extractTrailingText(f);
+    expect(result.text).toContain("Excellent!");
+    expect(result.text).toContain("Explore agent");
+    expect(result.text).toContain("42 files");
+  });
+
+  it("returns empty for agent summary extraction when main transcript is empty", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "empty_agent_summary.jsonl");
+    writeFileSync(f, "");
+    const result = extractTrailingText(f);
+    expect(result).toEqual({ text: "", thinking: "" });
+  });
+
+  it("does not over-extract when next turn has started (tool_use boundary protection)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "agent_summary_with_next_turn.jsonl");
+    // Simulate: agent summary written, then next turn starts with new tool
+    const completedAgent = [
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "explore_1", name: "Glob", input: {} }] } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "explore_1", content: "files" }] } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Agent summary: complete" }] } }),
+    ];
+    const nextTurn = [
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "bash_2", name: "Bash", input: {} }] } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "bash_2", content: "output" }] } }),
+    ];
+    const content = [...completedAgent, ...nextTurn].join("\n") + "\n";
+    writeFileSync(f, content);
+    const result = extractTrailingText(f);
+    // Tool_use acts as a boundary, so walking backward from end hits bash_2 first and stops there
+    // This is expected behavior - prevents over-extraction when next turn has begun
+    expect(result.text).toBe("");
+  });
 });
 
 describe("readHead", () => {
