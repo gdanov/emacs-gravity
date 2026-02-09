@@ -287,9 +287,11 @@ export function extractFollowingContent(transcriptPath: string, toolUseId: strin
     for (let i = toolResultIdx + 1; i < lines.length; i++) {
       try {
         const obj = JSON.parse(lines[i]);
-        if (obj.type !== "assistant") break; // hit user or other, stop
+        // Skip non-content entries (progress, system, file-history-snapshot, etc.)
+        if (obj.type !== "assistant" && obj.type !== "user") continue;
+        if (obj.type === "user") break; // hit user message, stop
         const c = obj.message?.content;
-        if (!Array.isArray(c) || c.length === 0) break;
+        if (!Array.isArray(c) || c.length === 0) continue;
         const blockType = c[0].type;
 
         // Collect text blocks

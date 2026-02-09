@@ -573,14 +573,12 @@ Optionally store STOP-TEXT and STOP-THINKING."
         (setf (alist-get 'elapsed last-prompt)
               (float-time (time-subtract (current-time)
                                          (alist-get 'submitted last-prompt)))))
-      ;; stop_text/stop_thinking: new keys, setf conses new head → must write back
+      ;; stop_text/stop_thinking: keys pre-initialized as nil in prompt alist,
+      ;; so setf/alist-get modifies the existing cons cell in-place.
       (when stop-text
         (setf (alist-get 'stop_text last-prompt) stop-text))
       (when stop-thinking
         (setf (alist-get 'stop_thinking last-prompt) stop-thinking))
-      ;; With list storage, setf on alist-get modifies in place (conses new head),
-      ;; but since last-prompt IS the cons cell in the list, mutations are visible.
-      ;; No need to write back with setcar — alist-get/setf works on the alist directly.
       )))
 
 (defun claude-gravity-model-update-prompt-answer (session tool-use-id answer)
@@ -873,7 +871,9 @@ the model mutation API to update session state."
            (claude-gravity-model-add-prompt
             session (list (cons 'text prompt-text)
                           (cons 'submitted (current-time))
-                          (cons 'elapsed nil)))))
+                          (cons 'elapsed nil)
+                          (cons 'stop_text nil)
+                          (cons 'stop_thinking nil)))))
        (claude-gravity-model-set-claude-status session 'responding))
      ;; Session is responding — remove idle inbox items
      (claude-gravity--inbox-remove-for-session session-id 'idle)
@@ -5346,7 +5346,9 @@ Signals error if no session found or not alive."
       (claude-gravity-model-add-prompt
        session (list (cons 'text prompt)
                      (cons 'submitted (current-time))
-                     (cons 'elapsed nil)))
+                     (cons 'elapsed nil)
+                     (cons 'stop_text nil)
+                     (cons 'stop_thinking nil)))
       (claude-gravity-model-set-claude-status session 'responding)
       (claude-gravity--schedule-session-refresh sid)))
   (claude-gravity--log 'debug "Sent prompt to Claude [%s]" sid))
