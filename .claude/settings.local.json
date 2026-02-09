@@ -75,7 +75,8 @@
       "Bash(/tmp/test-extract.js << 'EOF'\nconst fs = require\\('fs'\\);\nconst path = '/Users/gdanov/.claude/projects/-Users-gdanov-work-playground-emacs-gravity/b4b95217-7fa1-45a9-bd4d-a2fe51a8d79d/subagents/agent-a5be47e.jsonl';\n\nconsole.log\\('File exists:', fs.existsSync\\(path\\)\\);\nconst content = fs.readFileSync\\(path, 'utf8'\\);\nconst lines = content.split\\('\\\\n'\\).filter\\(l => l.length > 0\\);\nconsole.log\\('Total lines:', lines.length\\);\n\n// Find last assistant message like the code does\nlet foundText = '';\nlet foundThinking = '';\nfor \\(let i = lines.length - 1; i >= 0; i--\\) {\n  try {\n    const obj = JSON.parse\\(lines[i]\\);\n    if \\(obj.type !== 'assistant'\\) continue;\n    const c = obj.message?.content;\n    if \\(!Array.isArray\\(c\\) || c.length === 0\\) continue;\n    for \\(const block of c\\) {\n      if \\(block.type === 'text'\\) {\n        const text = block.text || '';\n        if \\(text && text !== '\\(no content\\)'\\) {\n          if \\(!foundText\\) foundText = text;\n        }\n      } else if \\(block.type === 'thinking'\\) {\n        foundThinking = block.thinking || '';\n      }\n    }\n    if \\(foundText || foundThinking\\) {\n      console.log\\('FOUND! text=' + foundText.length + ' chars, thinking=' + foundThinking.length + ' chars'\\);\n      console.log\\('Text preview:', foundText.substring\\(0, 80\\)\\);\n      break;\n    }\n  } catch {}\n}\nif \\(!foundText && !foundThinking\\) {\n  console.log\\('FAILED: No text or thinking found'\\);\n}\nEOF)",
       "Bash(for ext in \"*.el\" \"*.ts\" \"*.js\" \"*.md\")",
       "Bash(do echo \"=== $ext ===\")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(cat:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

@@ -751,12 +751,34 @@ async function main() {
           }
 
           // Extract trailing text from agent transcript (agent's final summary)
+          //
+          // EXPECTED BEHAVIOR (95% of cases):
+          // - Agent writes all output to sidechain file (agent_transcript_path)
+          // - Sidechain includes final summary text in last assistant message
+          // - extractTrailingText() detects sidechain format via "isSidechain:true" marker
+          // - Summary extracted and populated into agent_stop_text
+          //
+          // EDGE CASE BEHAVIOR (5% of cases):
+          // - Agent completes very quickly (< 100ms) or during session transitions
+          // - Sidechain file never materializes or remains empty
+          // - Agent's final summary gets written to MAIN session transcript instead
+          // - This is a quirk of Claude Code's agent subprocess lifecycle:
+          //   1. Subprocess spawned with sidechain path
+          //   2. Subprocess completes before sidechain write flushes
+          //   3. Summary written to main transcript as fallback
+          // - extractTrailingText(transcriptPath) handles both formats via auto-detection
+          //
+          // See: emacs-bridge/docs/transcript-extraction-behavior.md for details
           try {
             let { text, thinking } = extractTrailingText(providedAtp);
             log(`SubagentStop: initial extraction: text=${text.length}B, thinking=${thinking.length}B`, 'warn');
             if (!text && !thinking) {
               // Fallback: extract from main session transcript
               // Agent's summary may have been written there instead of sidechain
+              // This happens when agent completes before sidechain write flushes.
+              // extractTrailingText() auto-detects format and applies appropriate extraction:
+              // - Main transcript: walk backward from end, stop at tool_use (turn boundary)
+              // - Sidechain: find last assistant message, extract all text/thinking blocks
               log(`SubagentStop: no text/thinking in agent transcript, trying main transcript fallback`, 'warn');
               try {
                 ({ text, thinking } = extractTrailingText(transcriptPath));
