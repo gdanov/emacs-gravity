@@ -308,6 +308,30 @@ Tools are grouped into response cycles (each assistant message + its tool calls)
       (insert (format "%s%s %s%s\n" (claude-gravity--indent) checkbox subject suffix)))))
 
 
+(defun claude-gravity--insert-agent-completions (agents)
+  "Insert top-level completion messages for done agents.
+AGENTS is the list of agents for this turn.
+Shows stop_thinking and stop_text for all agents with status='done'."
+  (dolist (agent agents)
+    (when (equal (alist-get 'status agent) "done")
+      (let ((agent-type (alist-get 'type agent))
+            (stop-think (alist-get 'stop_thinking agent))
+            (stop-text (alist-get 'stop_text agent)))
+        ;; Render thinking if present
+        (when (and stop-think (stringp stop-think) (not (string-empty-p stop-think)))
+          (claude-gravity--insert-wrapped-with-margin
+           stop-think nil 'claude-gravity-thinking))
+        ;; Render text with agent type label
+        (when (and stop-text (stringp stop-text) (not (string-empty-p stop-text)))
+          (let ((label (format "Agent \"%s\" completed:"
+                              (or agent-type "unknown"))))
+            (insert (claude-gravity--indent)
+                    (propertize label 'face 'claude-gravity-detail-label)
+                    "\n"))
+          (claude-gravity--insert-wrapped-with-margin
+           stop-text nil 'claude-gravity-assistant-text))))))
+
+
 (defun claude-gravity-insert-turns (session)
   "Insert unified turns section for SESSION.
 Each turn groups its prompt, tools, agents, and tasks together."
@@ -423,6 +447,8 @@ Each turn groups its prompt, tools, agents, and tasks together."
                           (propertize elapsed-str 'face 'claude-gravity-detail-label)))
                 ;; Children: tools, agents, tasks
                 (claude-gravity--insert-turn-children turn-tools turn-agents turn-tasks)
+                ;; Agent completions at top level (visible without expanding tree)
+                (claude-gravity--insert-agent-completions turn-agents)
                 ;; Trailing assistant text (conclusion after last tool)
                 ;; Dedup against last tool's post_text/post_thinking
                 (let* ((stop-think (and (listp prompt-entry) (alist-get 'stop_thinking prompt-entry)))
