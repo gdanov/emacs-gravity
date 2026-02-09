@@ -62,7 +62,8 @@
       "Bash(\n# Check if follow-mode triggers tail which does ANOTHER full tree walk\n# tail is called twice: once in follow-mode toggle, once per refresh if follow-mode is on\nsed -n '3827,3893p' /Users/gdanov/work/playground/emacs-gravity/claude-gravity.el | grep -n \"magit-section\\|dolist\"\n)",
       "Bash(xxd:*)",
       "Bash(\n# Find render-overview to see if it also calls apply-visibility\ngrep -n \"defun claude-gravity--render-overview\" /Users/gdanov/work/playground/emacs-gravity/claude-gravity.el\n)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(rm -f /Users/gdanov/work/playground/emacs-gravity/claude-gravity-*.el)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

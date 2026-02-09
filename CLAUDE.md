@@ -19,7 +19,7 @@ claude-gravity.el (Emacs)
 ```
 
 - **emacs-bridge/**: Claude Code plugin. Shell hook scripts invoke `dist/index.js` which reads event JSON from stdin and forwards it over a Unix socket to Emacs.
-- **claude-gravity.el**: Emacs package. Runs a Unix socket server, receives tool events, maintains state, and renders a Magit-section based UI with transient menus.
+- **claude-gravity-*.el**: Emacs package split into 13 modules (see Module Structure below). Runs a Unix socket server, receives tool events, maintains state, and renders a Magit-section based UI with transient menus.
 
 The socket path is `claude-gravity.sock` in the package directory (resolved via `CLAUDE_PLUGIN_ROOT` or relative to `load-file-name`). The bridge always returns valid JSON to stdout to avoid breaking Claude Code, even on errors. Plugin registration is in `marketplace.json`.
 
@@ -43,6 +43,34 @@ For the Emacs Lisp code we use the `emacs` MCP to re-evaluate code.
 - `emacs >= 27.1`
 - `magit-section >= 3.0.0` (hierarchical collapsible sections)
 - `transient >= 0.3.0` (menu UI)
+
+## Module Structure
+
+The Emacs package is split into 13 files loaded via `claude-gravity.el` (thin loader):
+
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| `claude-gravity-core.el` | ~150 | defgroup, defcustom, logging, utility helpers |
+| `claude-gravity-faces.el` | ~250 | All 37 defface declarations + fringe bitmaps |
+| `claude-gravity-session.el` | ~190 | Session hash table, CRUD, migration |
+| `claude-gravity-state.el` | ~530 | Inbox queue, file/task/agent tracking, model mutation API |
+| `claude-gravity-events.el` | ~340 | Event dispatcher (`handle-event`) |
+| `claude-gravity-text.el` | ~370 | Dividers, tables, markdown, text wrapping, labels, plan display |
+| `claude-gravity-diff.el` | ~650 | Inline diffs, tool display helpers, plan revision diff |
+| `claude-gravity-render.el` | ~990 | Section renderers, turn grouping, agent/tool/task rendering |
+| `claude-gravity-ui.el` | ~920 | Overview/session buffers, modes, keymaps, transient menu, commands |
+| `claude-gravity-socket.el` | ~700 | Socket server, plan review, permissions, AskUserQuestion |
+| `claude-gravity-actions.el` | ~480 | Permission/question action buffers |
+| `claude-gravity-tmux.el` | ~610 | Tmux session management, compose buffer, heartbeat |
+| `claude-gravity.el` | ~30 | Thin loader: requires all modules, provides `claude-gravity` |
+
+**Load order (dependency DAG):**
+```
+core → faces, session → state → events → text → diff → render → ui
+                                                  ↘ socket → actions, tmux
+```
+
+Cross-module forward references use `declare-function` and bare `defvar`.
 
 ## Hook System
 

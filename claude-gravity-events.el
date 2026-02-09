@@ -1,0 +1,342 @@
+;;; claude-gravity-events.el --- Event handling for Claude Gravity  -*- lexical-binding: t; -*-
+
+;;; Code:
+
+(require 'claude-gravity-core)
+(require 'claude-gravity-session)
+(require 'claude-gravity-state)
+
+; Forward declarations for functions/vars in modules loaded later
+(defvar claude-gravity--tmux-sessions)
+(defvar claude-gravity--tmux-pending)
+(declare-function claude-gravity--handle-tool-permission "claude-gravity-socket")
+(declare-function claude-gravity--handle-ask-user-question "claude-gravity-socket")
+(declare-function claude-gravity--handle-plan-review "claude-gravity-socket")
+(declare-function claude-gravity--update-notification-indicator "claude-gravity-socket")
+(declare-function claude-gravity--clear-notification-indicator "claude-gravity-socket")
+(declare-function claude-gravity--tmux-ensure-heartbeat "claude-gravity-tmux")
+(declare-function claude-gravity--plan-revision-diff "claude-gravity-diff")
+(declare-function claude-gravity--plan-review-apply-margin-indicators "claude-gravity-diff")
+
+
+;;; Event handling
+;;
+;; Turn demarcation
+;; ----------------
+;; A "turn" groups a prompt with its resulting tools, agents, and tasks.
+;; Turns are advanced (current-turn incremented + prompt entry created) by:
+;;
+;;   1. UserPromptSubmit — user sends a new prompt
+;;   2. ExitPlanMode (PostToolUse) — user approves a plan, creating a
+;;      "[Plan approved]" phase-boundary prompt.  Tools after approval
+;;      belong to the new execution turn.
+;;   3. AskUserQuestion (PreToolUse) — question is shown to user, creating
+;;      a question prompt.  The answer and subsequent tools belong to
+;;      the question's turn.
+;;
+;; Each tool, agent, and task captures the current turn number at creation
+;; time.  The renderer groups items by turn and shows distinct indicators:
+;;   ❯  normal prompt
+;;   ?  question (AskUserQuestion)
+;;   →  phase boundary (ExitPlanMode)
+;;
+;; permission_mode (from Claude Code hook payloads) is stored on tool
+;; entries and the session for display purposes but is NOT used as a
+;; turn boundary signal.
+
+(defun claude-gravity-handle-event (event session-id cwd data &optional pid)
+  "Handle EVENT for SESSION-ID (with CWD) carrying DATA.
+Optional PID is the Claude Code process ID.
+This is the hooks adapter — it parses hook event payloads and calls
+the model mutation API to update session state."
+  (unless session-id
+    (setq session-id "legacy")
+    (setq cwd (or cwd "")))
+  (claude-gravity--log 'debug "Handling event: %s for session: %s" event session-id)
+  ;; Update PID, last-event-time, and slug on every event
+  (let ((existing (claude-gravity--get-session session-id)))
+    (when existing
+      (claude-gravity-model-update-session-meta
+       existing :pid pid :slug (alist-get 'slug data))))
+  (pcase event
+    ("SessionStart"
+     (let ((existing (claude-gravity--get-session session-id)))
+       (when existing
+         (claude-gravity--reset-session existing)))
+     ;; Re-key tmux pending session: match temp-id from bridge payload
+     (let* ((temp-id (alist-get 'temp_id data))
+            (tmux-name (and temp-id (gethash temp-id claude-gravity--tmux-pending))))
+       (when tmux-name
+         (remhash temp-id claude-gravity--tmux-pending)
+         (let ((temp-session (gethash temp-id claude-gravity--sessions)))
+           (when temp-session
+             ;; Re-key session from temp-id to real session-id
+             (remhash temp-id claude-gravity--sessions)
+             (plist-put temp-session :session-id session-id)
+             (plist-put temp-session :temp-id temp-id)
+             (puthash session-id temp-session claude-gravity--sessions)
+             ;; Register tmux mapping under real session-id
+             (puthash session-id tmux-name claude-gravity--tmux-sessions)
+             ;; Rename buffer
+             (let ((old-buf (plist-get temp-session :buffer)))
+               (when (and old-buf (buffer-live-p old-buf))
+                 (let ((new-name (claude-gravity--session-buffer-name temp-session)))
+                   (with-current-buffer old-buf
+                     (rename-buffer new-name t)
+                     (setq claude-gravity--buffer-session-id session-id)))))
+             ;; Reset conversational state (essential for /clear re-keying)
+             (claude-gravity--reset-session temp-session)))))
+     (unless (equal (alist-get 'source data) "startup")
+       (claude-gravity--ensure-session session-id cwd)))
+
+    ("SessionEnd"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity-model-session-end session)
+         ;; If tmux process is still alive, this is a /clear — preserve mapping
+         ;; for SessionStart re-keying.  Otherwise clean up.
+         (let ((tmux-name (gethash session-id claude-gravity--tmux-sessions)))
+           (if (and tmux-name (claude-gravity--tmux-alive-p tmux-name))
+               ;; /clear — put temp-id back into pending for next SessionStart
+               (let ((temp-id (plist-get session :temp-id)))
+                 (when temp-id
+                   (puthash temp-id tmux-name claude-gravity--tmux-pending)
+                   ;; Move session back under temp-id so SessionStart re-keying finds it
+                   (puthash temp-id session claude-gravity--sessions)
+                   (remhash session-id claude-gravity--sessions)
+                   (remhash session-id claude-gravity--tmux-sessions)))
+             (remhash session-id claude-gravity--tmux-sessions)))))
+     ;; Remove all inbox items for this session
+     (claude-gravity--inbox-remove-for-session session-id)
+     (claude-gravity--clear-notification-indicator))
+
+    ("StatusLine"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (let-alist data
+           (when .cost\.total_cost_usd
+             (plist-put session :cost .cost\.total_cost_usd))
+           (when .context_window\.used_percentage
+             (plist-put session :context-pct
+                        (truncate .context_window\.used_percentage)))
+           (when .model\.display_name
+             (plist-put session :model-name .model\.display_name))
+           (when .model\.id
+             (plist-put session :model-id .model\.id))
+           (when .context_window\.total_input_tokens
+             (plist-put session :sl-input-tokens
+                        (truncate .context_window\.total_input_tokens)))
+           (when .context_window\.total_output_tokens
+             (plist-put session :sl-output-tokens
+                        (truncate .context_window\.total_output_tokens)))
+           (when .cost\.total_duration_ms
+             (plist-put session :sl-duration-ms
+                        (truncate .cost\.total_duration_ms)))
+           (when .cost\.total_lines_added
+             (plist-put session :sl-lines-added
+                        (truncate .cost\.total_lines_added)))
+           (when .cost\.total_lines_removed
+             (plist-put session :sl-lines-removed
+                        (truncate .cost\.total_lines_removed))))
+         (claude-gravity--schedule-refresh))))
+
+    ("UserPromptSubmit"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (prompt-text (claude-gravity--strip-system-xml
+                          (alist-get 'prompt data))))
+       ;; Dedup: if tmux-prompt-sent flag is set, we already created the
+       ;; prompt entry in send-prompt — skip to avoid duplicate
+       (if (plist-get session :tmux-prompt-sent)
+           (plist-put session :tmux-prompt-sent nil)
+         (when prompt-text
+           (claude-gravity-model-add-prompt
+            session (list (cons 'text prompt-text)
+                          (cons 'submitted (current-time))
+                          (cons 'elapsed nil)
+                          (cons 'stop_text nil)
+                          (cons 'stop_thinking nil)))))
+       (claude-gravity-model-set-claude-status session 'responding))
+     ;; Session is responding — remove idle inbox items
+     (claude-gravity--inbox-remove-for-session session-id 'idle)
+     (claude-gravity--clear-notification-indicator))
+
+    ("Stop"
+     (claude-gravity--clear-notification-indicator)
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity-model-set-claude-status session 'idle)
+         (claude-gravity-model-finalize-last-prompt
+          session
+          (alist-get 'stop_text data)
+          (alist-get 'stop_thinking data))
+         (claude-gravity-model-set-token-usage
+          session (alist-get 'token_usage data))
+         ;; Replace any existing idle inbox item for this session
+         (claude-gravity--inbox-remove-for-session session-id 'idle)
+         (let* ((turn (plist-get session :current-turn))
+                (stop-text (alist-get 'stop_text data))
+                (snippet (when stop-text
+                           (truncate-string-to-width
+                            (replace-regexp-in-string "\n" " " stop-text) 80))))
+           (claude-gravity--inbox-add 'idle session-id
+                                      `((turn . ,turn) (snippet . ,snippet)) nil)))))
+
+    ("SubagentStart"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (new-agent (list (cons 'agent_id (alist-get 'agent_id data))
+                             (cons 'type (alist-get 'agent_type data))
+                             (cons 'status "running")
+                             (cons 'timestamp (current-time))
+                             (cons 'turn (or (plist-get session :current-turn) 0))
+                             (cons 'agent-tools [])
+                             (cons 'transcript_path (alist-get 'agent_transcript_path data)))))
+       (claude-gravity-model-add-agent session new-agent)))
+
+    ("SubagentStop"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (agent-id (alist-get 'agent_id data)))
+       (claude-gravity-model-complete-agent
+        session agent-id
+        :transcript-path (alist-get 'agent_transcript_path data)
+        :stop-text (alist-get 'agent_stop_text data)
+        :stop-thinking (alist-get 'agent_stop_thinking data))
+       (claude-gravity-model-move-tools-to-agent
+        session agent-id (alist-get 'agent_tool_ids data))))
+
+    ("PreToolUse"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (parent-agent-id (alist-get 'parent_agent_id data))
+            (new-tool (list (cons 'tool_use_id (alist-get 'tool_use_id data))
+                            (cons 'name (alist-get 'tool_name data))
+                            (cons 'input (alist-get 'tool_input data))
+                            (cons 'status "running")
+                            (cons 'timestamp (current-time))
+                            (cons 'turn (or (plist-get session :current-turn) 0))
+                            (cons 'permission_mode (alist-get 'permission_mode data))
+                            (cons 'assistant_text (alist-get 'assistant_text data))
+                            (cons 'assistant_thinking (alist-get 'assistant_thinking data))
+                            (cons 'parent_agent_id parent-agent-id))))
+       (claude-gravity-model-add-tool
+        session new-tool parent-agent-id
+        (alist-get 'candidate_agent_ids data))
+       (claude-gravity-model-set-permission-mode
+        session (alist-get 'permission_mode data))
+       (claude-gravity-model-set-claude-status session 'responding)
+       (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
+       (claude-gravity--track-task session "PreToolUse" (alist-get 'tool_name data)
+                                   (alist-get 'tool_input data) (alist-get 'tool_use_id data))
+       ;; AskUserQuestion creates a question prompt and advances the turn
+       (when (equal (alist-get 'tool_name data) "AskUserQuestion")
+         (let* ((input (alist-get 'tool_input data))
+                (questions (alist-get 'questions input))
+                (first-q (and (vectorp questions) (> (length questions) 0)
+                              (aref questions 0)))
+                (q-text (and first-q (alist-get 'question first-q))))
+           (when q-text
+             (claude-gravity-model-add-prompt
+              session (list (cons 'text q-text)
+                            (cons 'type 'question)
+                            (cons 'tool_use_id (alist-get 'tool_use_id data))
+                            (cons 'submitted (current-time))
+                            (cons 'elapsed nil)
+                            (cons 'answer nil))))))))
+
+    ("PostToolUse"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (parent-agent-id (alist-get 'parent_agent_id data))
+            (tool-use-id (alist-get 'tool_use_id data))
+            (post-text (alist-get 'post_tool_text data))
+            (post-think (alist-get 'post_tool_thinking data)))
+       ;; Complete tool with response
+       (claude-gravity-model-complete-tool
+        session tool-use-id parent-agent-id
+        (alist-get 'tool_response data))
+       ;; Store post-tool text and thinking if present
+       (when (and tool-use-id post-text)
+         (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+           (when tool
+             (setf (alist-get 'post_text tool) post-text))))
+       (when (and tool-use-id post-think)
+         (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+           (when tool
+             (setf (alist-get 'post_thinking tool) post-think))))
+       (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
+       (claude-gravity--track-task session "PostToolUse" (alist-get 'tool_name data)
+                                   (alist-get 'tool_input data) tool-use-id
+                                   (alist-get 'tool_response data))
+       ;; Store AskUserQuestion answer
+       (when (equal (alist-get 'tool_name data) "AskUserQuestion")
+         (claude-gravity-model-update-prompt-answer
+          session tool-use-id
+          (claude-gravity--extract-ask-answer (alist-get 'tool_response data))))
+       ;; Detect plan presentation
+       (when (equal (alist-get 'tool_name data) "ExitPlanMode")
+         (let ((plan-content (alist-get 'plan (alist-get 'tool_input data)))
+               (file-path (alist-get 'filePath (alist-get 'tool_response data)))
+               (allowed-prompts (alist-get 'allowedPrompts (alist-get 'tool_input data))))
+           (when plan-content
+             (claude-gravity-model-set-plan
+              session (list :content plan-content
+                            :file-path file-path
+                            :allowed-prompts (append allowed-prompts nil)))))
+         ;; Advance turn — plan approval is a phase boundary
+         (claude-gravity-model-add-prompt
+          session (list (cons 'text "[Plan approved]")
+                        (cons 'type 'phase-boundary)
+                        (cons 'submitted (current-time))
+                        (cons 'elapsed nil))))))
+
+    ("PostToolUseFailure"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (parent-agent-id (alist-get 'parent_agent_id data))
+            (tool-use-id (alist-get 'tool_use_id data))
+            (error-msg (or (alist-get 'error data) "Unknown error"))
+            (post-text (alist-get 'post_tool_text data))
+            (post-think (alist-get 'post_tool_thinking data)))
+       ;; Complete tool with error as result, then set status to error
+       (claude-gravity-model-complete-tool
+        session tool-use-id parent-agent-id
+        (format "[ERROR] %s" error-msg))
+       ;; Override status from "done" to "error"
+       (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+         (when tool
+           (setf (alist-get 'status tool) "error")))
+       ;; Store post-tool text and thinking if present
+       (when (and tool-use-id post-text)
+         (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+           (when tool
+             (setf (alist-get 'post_text tool) post-text))))
+       (when (and tool-use-id post-think)
+         (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+           (when tool
+             (setf (alist-get 'post_thinking tool) post-think))))
+       (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
+       (claude-gravity--track-task session "PostToolUseFailure" (alist-get 'tool_name data)
+                                   (alist-get 'tool_input data) tool-use-id
+                                   error-msg)))
+
+    ("Notification"
+     (let* ((session (claude-gravity--get-session session-id))
+            (msg (or (alist-get 'message data) ""))
+            (ntype (alist-get 'notification_type data))
+            (label (if session
+                       (claude-gravity--session-label session)
+                     (claude-gravity--session-short-id session-id))))
+       (when session
+         (claude-gravity-model-add-notification
+          session (list (cons 'message msg)
+                        (cons 'type ntype)
+                        (cons 'timestamp (current-time))))
+         ;; Handle reset/clear
+         (when (string-match-p "\\(?:reset\\|clear\\)" msg)
+           (claude-gravity--reset-session session))
+         ;; Update mode-line indicator
+         (claude-gravity--update-notification-indicator ntype label))
+       (claude-gravity--log 'debug "Claude [%s]: %s" label msg))))
+
+  (claude-gravity--schedule-refresh)
+  (when session-id
+    (claude-gravity--schedule-session-refresh session-id)))
+
+(provide 'claude-gravity-events)
+;;; claude-gravity-events.el ends here
