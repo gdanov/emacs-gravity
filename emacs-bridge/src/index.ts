@@ -756,9 +756,10 @@ async function main() {
             log(`SubagentStop: initial extraction: text=${text.length}B, thinking=${thinking.length}B`, 'warn');
             if (!text && !thinking) {
               // File doesn't exist yet OR content not found — retry to wait for file flush
-              const maxRetries = 5;
-              const delayMs = 250;
-              log(`SubagentStop: no text/thinking found, starting retries (max=${maxRetries}, delay=${delayMs}ms)`, 'warn');
+              // Some agents have slow transcript flush (up to several seconds), so use longer waits
+              const maxRetries = 15;
+              const delayMs = 500;
+              log(`SubagentStop: no text/thinking found, starting retries (max=${maxRetries}, delay=${delayMs}ms, total ~${maxRetries * delayMs}ms)`, 'warn');
               for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
                 await new Promise(r => setTimeout(r, delayMs));
                 ({ text, thinking } = extractTrailingText(providedAtp));
