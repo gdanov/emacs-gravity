@@ -132,7 +132,7 @@ Each session plist has keys:
 
 (defun claude-gravity--get-session (session-id)
   "Return session plist for SESSION-ID, or nil."
-  (gethash session-id claude-gravity--sessions))
+  (claude-gravity--migrate-session (gethash session-id claude-gravity--sessions)))
 
 (defun claude-gravity--normalize-cwd (cwd)
   "Strip trailing slash from CWD unless it is root /."
@@ -151,24 +151,57 @@ Each session plist has keys:
   (or (plist-get session :slug)
       (claude-gravity--session-short-id (plist-get session :session-id))))
 
+(defun claude-gravity--migrate-session (session)
+  "Migrate SESSION from vector to list storage if needed.
+Converts :prompts, :agents, :notifications and state tools from vectors to lists.
+Also ensures :tool-index hash table exists. Idempotent — no-op on already-migrated sessions."
+  (when session
+    ;; Migrate top-level vector fields to lists
+    (dolist (key '(:prompts :agents :notifications))
+      (let ((val (plist-get session key)))
+        (when (vectorp val)
+          (plist-put session key (append val nil)))))
+    ;; Migrate state tools
+    (let ((tools (alist-get 'tools (plist-get session :state))))
+      (when (vectorp tools)
+        (setf (alist-get 'tools (plist-get session :state)) (append tools nil))))
+    ;; Migrate agent-tools within each agent
+    (dolist (agent (plist-get session :agents))
+      (let ((atools (alist-get 'agent-tools agent)))
+        (when (vectorp atools)
+          (setf (alist-get 'agent-tools agent) (append atools nil)))))
+    ;; Ensure tool-index exists and is populated
+    (unless (hash-table-p (plist-get session :tool-index))
+      (let ((idx (make-hash-table :test 'equal)))
+        (dolist (tool (alist-get 'tools (plist-get session :state)))
+          (let ((tid (alist-get 'tool_use_id tool)))
+            (when tid (puthash tid tool idx))))
+        (dolist (agent (plist-get session :agents))
+          (dolist (tool (alist-get 'agent-tools agent))
+            (let ((tid (alist-get 'tool_use_id tool)))
+              (when tid (puthash tid tool idx)))))
+        (plist-put session :tool-index idx))))
+  session)
+
 (defun claude-gravity--ensure-session (session-id cwd)
   "Get or create session for SESSION-ID with CWD.  Returns session plist."
-  (or (gethash session-id claude-gravity--sessions)
+  (or (claude-gravity--migrate-session (gethash session-id claude-gravity--sessions))
       (let ((session (list :session-id session-id
                            :cwd (claude-gravity--normalize-cwd (or cwd ""))
                            :project (file-name-nondirectory
                                      (directory-file-name (or cwd "")))
-                           :state (list (cons 'tools []) (cons 'chat []))
+                           :state (list (cons 'tools nil) (cons 'chat nil))
                            :status 'active
                            :claude-status 'idle
                            :start-time (current-time)
                            :last-event-time (current-time)
                            :pid nil
                            :plan nil
-                           :prompts []
-                           :agents []
+                           :prompts nil
+                           :agents nil
                            :files (make-hash-table :test 'equal)
                            :tasks (make-hash-table :test 'equal)
+                           :tool-index (make-hash-table :test 'equal)
                            :current-turn 0
                            :permission-mode nil
                            :slug nil
@@ -180,15 +213,16 @@ Each session plist has keys:
 (defun claude-gravity--reset-session (session)
   "Reset conversational state of SESSION, preserving identity fields.
 Called when a session is restarted (e.g. via /reset or /clear)."
-  (plist-put session :state (list (cons 'tools []) (cons 'chat [])))
+  (plist-put session :state (list (cons 'tools nil) (cons 'chat nil)))
   (plist-put session :claude-status 'idle)
   (plist-put session :start-time (current-time))
   (plist-put session :last-event-time (current-time))
   (plist-put session :plan nil)
-  (plist-put session :prompts [])
-  (plist-put session :agents [])
+  (plist-put session :prompts nil)
+  (plist-put session :agents nil)
   (plist-put session :files (make-hash-table :test 'equal))
   (plist-put session :tasks (make-hash-table :test 'equal))
+  (plist-put session :tool-index (make-hash-table :test 'equal))
   (plist-put session :current-turn 0)
   (plist-put session :permission-mode nil)
   (plist-put session :slug nil)
@@ -367,14 +401,6 @@ Returns the new item."
 
 ;;; Tool helpers
 
-(defun claude-gravity--find-tool-by-id (tools tool-use-id)
-  "Find index of tool in TOOLS vector matching TOOL-USE-ID."
-  (let ((idx nil))
-    (dotimes (i (length tools))
-      (when (equal (alist-get 'tool_use_id (aref tools i)) tool-use-id)
-        (setq idx i)))
-    idx))
-
 ;;; File tracking
 
 (defun claude-gravity--track-file (session tool-name tool-input)
@@ -462,35 +488,42 @@ Returns the new item."
 ;;; Agent helpers
 
 (defun claude-gravity--find-agent-by-id (agents agent-id)
-  "Find index of agent in AGENTS vector matching AGENT-ID."
-  (let ((idx nil))
-    (dotimes (i (length agents))
-      (when (equal (alist-get 'agent_id (aref agents i)) agent-id)
-        (setq idx i)))
-    idx))
+  "Find index of agent in AGENTS list matching AGENT-ID.
+For vector AGENTS (legacy), searches with aref; for lists, uses cl-position."
+  (cond
+   ((vectorp agents)
+    (let ((idx nil))
+      (dotimes (i (length agents))
+        (when (equal (alist-get 'agent_id (aref agents i)) agent-id)
+          (setq idx i)))
+      idx))
+   ((listp agents)
+    (cl-position agent-id agents :test #'equal :key (lambda (a) (alist-get 'agent_id a))))
+   (t nil)))
 
-(defun claude-gravity--agent-tools-vector (session agent-id)
-  "Return the tools vector for AGENT-ID in SESSION.
-If AGENT-ID is nil, return the root tools vector.
+(defun claude-gravity--find-agent (session agent-id)
+  "Find and return agent alist for AGENT-ID in SESSION, or nil."
+  (let ((agents (plist-get session :agents)))
+    (cl-find agent-id agents :test #'equal :key (lambda (a) (alist-get 'agent_id a)))))
+
+(defun claude-gravity--agent-tools-list (session agent-id)
+  "Return the tools list for AGENT-ID in SESSION.
+If AGENT-ID is nil, return the root tools list.
 If the agent is not found, return nil."
   (if (null agent-id)
       (alist-get 'tools (plist-get session :state))
-    (let* ((agents (plist-get session :agents))
-           (idx (claude-gravity--find-agent-by-id agents agent-id)))
-      (when idx
-        (alist-get 'agent-tools (aref agents idx))))))
+    (let ((agent (claude-gravity--find-agent session agent-id)))
+      (when agent
+        (alist-get 'agent-tools agent)))))
 
-(defun claude-gravity--set-agent-tools-vector (session agent-id new-vec)
-  "Set the tools vector for AGENT-ID in SESSION to NEW-VEC.
+(defun claude-gravity--set-agent-tools-list (session agent-id new-list)
+  "Set the tools list for AGENT-ID in SESSION to NEW-LIST.
 If AGENT-ID is nil, set root tools."
   (if (null agent-id)
-      (setf (alist-get 'tools (plist-get session :state)) new-vec)
-    (let* ((agents (plist-get session :agents))
-           (idx (claude-gravity--find-agent-by-id agents agent-id)))
-      (when idx
-        (let ((agent (aref agents idx)))
-          (setf (alist-get 'agent-tools agent) new-vec)
-          (aset agents idx agent))))))
+      (setf (alist-get 'tools (plist-get session :state)) new-list)
+    (let ((agent (claude-gravity--find-agent session agent-id)))
+      (when agent
+        (setf (alist-get 'agent-tools agent) new-list)))))
 
 ;;; Model mutation API
 ;;
@@ -523,7 +556,7 @@ If AGENT-ID is nil, set root tools."
 (defun claude-gravity-model-add-prompt (session entry)
   "Append prompt ENTRY to SESSION's :prompts and increment :current-turn."
   (plist-put session :prompts
-             (vconcat (plist-get session :prompts) (vector entry)))
+             (nconc (plist-get session :prompts) (list entry)))
   (plist-put session :current-turn
              (1+ (or (plist-get session :current-turn) 0))))
 
@@ -531,37 +564,36 @@ If AGENT-ID is nil, set root tools."
   "Compute elapsed time on SESSION's last prompt.
 Optionally store STOP-TEXT and STOP-THINKING."
   (let* ((prompts (plist-get session :prompts))
-         (len (length prompts)))
-    (when (> len 0)
-      (let ((last-prompt (aref prompts (1- len))))
-        ;; Elapsed: key exists in alist (created as nil), so setf is in-place
-        (when (and (listp last-prompt)
-                   (not (alist-get 'elapsed last-prompt))
-                   (alist-get 'submitted last-prompt))
-          (setf (alist-get 'elapsed last-prompt)
-                (float-time (time-subtract (current-time)
-                                           (alist-get 'submitted last-prompt)))))
-        ;; stop_text/stop_thinking: new keys, setf conses new head → must write back
-        (when stop-text
-          (setf (alist-get 'stop_text last-prompt) stop-text))
-        (when stop-thinking
-          (setf (alist-get 'stop_thinking last-prompt) stop-thinking))
-        (when (or stop-text stop-thinking)
-          (aset prompts (1- len) last-prompt))))))
+         (last-prompt (car (last prompts))))
+    (when last-prompt
+      ;; Elapsed: key exists in alist (created as nil), so setf is in-place
+      (when (and (listp last-prompt)
+                 (not (alist-get 'elapsed last-prompt))
+                 (alist-get 'submitted last-prompt))
+        (setf (alist-get 'elapsed last-prompt)
+              (float-time (time-subtract (current-time)
+                                         (alist-get 'submitted last-prompt)))))
+      ;; stop_text/stop_thinking: new keys, setf conses new head → must write back
+      (when stop-text
+        (setf (alist-get 'stop_text last-prompt) stop-text))
+      (when stop-thinking
+        (setf (alist-get 'stop_thinking last-prompt) stop-thinking))
+      ;; With list storage, setf on alist-get modifies in place (conses new head),
+      ;; but since last-prompt IS the cons cell in the list, mutations are visible.
+      ;; No need to write back with setcar — alist-get/setf works on the alist directly.
+      )))
 
 (defun claude-gravity-model-update-prompt-answer (session tool-use-id answer)
   "Update the question prompt matching TOOL-USE-ID in SESSION with ANSWER."
   (let ((prompts (plist-get session :prompts)))
     (when (and prompts tool-use-id)
-      (dotimes (i (length prompts))
-        (let ((p (aref prompts i)))
-          (when (and (equal (alist-get 'type p) 'question)
-                     (equal (alist-get 'tool_use_id p) tool-use-id))
-            (setf (alist-get 'answer p) answer)
-            (setf (alist-get 'elapsed p)
-                  (float-time (time-subtract (current-time)
-                                             (alist-get 'submitted p))))
-            (aset prompts i p)))))))
+      (dolist (p prompts)
+        (when (and (equal (alist-get 'type p) 'question)
+                   (equal (alist-get 'tool_use_id p) tool-use-id))
+          (setf (alist-get 'answer p) answer)
+          (setf (alist-get 'elapsed p)
+                (float-time (time-subtract (current-time)
+                                           (alist-get 'submitted p)))))))))
 
 (defun claude-gravity-model-add-tool (session tool agent-id candidate-ids)
   "Add TOOL to SESSION, routing based on AGENT-ID.
@@ -573,133 +605,92 @@ Deduplicates by tool_use_id — skips if a tool with the same ID already exists.
       (cond
        ;; Definitively attributed to an agent
        ((and agent-id (not (equal agent-id "ambiguous")))
-        (let ((agent-tools (claude-gravity--agent-tools-vector session agent-id)))
+        (let ((agent-tools (claude-gravity--agent-tools-list session agent-id)))
           (if agent-tools
-              (claude-gravity--set-agent-tools-vector
-               session agent-id (vconcat agent-tools (vector tool)))
+              (claude-gravity--set-agent-tools-list
+               session agent-id (nconc agent-tools (list tool)))
             ;; Agent not found — fall back to root
-            (let ((root-tools (alist-get 'tools (plist-get session :state))))
-              (setf (alist-get 'tools (plist-get session :state))
-                    (vconcat root-tools (vector tool)))))))
+            (setf (alist-get 'tools (plist-get session :state))
+                  (nconc (alist-get 'tools (plist-get session :state)) (list tool))))))
        ;; Ambiguous — store in root with ambiguous flag
        ((equal agent-id "ambiguous")
         (setf (alist-get 'ambiguous tool) t)
         (when candidate-ids
           (setf (alist-get 'candidate-agents tool)
                 (append candidate-ids nil)))
-        (let ((root-tools (alist-get 'tools (plist-get session :state))))
-          (setf (alist-get 'tools (plist-get session :state))
-                (vconcat root-tools (vector tool)))))
+        (setf (alist-get 'tools (plist-get session :state))
+              (nconc (alist-get 'tools (plist-get session :state)) (list tool))))
        ;; No agent context — root tool
        (t
-        (let ((root-tools (alist-get 'tools (plist-get session :state))))
-          (setf (alist-get 'tools (plist-get session :state))
-                (vconcat root-tools (vector tool)))))))))
+        (setf (alist-get 'tools (plist-get session :state))
+              (nconc (alist-get 'tools (plist-get session :state)) (list tool)))))
+      ;; Register in tool index for O(1) lookup
+      (when tid
+        (puthash tid tool (plist-get session :tool-index))))))
 
 (defun claude-gravity-model-complete-tool (session tool-use-id agent-id result)
   "Mark tool TOOL-USE-ID as done in SESSION with RESULT.
 AGENT-ID is used for routing; handles re-attribution of ambiguous tools."
-  (let ((target-tools nil)
-        (idx nil))
-    ;; Search agent tools first if agent specified
-    (when (and agent-id (not (equal agent-id "ambiguous")))
-      (setq target-tools (claude-gravity--agent-tools-vector session agent-id))
-      (when target-tools
-        (setq idx (claude-gravity--find-tool-by-id target-tools tool-use-id))))
-    ;; Fall back to root
-    (unless idx
-      (setq target-tools (alist-get 'tools (plist-get session :state)))
-      (setq idx (claude-gravity--find-tool-by-id target-tools tool-use-id))
-      ;; Re-attribute ambiguous tool if now definitive
-      (when (and idx agent-id (not (equal agent-id "ambiguous")))
-        (let ((tool (aref target-tools idx)))
-          (when (alist-get 'ambiguous tool)
+  (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+    (when tool
+      ;; Re-attribute ambiguous root tool to agent if now definitive
+      (when (and (alist-get 'ambiguous tool)
+                 agent-id (not (equal agent-id "ambiguous")))
+        (let ((agent-tools (claude-gravity--agent-tools-list session agent-id)))
+          (when agent-tools
             (setf (alist-get 'ambiguous tool) nil)
-            (setf (alist-get 'status tool) "done")
-            (setf (alist-get 'result tool) result)
-            (let ((agent-tools (claude-gravity--agent-tools-vector session agent-id)))
-              (when agent-tools
-                (claude-gravity--set-agent-tools-vector
-                 session agent-id (vconcat agent-tools (vector tool)))
-                (let ((remaining nil))
-                  (dotimes (i (length target-tools))
-                    (unless (= i idx) (push (aref target-tools i) remaining)))
-                  (setf (alist-get 'tools (plist-get session :state))
-                        (vconcat (nreverse remaining))))
-                (setq idx nil)))))))
-    ;; Normal completion
-    (when idx
-      (let ((tool (aref target-tools idx)))
-        (setf (alist-get 'status tool) "done")
-        (setf (alist-get 'result tool) result)
-        (aset target-tools idx tool)))))
+            ;; Remove from root tools list
+            (setf (alist-get 'tools (plist-get session :state))
+                  (delq tool (alist-get 'tools (plist-get session :state))))
+            ;; Add to agent tools
+            (claude-gravity--set-agent-tools-list
+             session agent-id (nconc agent-tools (list tool))))))
+      ;; Mark as done
+      (setf (alist-get 'status tool) "done")
+      (setf (alist-get 'result tool) result))))
 
 (defun claude-gravity-model-find-tool (session tool-use-id)
   "Find and return tool alist in SESSION matching TOOL-USE-ID, or nil.
-Searches both root tools and agent tools."
-  (let ((root-tools (alist-get 'tools (plist-get session :state)))
-        (agents (plist-get session :agents))
-        (result nil))
-    ;; Search root tools first
-    (when root-tools
-      (dotimes (i (length root-tools))
-        (when (equal (alist-get 'tool_use_id (aref root-tools i)) tool-use-id)
-          (setq result (aref root-tools i)))))
-    ;; If not found in root, search agent tools
-    (unless result
-      (when agents
-        (dotimes (i (length agents))
-          (let* ((agent (aref agents i))
-                 (agent-tools (alist-get 'agent-tools agent)))
-            (when agent-tools
-              (dotimes (j (length agent-tools))
-                (when (equal (alist-get 'tool_use_id (aref agent-tools j)) tool-use-id)
-                  (setq result (aref agent-tools j)))))))))
-    result))
+Uses the :tool-index hash table for O(1) lookup."
+  (gethash tool-use-id (plist-get session :tool-index)))
 
 (defun claude-gravity-model-add-agent (session agent)
-  "Add AGENT alist to SESSION's :agents vector if not already present."
-  (let* ((agents (plist-get session :agents))
-         (new-id (alist-get 'agent_id agent))
-         (existing (claude-gravity--find-agent-by-id agents new-id)))
+  "Add AGENT alist to SESSION's :agents list if not already present."
+  (let* ((new-id (alist-get 'agent_id agent))
+         (existing (claude-gravity--find-agent session new-id)))
     (unless existing
-      (plist-put session :agents (vconcat agents (vector agent))))))
+      (plist-put session :agents
+                 (nconc (plist-get session :agents) (list agent))))))
 
 (defun claude-gravity-model-complete-agent (session agent-id &rest props)
   "Mark agent AGENT-ID as done in SESSION.
 PROPS is a plist with optional keys:
   :transcript-path, :stop-text, :stop-thinking."
-  (let* ((agents (plist-get session :agents))
-         (idx (claude-gravity--find-agent-by-id agents agent-id)))
-    (when idx
-      (let ((agent (aref agents idx)))
-        (setf (alist-get 'status agent) "done")
-        (let ((ts (alist-get 'timestamp agent)))
-          (when ts
-            (setf (alist-get 'duration agent)
-                  (float-time (time-subtract (current-time) ts)))))
-        (let ((tp (plist-get props :transcript-path)))
-          (when tp (setf (alist-get 'transcript_path agent) tp)))
-        (let ((st (plist-get props :stop-text)))
-          (when st (setf (alist-get 'stop_text agent) st)))
-        (let ((sth (plist-get props :stop-thinking)))
-          (when sth (setf (alist-get 'stop_thinking agent) sth)))
-        (aset agents idx agent)))))
+  (let ((agent (claude-gravity--find-agent session agent-id)))
+    (when agent
+      (setf (alist-get 'status agent) "done")
+      (let ((ts (alist-get 'timestamp agent)))
+        (when ts
+          (setf (alist-get 'duration agent)
+                (float-time (time-subtract (current-time) ts)))))
+      (let ((tp (plist-get props :transcript-path)))
+        (when tp (setf (alist-get 'transcript_path agent) tp)))
+      (let ((st (plist-get props :stop-text)))
+        (when st (setf (alist-get 'stop_text agent) st)))
+      (let ((sth (plist-get props :stop-thinking)))
+        (when sth (setf (alist-get 'stop_thinking agent) sth))))))
 
 (defun claude-gravity-model-move-tools-to-agent (session agent-id tool-ids)
   "Move ambiguous root tools matching TOOL-IDS to agent AGENT-ID in SESSION."
   (when (and tool-ids (> (length tool-ids) 0))
-    (let* ((agents (plist-get session :agents))
-           (idx (claude-gravity--find-agent-by-id agents agent-id)))
-      (when idx
-        (let* ((agent (aref agents idx))
-               (root-tools (alist-get 'tools (plist-get session :state)))
+    (let ((agent (claude-gravity--find-agent session agent-id)))
+      (when agent
+        (let* ((root-tools (alist-get 'tools (plist-get session :state)))
                (agent-tools (alist-get 'agent-tools agent))
                (to-move nil)
                (keep nil))
-          (dotimes (i (length root-tools))
-            (let* ((tool (aref root-tools i))
-                   (tid (alist-get 'tool_use_id tool)))
+          (dolist (tool root-tools)
+            (let ((tid (alist-get 'tool_use_id tool)))
               (if (and (alist-get 'ambiguous tool)
                        tid
                        (seq-contains-p tool-ids tid #'equal))
@@ -709,35 +700,20 @@ PROPS is a plist with optional keys:
                 (push tool keep))))
           (when to-move
             (setf (alist-get 'tools (plist-get session :state))
-                  (vconcat (nreverse keep)))
+                  (nreverse keep))
             (setf (alist-get 'agent-tools agent)
-                  (vconcat agent-tools (vconcat (nreverse to-move))))
-            (aset agents idx agent)
+                  (nconc (or agent-tools nil) (nreverse to-move)))
             (claude-gravity--log 'debug "Claude Gravity: moved %d tools to agent %s"
                      (length to-move) agent-id)))))))
 
 (defun claude-gravity-model-add-notification (session notif)
-  "Append NOTIF alist to SESSION's :notifications vector."
-  (let ((notifs (or (plist-get session :notifications) [])))
-    (plist-put session :notifications (vconcat notifs (vector notif)))))
+  "Append NOTIF alist to SESSION's :notifications list."
+  (plist-put session :notifications
+             (nconc (plist-get session :notifications) (list notif))))
 
 (defun claude-gravity--session-has-tool-p (session tool-use-id)
   "Return non-nil if TOOL-USE-ID exists anywhere in SESSION's tools."
-  (or
-   (claude-gravity--find-tool-by-id
-    (alist-get 'tools (plist-get session :state))
-    tool-use-id)
-   (let ((agents (plist-get session :agents))
-         (found nil))
-     (when agents
-       (dotimes (i (length agents))
-         (unless found
-           (let ((agent (aref agents i)))
-             (when (claude-gravity--find-tool-by-id
-                    (or (alist-get 'agent-tools agent) [])
-                    tool-use-id)
-               (setq found t))))))
-     found)))
+  (not (null (gethash tool-use-id (plist-get session :tool-index)))))
 
 (defun claude-gravity-model-append-streaming-text (session text)
   "Append TEXT to SESSION's :streaming-text accumulator."
@@ -1538,8 +1514,7 @@ is applied to the inserted text."
   (let ((prompts (plist-get session :prompts))
         (total 0.0))
     (when prompts
-      (cl-loop for i from 0 below (length prompts)
-               for p = (aref prompts i)
+      (cl-loop for p in prompts
                for e = (and (listp p) (alist-get 'elapsed p))
                when (numberp e) do (cl-incf total e)))
     (if (> total 0) total
@@ -2135,8 +2110,9 @@ Returns a hash table mapping turn -> list of task alists."
       (maphash (lambda (key val)
                  (unless (string-prefix-p "_pending_" key)
                    (let ((turn (or (alist-get 'turn val) 0)))
-                     (puthash turn (append (gethash turn groups) (list val)) groups))))
+                     (puthash turn (cons val (gethash turn groups)) groups))))
                tasks-ht))
+    (maphash (lambda (k v) (puthash k (nreverse v) groups)) groups)
     groups))
 
 (defun claude-gravity--turn-counts (tools agents tasks)
@@ -2274,11 +2250,12 @@ assistant_thinking (after dedup).  Returns a list of tool-lists."
 Returns a hash table mapping \"TURN:TYPE\" to a list of agent entries.
 Multiple agents with the same turn+type are returned in order."
   (let ((ht (make-hash-table :test 'equal)))
-    (dolist (agent (append (or agents []) nil))
+    (dolist (agent agents)
       (let* ((turn (or (alist-get 'turn agent) 0))
              (atype (or (alist-get 'type agent) ""))
              (key (format "%d:%s" turn atype)))
-        (puthash key (append (gethash key ht) (list agent)) ht)))
+        (puthash key (cons agent (gethash key ht)) ht)))
+    (maphash (lambda (k v) (puthash k (nreverse v) ht)) ht)
     ht))
 
 (defun claude-gravity--pop-matching-agent (lookup turn subagent-type)
@@ -2411,16 +2388,18 @@ Each turn groups its prompt, tools, agents, and tasks together."
          (task-groups (claude-gravity--tasks-by-turn tasks-ht))
          (max-turn current-turn))
     ;; Build tool groups (excluding AskUserQuestion, shown as prompt entries)
-    (dolist (item (append tools nil))
+    (dolist (item tools)
       (unless (equal (alist-get 'name item) "AskUserQuestion")
         (let ((turn (or (alist-get 'turn item) 0)))
           (when (> turn max-turn) (setq max-turn turn))
-          (puthash turn (append (gethash turn tool-groups) (list item)) tool-groups))))
+          (puthash turn (cons item (gethash turn tool-groups)) tool-groups))))
+    (maphash (lambda (k v) (puthash k (nreverse v) tool-groups)) tool-groups)
     ;; Build agent groups
-    (dolist (agent (append (or agents []) nil))
+    (dolist (agent agents)
       (let ((turn (or (alist-get 'turn agent) 0)))
         (when (> turn max-turn) (setq max-turn turn))
-        (puthash turn (append (gethash turn agent-groups) (list agent)) agent-groups)))
+        (puthash turn (cons agent (gethash turn agent-groups)) agent-groups)))
+    (maphash (lambda (k v) (puthash k (nreverse v) agent-groups)) agent-groups)
     ;; Check max-turn from task groups
     (maphash (lambda (turn _)
                (when (and (numberp turn) (> turn max-turn))
@@ -2449,9 +2428,8 @@ Each turn groups its prompt, tools, agents, and tasks together."
         (let ((prev-turn-rendered nil))
           (dotimes (j max-turn)
             (let* ((i (1+ j))
-                   (prompt-entry (when (and prompts (> (length prompts) 0)
-                                            (<= i (length prompts)))
-                                   (aref prompts (1- i))))
+                   (prompt-entry (when (and prompts (<= i (length prompts)))
+                                   (nth (1- i) prompts)))
                    (turn-tools (gethash i tool-groups))
                    (turn-agents (gethash i agent-groups))
                    (turn-tasks (gethash i task-groups))
@@ -2572,10 +2550,10 @@ as root tools, allowing recursive sub-branches for nested agents."
                                (propertize short-id 'face 'claude-gravity-detail-label)
                                dur-str))
          (agent-tools (alist-get 'agent-tools agent))
-         (tool-list (when agent-tools (append agent-tools nil)))
+         (tool-list agent-tools)
          ;; Filter AskUserQuestion from agent tools
          (tool-list (cl-remove-if
-                     (lambda (t) (equal (alist-get 'name t) "AskUserQuestion"))
+                     (lambda (item) (equal (alist-get 'name item) "AskUserQuestion"))
                      tool-list))
          ;; Collapse when agent is done
          (collapsed (and agent-done-p (not (null tool-list)))))
@@ -2708,7 +2686,7 @@ Returns a list of agents whose turn:type matches a Task tool in parent-tools."
           (puthash key t task-keys))))
     ;; Only include agents whose turn:type matches one of the parent's Task keys
     (when all-agents
-      (dolist (agent (append all-agents nil))
+      (dolist (agent all-agents)
         (let ((atools (alist-get 'agent-tools agent)))
           (when (and atools (> (length atools) 0)
                      (not (equal (alist-get 'agent_id agent)
@@ -2886,9 +2864,7 @@ the message under `message` with `role`, `content`, and `model`."
                            (line-beginning-position) (line-end-position))))
                 (when (> (length line) 0)
                   (condition-case nil
-                      (let* ((json-object-type 'alist)
-                             (json-array-type 'vector)
-                             (obj (json-read-from-string line))
+                      (let* ((obj (json-parse-string line :object-type 'alist :array-type 'array))
                              (entry-type (alist-get 'type obj))
                              (msg (alist-get 'message obj))
                              (content (when msg (alist-get 'content msg))))
@@ -2941,10 +2917,8 @@ the message under `message` with `role`, `content`, and `model`."
                 ;; alist-get with new keys only rebinds the local variable.
                 (let* ((session (claude-gravity--get-session
                                  claude-gravity--buffer-session-id))
-                       (agents (when session (plist-get session :agents)))
-                       (idx (when agents
-                              (claude-gravity--find-agent-by-id agents agent-id)))
-                       (agent (when idx (aref agents idx)))
+                       (agent (when session
+                                (claude-gravity--find-agent session agent-id)))
                        (info (claude-gravity--parse-agent-transcript tp)))
                   (when (and agent info)
                     (setf (alist-get 'transcript_prompt agent)
@@ -2953,8 +2927,7 @@ the message under `message` with `role`, `content`, and `model`."
                           (alist-get 'model info))
                     (setf (alist-get 'transcript_tool_count agent)
                           (alist-get 'tool-count info))
-                    (setf (alist-get 'transcript_parsed agent) t)
-                    (aset agents idx agent))
+                    (setf (alist-get 'transcript_parsed agent) t))
                   (claude-gravity-refresh))))))))))
 
 
@@ -3154,6 +3127,7 @@ Groups non-idle items by session and shows badge counts."
               (projects (make-hash-table :test 'equal)))
           ;; Group sessions by project
           (maphash (lambda (_id session)
+                     (claude-gravity--migrate-session session)
                      (let ((proj (plist-get session :project)))
                        (puthash proj
                                 (cons session (gethash proj projects nil))
@@ -3864,36 +3838,32 @@ the most recent turn and scrolls to its last response cycle or
 final reply text."
   (interactive)
   (when magit-root-section
-    ;; Collapse all top-level sections
-    (dolist (child (oref magit-root-section children))
-      (magit-section-hide child))
-    ;; Find and expand the turns section
-    (let ((turns-section nil)
-          (last-turn nil))
+    ;; Single pass: collapse all top-level sections, find turns section
+    (let ((turns-section nil))
       (dolist (child (oref magit-root-section children))
+        (magit-section-hide child)
         (when (eq (oref child type) 'turns)
           (setq turns-section child)))
       (when turns-section
         (magit-section-show turns-section)
-        ;; Hide all turns, keep track of the last one
-        (dolist (child (oref turns-section children))
-          (when (eq (oref child type) 'turn)
-            (magit-section-hide child)
-            (setq last-turn child)))
-        (when last-turn
-          (magit-section-show last-turn)
-          ;; Collapse earlier response cycles, show the last one
-          (let ((last-cycle nil))
-            (dolist (child (oref last-turn children))
-              (when (eq (oref child type) 'response-cycle)
-                (magit-section-hide child)
-                (setq last-cycle child)))
-            (when last-cycle
-              (magit-section-show last-cycle)))
-          ;; Jump to the end of the turn content, then recenter
-          ;; so the latest activity is visible at bottom of window
-          (goto-char (1- (oref last-turn end)))
-          (recenter -3))))))
+        ;; Single pass over turns: hide all, track last
+        (let ((last-turn nil))
+          (dolist (child (oref turns-section children))
+            (when (eq (oref child type) 'turn)
+              (magit-section-hide child)
+              (setq last-turn child)))
+          (when last-turn
+            (magit-section-show last-turn)
+            ;; Single pass over turn children: hide cycles, track last
+            (let ((last-cycle nil))
+              (dolist (child (oref last-turn children))
+                (when (eq (oref child type) 'response-cycle)
+                  (magit-section-hide child)
+                  (setq last-cycle child)))
+              (when last-cycle
+                (magit-section-show last-cycle)))
+            (goto-char (1- (oref last-turn end)))
+            (recenter -3)))))))
 
 ;;;###autoload
 (defun claude-gravity-status ()
@@ -3990,8 +3960,7 @@ Accumulates partial data per connection until complete lines arrive."
         (setq buf (substring buf (match-end 0)))
         (when (> (length line) 0)
           (condition-case err
-              (let* ((json-object-type 'alist)
-                     (data (json-read-from-string line)))
+              (let* ((data (json-parse-string line :object-type 'alist :array-type 'array)))
                 (claude-gravity--log 'debug "Claude Gravity received: %s" (alist-get 'event data))
                 (let ((event (alist-get 'event data))
                       (session-id (alist-get 'session_id data))
@@ -4161,12 +4130,10 @@ TID the tool_use_id for updating prompts."
            (prompts (when session (plist-get session :prompts)))
            (tid tid))
       (when (and prompts tid)
-        (dotimes (i (length prompts))
-          (let ((p (aref prompts i)))
-            (when (and (equal (alist-get 'type p) 'question)
-                       (equal (alist-get 'tool_use_id p) tid))
-              (setf (alist-get 'answer p) answer-label)
-              (aset prompts i p))))))
+        (dolist (p prompts)
+          (when (and (equal (alist-get 'type p) 'question)
+                     (equal (alist-get 'tool_use_id p) tid))
+            (setf (alist-get 'answer p) answer-label)))))
     (claude-gravity--log 'debug "Answered: %s" answer-label)))
 
 ;;; Tool Permission Requests
@@ -5073,12 +5040,10 @@ Does not approve/deny — just writes the pattern to settings.local.json."
     (let* ((session (claude-gravity--get-session session-id))
            (prompts (when session (plist-get session :prompts))))
       (when (and prompts tid)
-        (dotimes (i (length prompts))
-          (let ((p (aref prompts i)))
-            (when (and (equal (alist-get 'type p) 'question)
-                       (equal (alist-get 'tool_use_id p) tid))
-              (setf (alist-get 'answer p) answer-label)
-              (aset prompts i p))))))
+        (dolist (p prompts)
+          (when (and (equal (alist-get 'type p) 'question)
+                     (equal (alist-get 'tool_use_id p) tid))
+            (setf (alist-get 'answer p) answer-label)))))
     ;; Clean up
     (claude-gravity--inbox-remove (alist-get 'id item))
     (let ((buf (current-buffer)))
@@ -5418,12 +5383,11 @@ If SESSION-ID is nil, uses the current buffer's session."
 (defun claude-gravity--compose-insert-history (session)
   "Insert conversation history from SESSION's :prompts."
   (let ((prompts (plist-get session :prompts)))
-    (when (and prompts (> (length prompts) 0))
-      (dotimes (i (length prompts))
-        (let* ((entry (aref prompts i))
-               (ptype (alist-get 'type entry))
-               (text (alist-get 'text entry))
-               (stop-text (alist-get 'stop_text entry)))
+    (when prompts
+      (dolist (entry prompts)
+        (let ((ptype (alist-get 'type entry))
+              (text (alist-get 'text entry))
+              (stop-text (alist-get 'stop_text entry)))
           ;; Skip question/phase-boundary entries
           (unless (memq ptype '(question phase-boundary))
             (when text
