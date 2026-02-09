@@ -1,0 +1,77 @@
+[
+  {
+    "event": "SessionStart",
+    "session_id": "test-stop-text",
+    "cwd": "/tmp/test-project",
+    "pid": 99999,
+    "data": {}
+  },
+  {
+    "event": "UserPromptSubmit",
+    "session_id": "test-stop-text",
+    "cwd": "/tmp/test-project",
+    "pid": 99999,
+    "data": {
+      "prompt": "verify gravity works"
+    }
+  },
+  {
+    "event": "PreToolUse",
+    "session_id": "test-stop-text",
+    "cwd": "/tmp/test-project",
+    "pid": 99999,
+    "data": {
+      "tool_name": "Read",
+      "tool_use_id": "tool_r1",
+      "tool_input": {"file_path": "/tmp/test-project/claude-gravity.el"},
+      "assistant_text": "Let me read the main file to check."
+    }
+  },
+  {
+    "event": "PostToolUse",
+    "session_id": "test-stop-text",
+    "cwd": "/tmp/test-project",
+    "pid": 99999,
+    "data": {
+      "tool_name": "Read",
+      "tool_use_id": "tool_r1",
+      "tool_input": {"file_path": "/tmp/test-project/claude-gravity.el"},
+      "tool_response": "(defun claude-gravity-status () ...)"
+    }
+  },
+  {
+    "event": "PreToolUse",
+    "session_id": "test-stop-text",
+    "cwd": "/tmp/test-project",
+    "pid": 99999,
+    "data": {
+      "tool_name": "Read",
+      "tool_use_id": "tool_r2",
+      "tool_input": {"file_path": "/tmp/test-project/claude-gravity-events.el"},
+      "assistant_text": "Now let me verify the event handler."
+    }
+  },
+  {
+    "event": "PostToolUse",
+    "session_id": "test-stop-text",
+    "cwd": "/tmp/test-project",
+    "pid": 99999,
+    "data": {
+      "tool_name": "Read",
+      "tool_use_id": "tool_r2",
+      "tool_input": {"file_path": "/tmp/test-project/claude-gravity-events.el"},
+      "tool_response": "(defun claude-gravity-handle-event ...)",
+      "post_tool_text": "Everything checks out."
+    }
+  },
+  {
+    "event": "Stop",
+    "session_id": "test-stop-text",
+    "cwd": "/tmp/test-project",
+    "pid": 99999,
+    "data": {
+      "stop_text": "All verified, nothing to implement.",
+      "stop_thinking": "The code looks correct, no changes needed."
+    }
+  }
+]

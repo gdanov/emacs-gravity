@@ -1,0 +1,7 @@
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me research this by looking at the documentation."}]},"timestamp":"2026-02-03T19:33:48.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent_001","name":"WebFetch","input":{"url":"https://example.com","prompt":"test"}}]},"timestamp":"2026-02-03T19:33:49.000Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent_001","content":"page content here"}]},"timestamp":"2026-02-03T19:33:50.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent_002","name":"Read","input":{"file_path":"/test/file.ts"}}]},"timestamp":"2026-02-03T19:33:51.000Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent_002","content":"file contents here"}]},"timestamp":"2026-02-03T19:33:52.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Based on my research, here is what I found about hooks and AskUserQuestion."}]},"timestamp":"2026-02-03T19:33:53.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Based on my research, Claude Code's hook system does fire PreToolUse for AskUserQuestion. You can intercept it with a hook."}]},"timestamp":"2026-02-03T19:33:54.000Z"}

@@ -1,0 +1,11 @@
+{
+  "session_id": "test-session-001",
+  "cwd": "/test/project",
+  "transcript_path": "__FIXTURE__/preceding_content_bash.jsonl",
+  "tool_use_id": "toolu_0117AHsMTSWiUkLVBhQ43wzv",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "gh issue view 10168 --repo anthropics/claude-code --json title,body,comments",
+    "description": "Fetch GitHub issue #10168 details"
+  }
+}

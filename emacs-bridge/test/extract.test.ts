@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { join } from "path";
 import { writeFileSync, mkdtempSync } from "fs";
 import { tmpdir } from "os";
-import { extractTrailingText, extractPrecedingContent, extractFollowingContent, readTail } from "../src/index";
+import { extractTrailingText, extractPrecedingContent, extractFollowingContent, readTail, readHead } from "../src/index";
 
 const FIXTURES = join(__dirname, "fixtures");
 
@@ -123,6 +123,75 @@ describe("extractTrailingText", () => {
     const result = extractTrailingText(f);
     expect(result.text).toBe("Here is my answer");
     expect(result.thinking).toBe("Let me think about this");
+  });
+
+  it("extracts trailing text with maxBytes snapshot (next turn contamination)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "snapshot.jsonl");
+    // Simulate: completed turn has trailing text, then next turn starts with tool_use
+    const completedTurn = [
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t2", name: "Read", input: {} }] } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t2", content: "file contents" }] } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "All done! The changes are complete." }] } }),
+    ];
+    const nextTurn = [
+      JSON.stringify({ type: "progress" }),
+      JSON.stringify({ type: "system" }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t3", name: "Bash", input: {} }] } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t3", content: "output" }] } }),
+    ];
+    // Write full transcript (completed turn + next turn)
+    const allLines = [...completedTurn, ...nextTurn].join("\n") + "\n";
+    writeFileSync(f, allLines);
+
+    // Without maxBytes: finds next turn's tool_use first, returns empty
+    const resultNoSnapshot = extractTrailingText(f);
+    expect(resultNoSnapshot.text).toBe("");
+
+    // With maxBytes snapshot: only reads up to completed turn, finds trailing text
+    const snapshotSize = completedTurn.join("\n").length + 1; // +1 for trailing newline
+    const resultWithSnapshot = extractTrailingText(f, snapshotSize);
+    expect(resultWithSnapshot.text).toBe("All done! The changes are complete.");
+  });
+
+  it("extracts trailing text with maxBytes when user messages are only tool_result", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "continued_session.jsonl");
+    // Simulate continued session: no user text messages, all tool_result
+    const turn = [
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Glob", input: {} }] } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "files" }] } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Here are the results." }] } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Everything looks good." }] } }),
+    ];
+    const content = turn.join("\n") + "\n";
+    writeFileSync(f, content);
+    const result = extractTrailingText(f, Buffer.byteLength(content));
+    expect(result.text).toBe("Here are the results.\n\nEverything looks good.");
+  });
+});
+
+describe("readHead", () => {
+  it("reads entire small file when under maxBytes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "small.txt");
+    writeFileSync(f, "line1\nline2\nline3\n");
+    const result = readHead(f, 1024);
+    expect(result).toBe("line1\nline2\nline3\n");
+  });
+
+  it("reads only head when file exceeds maxBytes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "large.txt");
+    const lines = Array.from({ length: 100 }, (_, i) => `line-${String(i).padStart(3, "0")}-padding`);
+    writeFileSync(f, lines.join("\n") + "\n");
+    // Read only first 200 bytes
+    const result = readHead(f, 200);
+    expect(result).toContain("line-000");
+    expect(result).not.toContain("line-099");
+    // Should end at a complete line boundary (last line before the cut)
+    expect(result).toMatch(/line-\d{3}-padding$/);
   });
 });
 

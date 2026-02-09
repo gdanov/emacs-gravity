@@ -63,7 +63,9 @@
       "Bash(xxd:*)",
       "Bash(\n# Find render-overview to see if it also calls apply-visibility\ngrep -n \"defun claude-gravity--render-overview\" /Users/gdanov/work/playground/emacs-gravity/claude-gravity.el\n)",
       "Bash(echo:*)",
-      "Bash(rm -f /Users/gdanov/work/playground/emacs-gravity/claude-gravity-*.el)"
+      "Bash(rm -f /Users/gdanov/work/playground/emacs-gravity/claude-gravity-*.el)",
+      "Bash(EMACS_BRIDGE_LOG_LEVEL=debug node -e \"\nconst { extractTrailingText } = require('./dist/index.js');\nconst tp = '/Users/gdanov/.claude/projects/-Users-gdanov-work-playground-emacs-gravity/2cc189dd-f331-4b20-bbe0-228db0435c09.jsonl';\nconst result = extractTrailingText(tp);\nconsole.log('text length:', result.text.length);\nconsole.log('thinking length:', result.thinking.length);\n\" 2>&1 | tail -20)",
+      "Bash(EMACS_BRIDGE_LOG_LEVEL=debug node:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

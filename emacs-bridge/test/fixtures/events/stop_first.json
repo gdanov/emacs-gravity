@@ -1,0 +1,5 @@
+{
+  "session_id": "test-session-001",
+  "cwd": "/test/project",
+  "transcript_path": "__FIXTURE__/at_first_stop.jsonl"
+}

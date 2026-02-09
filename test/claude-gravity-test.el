@@ -56,9 +56,7 @@ EXTRA-DATA is an alist merged into the event data."
 
 (defun cg-test--tool-by-id (sid id)
   "Get the tool entry with ID from SID's tools."
-  (let* ((tools (cg-test--tools sid))
-         (idx (claude-gravity--find-tool-by-id tools id)))
-    (when idx (aref tools idx))))
+  (gethash id (plist-get (cg-test--get sid) :tool-index)))
 
 ;;; Tests
 
@@ -70,7 +68,7 @@ EXTRA-DATA is an alist merged into the event data."
       (should (= 1 (plist-get session :current-turn)))
       (should (= 1 (length (plist-get session :prompts))))
       (should (equal "hello"
-                     (alist-get 'text (aref (plist-get session :prompts) 0)))))))
+                     (alist-get 'text (car (plist-get session :prompts))))))))
 
 (ert-deftest cg-test-tools-stamped-with-current-turn ()
   "Tools get the turn number at creation time."
@@ -93,8 +91,8 @@ EXTRA-DATA is an alist merged into the event data."
            (prompts (plist-get session :prompts)))
       ;; Two prompts: original + phase-boundary
       (should (= 2 (length prompts)))
-      (should (equal "[Plan approved]" (alist-get 'text (aref prompts 1))))
-      (should (eq 'phase-boundary (alist-get 'type (aref prompts 1))))
+      (should (equal "[Plan approved]" (alist-get 'text (nth 1 prompts))))
+      (should (eq 'phase-boundary (alist-get 'type (nth 1 prompts))))
       ;; Turn advanced
       (should (= 2 (plist-get session :current-turn)))
       ;; Tools before ExitPlanMode are turn 1, after are turn 2
@@ -116,8 +114,8 @@ EXTRA-DATA is an alist merged into the event data."
            (prompts (plist-get session :prompts)))
       ;; Two prompts: original + question
       (should (= 2 (length prompts)))
-      (should (eq 'question (alist-get 'type (aref prompts 1))))
-      (should (equal "Which approach?" (alist-get 'text (aref prompts 1))))
+      (should (eq 'question (alist-get 'type (nth 1 prompts))))
+      (should (equal "Which approach?" (alist-get 'text (nth 1 prompts))))
       ;; Turn advanced
       (should (= 2 (plist-get session :current-turn)))
       ;; Tool after question is turn 2
@@ -156,7 +154,7 @@ EXTRA-DATA is an alist merged into the event data."
     (let* ((session (cg-test--get sid))
            (prompts (plist-get session :prompts)))
       ;; stop_text on the phase-boundary prompt (last one)
-      (should (equal "Done" (alist-get 'stop_text (aref prompts 1)))))))
+      (should (equal "Done" (alist-get 'stop_text (nth 1 prompts)))))))
 
 (ert-deftest cg-test-permission-mode-stored-on-tool ()
   "PreToolUse stores permission_mode on the tool entry and session."
@@ -197,7 +195,7 @@ EXTRA-DATA is an alist merged into the event data."
   "Replay test/plan.json and return the session-id.
 Clears sessions first for a clean test."
   (clrhash claude-gravity--sessions)
-  (clrhash claude-gravity--managed-processes)
+  (clrhash claude-gravity--tmux-sessions)
   (cg-test-replay-transcript (expand-file-name "plan.json" cg-test--dir)))
 
 (ert-deftest cg-test-replay-session-exists ()
@@ -221,17 +219,16 @@ plan.json has 1 Task tool at root + ~19 subagent tools."
     ;; At minimum: 1 root Task tool
     (should (>= (length root-tools) 1))
     ;; The Task tool should exist
-    (should (claude-gravity--find-tool-by-id
-             root-tools "toolu_01Nww8G8Dpz77JVzLTjzjqy2"))))
+    (should (gethash "toolu_01Nww8G8Dpz77JVzLTjzjqy2"
+                     (plist-get session :tool-index)))))
 
 (ert-deftest cg-test-replay-task-tool-done ()
   "The root Task tool should be completed (result line 47 has tool_result)."
   (let* ((sid (cg-test--replay-plan-json))
          (session (claude-gravity--get-session sid))
          (root-tools (alist-get 'tools (plist-get session :state)))
-         (idx (claude-gravity--find-tool-by-id
-               root-tools "toolu_01Nww8G8Dpz77JVzLTjzjqy2"))
-         (task-tool (and idx (aref root-tools idx))))
+         (task-tool (gethash "toolu_01Nww8G8Dpz77JVzLTjzjqy2"
+                            (plist-get session :tool-index))))
     (should task-tool)
     (should (equal "done" (alist-get 'status task-tool)))))
 
@@ -257,6 +254,70 @@ plan.json has 1 Task tool at root + ~19 subagent tools."
   (let* ((sid (cg-test--replay-plan-json))
          (session (claude-gravity--get-session sid)))
     (should (null (plist-get session :pending-assistant-text)))))
+
+;;; stop_text.json replay tests
+
+(defun cg-test--replay-stop-text ()
+  "Replay test/stop_text.json and return the session-id."
+  (clrhash claude-gravity--sessions)
+  (clrhash claude-gravity--tmux-sessions)
+  (cg-test-replay-transcript (expand-file-name "stop_text.json" cg-test--dir)))
+
+(ert-deftest cg-test-replay-stop-text-session ()
+  "stop_text replay creates a session with correct id and idle status."
+  (let* ((sid (cg-test--replay-stop-text))
+         (session (claude-gravity--get-session sid)))
+    (should (equal "test-stop-text" sid))
+    (should session)
+    (should (eq 'idle (plist-get session :claude-status)))))
+
+(ert-deftest cg-test-replay-stop-text-on-prompt ()
+  "Stop event attaches stop_text and stop_thinking to the last prompt."
+  (let* ((sid (cg-test--replay-stop-text))
+         (session (claude-gravity--get-session sid))
+         (prompts (plist-get session :prompts)))
+    (should (= 1 (length prompts)))
+    (should (equal "All verified, nothing to implement."
+                   (alist-get 'stop_text (car prompts))))
+    (should (equal "The code looks correct, no changes needed."
+                   (alist-get 'stop_thinking (car prompts))))))
+
+(ert-deftest cg-test-replay-stop-text-tool-count ()
+  "stop_text replay produces 2 Read tools, both completed."
+  (let* ((sid (cg-test--replay-stop-text))
+         (session (claude-gravity--get-session sid))
+         (tools (alist-get 'tools (plist-get session :state))))
+    (should (= 2 (length tools)))
+    (should (equal "done" (alist-get 'status (nth 0 tools))))
+    (should (equal "done" (alist-get 'status (nth 1 tools))))))
+
+(ert-deftest cg-test-replay-stop-text-assistant-text ()
+  "PreToolUse carries assistant_text through to tool entries."
+  (let* ((sid (cg-test--replay-stop-text))
+         (session (claude-gravity--get-session sid))
+         (tools (alist-get 'tools (plist-get session :state))))
+    (should (equal "Let me read the main file to check."
+                   (alist-get 'assistant_text (nth 0 tools))))
+    (should (equal "Now let me verify the event handler."
+                   (alist-get 'assistant_text (nth 1 tools))))))
+
+(ert-deftest cg-test-replay-stop-text-post-tool-text ()
+  "PostToolUse carries post_tool_text through to tool entry."
+  (let* ((sid (cg-test--replay-stop-text))
+         (session (claude-gravity--get-session sid))
+         (tools (alist-get 'tools (plist-get session :state)))
+         (tool2 (nth 1 tools)))
+    (should (equal "Everything checks out."
+                   (alist-get 'post_text tool2)))))
+
+(ert-deftest cg-test-replay-stop-text-turn-count ()
+  "stop_text replay: single prompt means turn 1, all tools on turn 1."
+  (let* ((sid (cg-test--replay-stop-text))
+         (session (claude-gravity--get-session sid)))
+    (should (= 1 (plist-get session :current-turn)))
+    (let ((tools (alist-get 'tools (plist-get session :state))))
+      (should (= 1 (alist-get 'turn (nth 0 tools))))
+      (should (= 1 (alist-get 'turn (nth 1 tools)))))))
 
 (provide 'claude-gravity-test)
 ;;; claude-gravity-test.el ends here

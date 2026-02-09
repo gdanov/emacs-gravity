@@ -1,0 +1,153 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Event enrichment snapshots > PostToolUse: Read with following text 1`] = `
+{
+  "cwd": "/test/project",
+  "post_tool_text": "This file exports a \`hello\` function that returns the string 'world'.",
+  "post_tool_thinking": "This is a simple module that exports a hello function.",
+  "session_id": "test-session-001",
+  "slug": "test-slug-posttool",
+  "tool_input": {
+    "file_path": "/test/project/src/index.ts",
+  },
+  "tool_name": "Read",
+  "tool_use_id": "toolu_posttool_read_001",
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/posttool_transcript.jsonl",
+}
+`;
+
+exports[`Event enrichment snapshots > PreToolUse: Bash with thinking 1`] = `
+{
+  "assistant_thinking": "The user is pointing me to a specific GitHub issue that suggests hooks DO fire for AskUserQuestion. Let me fetch that issue to understand what's actually happening.",
+  "cwd": "/test/project",
+  "session_id": "test-session-001",
+  "slug": "dazzling-brewing-otter",
+  "tool_input": {
+    "command": "gh issue view 10168 --repo anthropics/claude-code --json title,body,comments",
+    "description": "Fetch GitHub issue #10168 details",
+  },
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_0117AHsMTSWiUkLVBhQ43wzv",
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/preceding_content_bash.jsonl",
+}
+`;
+
+exports[`Event enrichment snapshots > PreToolUse: Task agent start with thinking 1`] = `
+{
+  "assistant_thinking": "The user wants to know if Claude Code's hook system allows intercepting questions that Claude asks the user (via the AskUserQuestion tool) before the user answers them, and potentially answer them programmatically via a hook.
+
+Let me research this by looking at the hook system documentation and the AskUserQuestion tool behavior.",
+  "cwd": "/test/project",
+  "session_id": "test-session-001",
+  "slug": "dazzling-brewing-otter",
+  "tool_input": {
+    "description": "Research hook interception of AskUserQuestion",
+    "prompt": "Research hook interception of AskUserQuestion",
+    "subagent_type": "claude-code-guide",
+  },
+  "tool_name": "Task",
+  "tool_use_id": "toolu_01DpAA4KkHMsWYXGnPuSn9fa",
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/at_first_stop.jsonl",
+}
+`;
+
+exports[`Event enrichment snapshots > Stop: first stop with trailing text and token usage 1`] = `
+{
+  "cwd": "/test/project",
+  "session_id": "test-session-001",
+  "slug": "dazzling-brewing-otter",
+  "stop_text": "Based on the research:
+
+**No, \`AskUserQuestion\` is not interceptable via hooks.** It operates outside the hook lifecycle entirely.
+
+The \`PreToolUse\` hook fires for tools like \`Bash\`, \`Edit\`, \`Write\`, \`Read\`, \`Grep\`, \`Glob\`, \`WebFetch\`, \`WebSearch\`, \`Task\`, and MCP tools — but **not** for \`AskUserQuestion\`. There is no mechanism for a hook to see the question or supply an answer programmatically.
+
+### What exists today
+
+The hook flow for normal tools is:
+
+\`\`\`
+Claude decides to use tool → PreToolUse fires (can block) → tool runs → PostToolUse fires
+\`\`\`
+
+\`AskUserQuestion\` bypasses this entirely and goes straight to the user prompt.
+
+### Feature request
+
+GitHub Issue [#12605](https://github.com/anthropics/claude-code/issues/12605) requested exactly this — a \`PreAskUserQuestion\` hook that could intercept the question and optionally supply an answer. It was marked closed/completed in Dec 2025, but the feature doesn't appear to be documented or shipped yet in any visible way.
+
+### Workarounds for your emacs-gravity project
+
+Since you're building an Emacs UI that already receives tool events via hooks, you could:
+
+1. **\`UserPromptSubmit\` hook** — inject context into the user's prompt preemptively so Claude doesn't need to ask questions
+2. **\`Stop\` hook** — detect when Claude stops (which happens after it asks a question and waits), though you can't answer from there
+3. **Monitor the terminal output** — since \`AskUserQuestion\` renders to the CLI, you could potentially watch the PTY/terminal output from the Emacs side, though this is fragile
+
+The cleanest solution would be the \`PreAskUserQuestion\` hook from that issue, but it doesn't appear to be available yet.",
+  "token_usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+  },
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/at_first_stop.jsonl",
+}
+`;
+
+exports[`Event enrichment snapshots > Stop: second stop with different trailing text 1`] = `
+{
+  "cwd": "/test/project",
+  "session_id": "test-session-001",
+  "slug": "dazzling-brewing-otter",
+  "stop_text": "You're right, my initial analysis was wrong. Here's what the issue thread confirms:
+
+**Yes, \`PreToolUse\` fires for \`AskUserQuestion\`.** An Anthropic collaborator (@dicksontsai) confirmed it directly:
+
+> AskUserQuestion is a specific tool. You can use PreToolUse with \`"matcher": "AskUserQuestion"\`.
+
+And multiple users confirmed it works. The hook receives the tool input (which includes the questions, options, etc.) via stdin as JSON.
+
+Additionally, **\`PermissionRequest\` also fires** for \`AskUserQuestion\` since it requires user interaction. One user found both fire simultaneously, so you'd want to pick one to avoid duplicate handling.
+
+### Working config example
+
+\`\`\`json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "your-script-here"
+          }
+        ]
+      }
+    ]
+  }
+}
+\`\`\`
+
+### Can you *answer* the question from the hook?
+
+This is the key part of your original question. \`PreToolUse\` hooks can return JSON to stdout that **blocks** the tool call (by returning a \`"decision"\` to deny), but there's no documented mechanism to **supply an answer** to the question. The hook can:
+
+1. **See** the question and options (via stdin JSON with \`tool_input\`)
+2. **Allow** it to proceed to the user (default)
+3. **Block** it (return deny decision)
+4. Trigger a side effect (notification, forward to Emacs, etc.)
+
+But it cannot return a selected answer that bypasses the user prompt. So for your emacs-gravity use case, you could intercept the question, display it in Emacs, but the user would still need to answer in the Claude Code terminal.
+
+There's also a noted bug ([#13439](https://github.com/anthropics/claude-code/issues/13439)) where \`PreToolUse\` on \`AskUserQuestion\` can sometimes cause empty responses.",
+  "token_usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+  },
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/at_second_stop.jsonl",
+}
+`;

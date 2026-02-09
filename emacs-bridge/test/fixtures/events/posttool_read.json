@@ -1,0 +1,10 @@
+{
+  "session_id": "test-session-001",
+  "cwd": "/test/project",
+  "transcript_path": "__FIXTURE__/posttool_transcript.jsonl",
+  "tool_use_id": "toolu_posttool_read_001",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "/test/project/src/index.ts"
+  }
+}

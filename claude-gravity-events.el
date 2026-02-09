@@ -215,7 +215,9 @@ the model mutation API to update session state."
                             (cons 'permission_mode (alist-get 'permission_mode data))
                             (cons 'assistant_text (alist-get 'assistant_text data))
                             (cons 'assistant_thinking (alist-get 'assistant_thinking data))
-                            (cons 'parent_agent_id parent-agent-id))))
+                            (cons 'parent_agent_id parent-agent-id)
+                            (cons 'post_text nil)
+                            (cons 'post_thinking nil))))
        (claude-gravity-model-add-tool
         session new-tool parent-agent-id
         (alist-get 'candidate_agent_ids data))
@@ -239,7 +241,9 @@ the model mutation API to update session state."
                             (cons 'tool_use_id (alist-get 'tool_use_id data))
                             (cons 'submitted (current-time))
                             (cons 'elapsed nil)
-                            (cons 'answer nil))))))))
+                            (cons 'answer nil)
+                            (cons 'stop_text nil)
+                            (cons 'stop_thinking nil))))))))
 
     ("PostToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -284,7 +288,9 @@ the model mutation API to update session state."
           session (list (cons 'text "[Plan approved]")
                         (cons 'type 'phase-boundary)
                         (cons 'submitted (current-time))
-                        (cons 'elapsed nil))))))
+                        (cons 'elapsed nil)
+                        (cons 'stop_text nil)
+                        (cons 'stop_thinking nil))))))
 
     ("PostToolUseFailure"
      (let* ((session (claude-gravity--ensure-session session-id cwd))

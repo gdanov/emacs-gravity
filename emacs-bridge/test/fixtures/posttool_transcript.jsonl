@@ -1,0 +1,7 @@
+{"type":"progress","slug":"test-slug-posttool","data":{"type":"hook_progress"}}
+{"type":"user","message":{"role":"user","content":"Read the file and tell me what it does"},"timestamp":"2026-02-03T19:33:45.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants me to read and analyze a file."}]},"timestamp":"2026-02-03T19:33:46.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_posttool_read_001","name":"Read","input":{"file_path":"/test/project/src/index.ts"}}]},"timestamp":"2026-02-03T19:33:47.000Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_posttool_read_001","content":"export function hello() { return 'world'; }"}]},"timestamp":"2026-02-03T19:33:48.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"This is a simple module that exports a hello function."}]},"timestamp":"2026-02-03T19:33:49.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"This file exports a `hello` function that returns the string 'world'."}]},"timestamp":"2026-02-03T19:33:50.000Z"}

@@ -17,6 +17,29 @@ function log(msg: string, level: LogLevel = 'debug') {
   }
 }
 
+// --- Fixture dump mode ---
+// When CLAUDE_GRAVITY_DUMP_DIR is set, save raw input and enriched output
+// as JSON files for replay testing. Files are named {seq}__{event}__{suffix}.json
+// where seq is a zero-padded counter preserving event ordering.
+function nextDumpSeq(dumpDir: string): number {
+  if (!existsSync(dumpDir)) mkdirSync(dumpDir, { recursive: true });
+  const counterFile = join(dumpDir, "_counter.txt");
+  let counter = 0;
+  try { counter = parseInt(readFileSync(counterFile, "utf-8").trim(), 10) || 0; } catch {}
+  counter++;
+  writeFileSync(counterFile, String(counter));
+  return counter;
+}
+
+function writeDumpFile(dumpDir: string, seq: number, eventName: string, suffix: string, data: any): void {
+  try {
+    const filename = `${String(seq).padStart(4, "0")}__${eventName}__${suffix}.json`;
+    writeFileSync(join(dumpDir, filename), JSON.stringify(data, null, 2) + "\n");
+  } catch (e) {
+    log(`writeDumpFile error: ${e}`, 'error');
+  }
+}
+
 // Resolve socket path from plugin root or fallback to relative location
 function getSocketPath(): string {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
@@ -140,6 +163,23 @@ export function readTail(filePath: string, maxBytes: number): string {
   const text = buffer.toString("utf-8");
   const firstNewline = text.indexOf("\n");
   return firstNewline >= 0 ? text.substring(firstNewline + 1) : text;
+}
+
+// Read the first maxBytes of a file, skipping any partial last line.
+export function readHead(filePath: string, maxBytes: number): string {
+  const stat = statSync(filePath);
+  const size = stat.size;
+  if (size <= maxBytes) {
+    return readFileSync(filePath, "utf-8");
+  }
+  const fd = openSync(filePath, "r");
+  const buffer = Buffer.alloc(maxBytes);
+  readSync(fd, buffer, 0, maxBytes, 0);
+  closeSync(fd);
+  const text = buffer.toString("utf-8");
+  // Trim partial last line
+  const lastNewline = text.lastIndexOf("\n");
+  return lastNewline >= 0 ? text.substring(0, lastNewline) : text;
 }
 
 // Extract assistant text and thinking that precede a tool_use.
@@ -327,14 +367,20 @@ export function extractFollowingContent(transcriptPath: string, toolUseId: strin
 }
 
 // Called on Stop events to capture the conclusion text.
-export function extractTrailingText(transcriptPath: string): { text: string; thinking: string } {
+// The maxBytes parameter limits how much of the transcript to read,
+// preventing the next turn's data from contaminating the result.
+export function extractTrailingText(transcriptPath: string, maxBytes?: number): { text: string; thinking: string } {
   const result = { text: "", thinking: "" };
   try {
-    const content = readTail(transcriptPath, 10 * 1024 * 1024);
+    // When maxBytes is specified (from Stop handler snapshot), read from the
+    // START of the file to exclude data appended by subsequent turns.
+    // Otherwise fall back to reading the tail.
+    const content = maxBytes
+      ? readHead(transcriptPath, maxBytes)
+      : readTail(transcriptPath, 10 * 1024 * 1024);
     const lines = content.split("\n").filter((l) => l.length > 0);
 
-    // Diagnostic: log the last N transcript entries so we can verify what
-    // the file actually contains when the Stop hook fires.
+    // Diagnostic: log the last N transcript entries
     const diagCount = Math.min(10, lines.length);
     const diagLines: string[] = [];
     for (let i = lines.length - diagCount; i < lines.length; i++) {
@@ -351,22 +397,28 @@ export function extractTrailingText(transcriptPath: string): { text: string; thi
     }
     log(`extractTrailingText: ${lines.length} lines, tail:\n  ${diagLines.join("\n  ")}`);
 
+    // Walk backwards from end, collecting trailing assistant text/thinking.
+    // Stop at: tool_use (went past trailing text), thinking (turn start),
+    // or user message with text content (turn boundary in normal sessions).
+    // Skip user/tool_result messages (not turn boundaries in continued sessions).
     const textParts: string[] = [];
     let stopReason = "exhausted";
-    // Walk backwards from end, collecting trailing assistant text/thinking.
-    // Each assistant message may contain multiple content blocks (e.g.
-    // [thinking, text]) so we iterate over ALL blocks, not just c[0].
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         const obj = JSON.parse(lines[i]);
-        // Skip non-message entries (progress, system, summary, etc.)
         if (obj.type !== "assistant" && obj.type !== "user") continue;
-        if (obj.type === "user") { stopReason = `user@${i}`; break; }
+        if (obj.type === "user") {
+          const uc = obj.message?.content;
+          if (Array.isArray(uc) && uc.some((b: any) => b.type === "text")) {
+            stopReason = `user_text@${i}`;
+            break;
+          }
+          continue; // tool_result — skip
+        }
         const c = obj.message?.content;
         if (!Array.isArray(c) || c.length === 0) continue;
         let hasThinking = false;
         let hasToolUse = false;
-        // Process all blocks in this message first, then decide boundary
         for (const block of c) {
           if (block.type === "text") {
             const text = block.text || "";
@@ -375,19 +427,14 @@ export function extractTrailingText(transcriptPath: string): { text: string; thi
             }
           } else if (block.type === "thinking") {
             result.thinking = block.thinking || "";
-            stopReason = `thinking@${i}`;
             hasThinking = true;
           } else {
-            // tool_use or other — we've gone past the trailing text
             stopReason = `${block.type}@${i}`;
             hasToolUse = true;
           }
         }
-        // Thinking is always the first block in a turn — stop walking back
         if (hasThinking || hasToolUse) break;
-      } catch {
-        continue;
-      }
+      } catch { continue; }
     }
     result.text = textParts.join("\n\n");
     log(`extractTrailingText result: ${result.text.length} chars text, ${result.thinking.length} chars thinking, stop=${stopReason}, parts=${textParts.length}`);
@@ -561,6 +608,14 @@ async function main() {
     const tempId = process.env.CLAUDE_GRAVITY_TEMP_ID || null;
     if (tempId) {
       (inputData as any).temp_id = tempId;
+    }
+
+    // Dump raw input if dump mode enabled
+    const dumpDir = process.env.CLAUDE_GRAVITY_DUMP_DIR;
+    let dumpSeq: number | undefined;
+    if (dumpDir) {
+      dumpSeq = nextDumpSeq(dumpDir);
+      writeDumpFile(dumpDir, dumpSeq, eventName, "raw", inputData);
     }
 
     // Extract session slug from transcript
@@ -737,23 +792,40 @@ async function main() {
     if (eventName === "Stop") {
       if (transcriptPath) {
         try {
-          let { text, thinking } = extractTrailingText(transcriptPath);
+          // Capture transcript size at invocation time. The Stop hook fires
+          // when a turn completes, but by the time we read the file the next
+          // turn may have started appending data. Using the size at Stop time
+          // ensures we only read data from the completed turn.
+          let snapshotBytes: number | undefined;
+          try {
+            snapshotBytes = statSync(transcriptPath).size;
+            log(`Stop: transcript snapshot ${snapshotBytes} bytes`, 'warn');
+          } catch { /* file may not exist yet */ }
+
+          let { text, thinking } = extractTrailingText(transcriptPath, snapshotBytes);
           if (!text && !thinking) {
+            // Transcript may not be fully flushed yet — retry with growing
+            // read window (re-read from disk each time, but DON'T update
+            // snapshotBytes — let it grow naturally as the file flushes).
             const maxRetries = 5;
             const delayMs = 250;
             for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
               await new Promise(r => setTimeout(r, delayMs));
-              ({ text, thinking } = extractTrailingText(transcriptPath));
-              log(`Stop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`);
+              // Re-stat to get updated size (file may be flushing)
+              try { snapshotBytes = statSync(transcriptPath).size; } catch {}
+              ({ text, thinking } = extractTrailingText(transcriptPath, snapshotBytes));
+              log(`Stop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`, 'warn');
             }
           }
           if (text) {
             (inputData as any).stop_text = text;
-            log(`Extracted trailing text (${text.length} chars)`);
+            log(`Stop: extracted trailing text (${text.length} chars)`, 'warn');
+          } else {
+            log(`Stop: no trailing text found`, 'warn');
           }
           if (thinking) {
             (inputData as any).stop_thinking = thinking;
-            log(`Extracted trailing thinking (${thinking.length} chars)`);
+            log(`Stop: extracted trailing thinking (${thinking.length} chars)`, 'warn');
           }
         } catch (e) {
           log(`Failed to extract trailing content: ${e}`, 'error');
@@ -766,6 +838,13 @@ async function main() {
           log(`Failed to extract token usage: ${e}`, 'error');
         }
       }
+    }
+
+    // Dump enriched output (socket message format) if dump mode enabled
+    if (dumpDir && dumpSeq !== undefined) {
+      writeDumpFile(dumpDir, dumpSeq, eventName, "output", {
+        event: eventName, session_id: sessionId, cwd, pid, data: inputData,
+      });
     }
 
     // Send to Emacs — PermissionRequest and AskUserQuestionIntercept use bidirectional wait
