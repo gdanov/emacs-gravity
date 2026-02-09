@@ -845,7 +845,11 @@ the model mutation API to update session state."
                ;; /clear — put temp-id back into pending for next SessionStart
                (let ((temp-id (plist-get session :temp-id)))
                  (when temp-id
-                   (puthash temp-id tmux-name claude-gravity--tmux-pending)))
+                   (puthash temp-id tmux-name claude-gravity--tmux-pending)
+                   ;; Move session back under temp-id so SessionStart re-keying finds it
+                   (puthash temp-id session claude-gravity--sessions)
+                   (remhash session-id claude-gravity--sessions)
+                   (remhash session-id claude-gravity--tmux-sessions)))
              (remhash session-id claude-gravity--tmux-sessions)))))
      ;; Remove all inbox items for this session
      (claude-gravity--inbox-remove-for-session session-id)
