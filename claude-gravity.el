@@ -3706,7 +3706,7 @@ Returns a list from most specific to most general, with nils removed."
     ("V" "Open transcript" claude-gravity-open-agent-transcript)]
    ["Sessions"
     ("S" "Start (tmux)" claude-gravity-start-session)
-    ("s" "Send prompt" claude-gravity-send-prompt
+    ("s" "Compose prompt" claude-gravity-compose-prompt
      :inapt-if-not claude-gravity--current-session-tmux-p)
     ("/" "Slash command" claude-gravity-slash-command
      :inapt-if-not claude-gravity--current-session-tmux-p)
@@ -5348,14 +5348,12 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
       (claude-gravity--log 'debug "Claude tmux session resuming %s" session-id)
       session-id)))
 
-(defun claude-gravity-send-prompt (prompt &optional session-id)
-  "Send PROMPT to the tmux Claude session for SESSION-ID.
-If SESSION-ID is nil, uses the current buffer's session."
-  (interactive
-   (list (read-string "Prompt: ")))
+(defun claude-gravity--resolve-tmux-session (&optional session-id)
+  "Resolve SESSION-ID to a (sid . tmux-name) cons.
+Falls back to buffer-local session, then any active tmux session.
+Signals error if no session found or not alive."
   (let* ((sid (or session-id
                   claude-gravity--buffer-session-id
-                  ;; Find any active tmux session
                   (let ((found nil))
                     (maphash (lambda (id tmux-name)
                                (when (and (not found)
@@ -5368,18 +5366,163 @@ If SESSION-ID is nil, uses the current buffer's session."
       (error "No tmux Claude session found for %s" (or sid "any")))
     (unless (claude-gravity--tmux-alive-p tmux-name)
       (error "Tmux session %s is not running" tmux-name))
-    (claude-gravity--tmux-send-keys tmux-name prompt)
-    ;; Set flag so UserPromptSubmit hook dedup works
-    (let ((session (claude-gravity--get-session sid)))
-      (when session
-        (plist-put session :tmux-prompt-sent t)
-        (claude-gravity-model-add-prompt
-         session (list (cons 'text prompt)
-                       (cons 'submitted (current-time))
-                       (cons 'elapsed nil)))
-        (claude-gravity-model-set-claude-status session 'responding)
-        (claude-gravity--schedule-session-refresh sid)))
-    (claude-gravity--log 'debug "Sent prompt to Claude [%s]" sid)))
+    (cons sid tmux-name)))
+
+(defun claude-gravity--send-prompt-core (prompt sid tmux-name)
+  "Send PROMPT text to tmux TMUX-NAME and update model for session SID."
+  (claude-gravity--tmux-send-keys tmux-name prompt)
+  (let ((session (claude-gravity--get-session sid)))
+    (when session
+      (plist-put session :tmux-prompt-sent t)
+      (claude-gravity-model-add-prompt
+       session (list (cons 'text prompt)
+                     (cons 'submitted (current-time))
+                     (cons 'elapsed nil)))
+      (claude-gravity-model-set-claude-status session 'responding)
+      (claude-gravity--schedule-session-refresh sid)))
+  (claude-gravity--log 'debug "Sent prompt to Claude [%s]" sid))
+
+(defun claude-gravity-send-prompt (prompt &optional session-id)
+  "Send PROMPT to the tmux Claude session for SESSION-ID.
+If SESSION-ID is nil, uses the current buffer's session."
+  (interactive
+   (list (read-string "Prompt: ")))
+  (let ((resolved (claude-gravity--resolve-tmux-session session-id)))
+    (claude-gravity--send-prompt-core prompt (car resolved) (cdr resolved))))
+
+;;; ── Compose buffer (chat-style prompt entry) ──────────────────────
+
+(defvar-local claude-gravity--compose-session-id nil
+  "Session ID targeted by this compose buffer.")
+
+(defvar-local claude-gravity--compose-separator nil
+  "Marker for the start of the editable compose area.")
+
+(defvar claude-gravity-compose-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'claude-gravity-compose-send)
+    (define-key map (kbd "C-c C-k") #'claude-gravity-compose-cancel)
+    map)
+  "Keymap for `claude-gravity-compose-mode'.")
+
+(define-minor-mode claude-gravity-compose-mode
+  "Minor mode for the Claude prompt compose buffer.
+\\{claude-gravity-compose-mode-map}"
+  :lighter " Compose"
+  :keymap claude-gravity-compose-mode-map)
+
+(defun claude-gravity--compose-insert-history (session)
+  "Insert conversation history from SESSION's :prompts."
+  (let ((prompts (plist-get session :prompts)))
+    (when (and prompts (> (length prompts) 0))
+      (dotimes (i (length prompts))
+        (let* ((entry (aref prompts i))
+               (ptype (alist-get 'type entry))
+               (text (alist-get 'text entry))
+               (stop-text (alist-get 'stop_text entry)))
+          ;; Skip question/phase-boundary entries
+          (unless (memq ptype '(question phase-boundary))
+            (when text
+              (insert (propertize (concat "❯ " text "\n")
+                                  'face 'claude-gravity-prompt)))
+            (when stop-text
+              (insert (propertize (concat "\n◀ " stop-text "\n\n")
+                                  'face 'claude-gravity-assistant-text)))))))))
+
+(defun claude-gravity--compose-guard-history (beg _end)
+  "Prevent edits before the compose separator marker."
+  (when (and claude-gravity--compose-separator
+             (< beg (marker-position claude-gravity--compose-separator)))
+    (user-error "History is read-only — type below the separator")))
+
+(defun claude-gravity-compose-prompt (&optional session-id)
+  "Open a chat-style compose buffer to send a prompt.
+SESSION-ID defaults to the current buffer's session or any active tmux session."
+  (interactive)
+  (let* ((resolved (claude-gravity--resolve-tmux-session session-id))
+         (sid (car resolved))
+         (session (claude-gravity--get-session sid))
+         (label (if session (claude-gravity--session-label session) (substring sid 0 8)))
+         (buf-name (format "*Claude Compose: %s*" label))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      ;; Major mode first (kills buffer-locals), then content + minor modes
+      (if (fboundp 'markdown-mode) (markdown-mode) (text-mode))
+      ;; Remove stale guard from previous buffer incarnation, then
+      ;; rebuild content with inhibit-read-only to bypass old text props
+      (remove-hook 'before-change-functions
+                   #'claude-gravity--compose-guard-history t)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        ;; Insert conversation history
+        (when session
+          (claude-gravity--compose-insert-history session))
+        ;; Separator
+        (insert (propertize (concat (make-string 50 ?─) "\n")
+                            'face 'claude-gravity-divider))
+        ;; Mark where the editable compose area starts
+        (setq-local claude-gravity--compose-separator (copy-marker (point)))
+        ;; Lock history + separator as read-only, except the very last
+        ;; char so the property doesn't block typing at the boundary.
+        (when (> (point) 2)
+          (put-text-property 1 (1- (point)) 'read-only t)
+          (put-text-property 1 (1- (point)) 'front-sticky '(read-only))))
+      ;; Install guard for the boundary char + belt-and-suspenders
+      (add-hook 'before-change-functions
+                #'claude-gravity--compose-guard-history nil t)
+      ;; Buffer-local state (after major mode so they survive)
+      (setq-local claude-gravity--compose-session-id sid)
+      ;; Minor modes
+      (claude-gravity-compose-mode 1)
+      (when (fboundp 'olivetti-mode) (olivetti-mode 1))
+      ;; C-g support: post-command-hook detects keyboard-quit
+      (add-hook 'post-command-hook
+                #'claude-gravity--compose-quit-hook nil t)
+      ;; Place point at end (compose area)
+      (goto-char (point-max)))
+    ;; Display in side window
+    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.40)))
+    (select-window (get-buffer-window buf))
+    (goto-char (point-max))))
+
+(defun claude-gravity-compose-send ()
+  "Send the composed prompt and close the compose buffer."
+  (interactive)
+  (let* ((sep claude-gravity--compose-separator)
+         (text (string-trim
+                (buffer-substring-no-properties
+                 (if sep (marker-position sep) (point-min))
+                 (point-max)))))
+    (if (string-empty-p text)
+        (message "Nothing to send")
+      (let* ((sid claude-gravity--compose-session-id)
+             (resolved (claude-gravity--resolve-tmux-session sid)))
+        (claude-gravity--send-prompt-core text (car resolved) (cdr resolved))
+        (claude-gravity--compose-cleanup)
+        (message "Prompt sent")))))
+
+(defun claude-gravity-compose-cancel ()
+  "Cancel composing and close the compose buffer."
+  (interactive)
+  (claude-gravity--compose-cleanup)
+  (message "Compose cancelled"))
+
+(defun claude-gravity--compose-quit-hook ()
+  "Close compose buffer when C-g (keyboard-quit) is invoked."
+  (when (eq this-command 'keyboard-quit)
+    (run-at-time 0 nil #'claude-gravity--compose-cleanup-buffer
+                 (current-buffer))))
+
+(defun claude-gravity--compose-cleanup ()
+  "Kill the compose buffer and its window."
+  (claude-gravity--compose-cleanup-buffer (current-buffer)))
+
+(defun claude-gravity--compose-cleanup-buffer (buf)
+  "Kill compose BUF and its window."
+  (when (buffer-live-p buf)
+    (let ((win (get-buffer-window buf t)))
+      (when win (delete-window win))
+      (kill-buffer buf))))
 
 (defun claude-gravity-slash-command (command &optional session-id)
   "Send slash COMMAND to the tmux Claude session and display output.
@@ -5556,7 +5699,7 @@ cycle will re-key the session automatically."
     (claude-gravity--log 'debug "Sent /clear to Claude [%s]" sid)))
 
 ;; Keybindings for session commands
-(define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-send-prompt)
+(define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-compose-prompt)
 (define-key claude-gravity-mode-map (kbd "/") 'claude-gravity-slash-command)
 (define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-resume-session)
