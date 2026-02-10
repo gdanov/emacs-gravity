@@ -155,11 +155,19 @@ Returns the new item."
   "Refresh the buffer for SESSION-ID if it exists."
   (remhash session-id claude-gravity--session-refresh-timers)
   (let* ((session (claude-gravity--get-session session-id))
-         (buf (when session
-                (or (let ((b (plist-get session :buffer)))
-                      (and b (buffer-live-p b) b))
+         (owned-buf (when session
+                      (let ((b (plist-get session :buffer)))
+                        (and b (buffer-live-p b) b))))
+         (buf (or owned-buf
+                  (when session
                     (get-buffer (claude-gravity--session-buffer-name session))))))
     (when buf
+      ;; Adopt orphan buffer: found by name but not yet owned by this session.
+      ;; Happens after /clear when a new session reuses the same slug.
+      (unless owned-buf
+        (plist-put session :buffer buf)
+        (with-current-buffer buf
+          (setq claude-gravity--buffer-session-id session-id)))
       (claude-gravity--render-session-buffer session)
       (when (buffer-local-value 'claude-gravity--follow-mode buf)
         (with-current-buffer buf

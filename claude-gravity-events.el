@@ -142,15 +142,27 @@ the model mutation API to update session state."
 
     ("UserPromptSubmit"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
-            (prompt-text (claude-gravity--strip-system-xml
-                          (alist-get 'prompt data))))
+            (raw-prompt (alist-get 'prompt data))
+            (prompt-text (claude-gravity--strip-system-xml raw-prompt))
+            ;; Extract slash command name as fallback when XML stripping yields nil
+            (cmd-name (when (and (not prompt-text) raw-prompt
+                                 (string-match "<command-name>\\([^<]+\\)</command-name>" raw-prompt))
+                        (match-string 1 raw-prompt)))
+            (cmd-args (when (and cmd-name raw-prompt
+                                 (string-match "<command-args>\\([^<]*\\)</command-args>" raw-prompt))
+                        (match-string 1 raw-prompt)))
+            (display-text (or prompt-text
+                              (when cmd-name
+                                (if (and cmd-args (not (string-empty-p cmd-args)))
+                                    (format "/%s %s" cmd-name cmd-args)
+                                  (format "/%s" cmd-name))))))
        ;; Dedup: if tmux-prompt-sent flag is set, we already created the
        ;; prompt entry in send-prompt — skip to avoid duplicate
        (if (plist-get session :tmux-prompt-sent)
            (plist-put session :tmux-prompt-sent nil)
-         (when prompt-text
+         (when display-text
            (claude-gravity-model-add-prompt
-            session (list (cons 'text prompt-text)
+            session (list (cons 'text display-text)
                           (cons 'submitted (current-time))
                           (cons 'elapsed nil)
                           (cons 'stop_text nil)
