@@ -78,7 +78,8 @@
       "Bash(done)",
       "Bash(cat:*)",
       "Bash(git checkout:*)",
-      "Bash(git restore:*)"
+      "Bash(git restore:*)",
+      "Bash(git show:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

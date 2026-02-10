@@ -381,11 +381,16 @@ DEPTH tracks nesting level for background tint."
 
 
 (defun claude-gravity--insert-stop-text (turn-node)
-  "Insert trailing stop_text/stop_thinking from TURN-NODE's prompt entry.
+  "Insert trailing stop_text/stop_thinking from TURN-NODE.
+Falls back to prompt entry for pre-fix data.
 Deduplicates against the last tool's post_text/post_thinking."
   (let* ((prompt-entry (alist-get 'prompt turn-node))
-         (stop-think (and (listp prompt-entry) (alist-get 'stop_thinking prompt-entry)))
-         (stop-text (and (listp prompt-entry) (alist-get 'stop_text prompt-entry))))
+         (stop-think (or (alist-get 'stop_thinking turn-node)
+                         (and (listp prompt-entry)
+                              (alist-get 'stop_thinking prompt-entry))))
+         (stop-text (or (alist-get 'stop_text turn-node)
+                        (and (listp prompt-entry)
+                             (alist-get 'stop_text prompt-entry)))))
     ;; Find the last tool across all cycles for dedup
     (when (or stop-think stop-text)
       (let* ((cycles (claude-gravity--tlist-items (alist-get 'cycles turn-node)))
@@ -495,7 +500,8 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                         (format "%s  %s"
                                 (propertize "Pre-prompt activity" 'face 'claude-gravity-detail-label)
                                 (claude-gravity--turn-counts-from-node turn-node)))
-                      (claude-gravity--insert-turn-children-from-tree turn-node))
+                      (claude-gravity--insert-turn-children-from-tree turn-node)
+                      (claude-gravity--insert-stop-text turn-node))
                   ;; Normal turns
                   (let* ((prompt-text (when prompt-entry
                                         (claude-gravity--prompt-text prompt-entry)))

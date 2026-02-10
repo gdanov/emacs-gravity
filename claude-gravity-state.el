@@ -279,7 +279,9 @@ Uses :agent-index hash table for O(1) lookup."
         (cons 'tasks nil)
         (cons 'tool-count 0)
         (cons 'agent-count 0)
-        (cons 'frozen nil)))
+        (cons 'frozen nil)
+        (cons 'stop_text nil)
+        (cons 'stop_thinking nil)))
 
 (defun claude-gravity--make-cycle-node (&optional thinking text)
   "Create a new cycle node alist with optional THINKING and TEXT."
@@ -511,14 +513,18 @@ Optionally store STOP-TEXT and STOP-THINKING."
                  (alist-get 'submitted last-prompt))
         (setf (alist-get 'elapsed last-prompt)
               (float-time (time-subtract (current-time)
-                                         (alist-get 'submitted last-prompt)))))
-      ;; stop_text/stop_thinking: keys pre-initialized as nil in prompt alist,
-      ;; so setf/alist-get modifies the existing cons cell in-place.
-      (when stop-text
-        (setf (alist-get 'stop_text last-prompt) stop-text))
-      (when stop-thinking
-        (setf (alist-get 'stop_thinking last-prompt) stop-thinking))
-      )))
+                                         (alist-get 'submitted last-prompt))))))
+    ;; stop_text/stop_thinking stored on the turn node (not prompt) —
+    ;; This works even when last-prompt is nil (turn 0 / pre-prompt activity).
+    ;; Use assq guard + nconc for old turns that lack pre-allocated keys.
+    (when (and last-turn stop-text)
+      (unless (assq 'stop_text last-turn)
+        (nconc last-turn (list (cons 'stop_text nil))))
+      (setf (alist-get 'stop_text last-turn) stop-text))
+    (when (and last-turn stop-thinking)
+      (unless (assq 'stop_thinking last-turn)
+        (nconc last-turn (list (cons 'stop_thinking nil))))
+      (setf (alist-get 'stop_thinking last-turn) stop-thinking))))
 
 
 (defun claude-gravity-model-update-prompt-answer (session tool-use-id answer)
