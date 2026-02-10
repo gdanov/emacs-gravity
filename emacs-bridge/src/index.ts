@@ -924,17 +924,21 @@ async function main() {
           } catch { /* file may not exist yet */ }
 
           let { text, thinking } = extractTrailingText(transcriptPath, snapshotBytes);
-          if (!text && !thinking) {
-            // Transcript may not be fully flushed yet — retry with growing
-            // read window (re-read from disk each time, but DON'T update
-            // snapshotBytes — let it grow naturally as the file flushes).
+          // Retry if text is missing, even if thinking was found.
+          // The text message is typically the last to be flushed and contains
+          // the actual assistant response (stop_text). Thinking may arrive earlier,
+          // causing the initial extraction to miss the subsequent text message.
+          if (!text) {
             const maxRetries = 5;
             const delayMs = 250;
-            for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
+            for (let retry = 0; retry < maxRetries && !text; retry++) {
               await new Promise(r => setTimeout(r, delayMs));
               // Re-stat to get updated size (file may be flushing)
               try { snapshotBytes = statSync(transcriptPath).size; } catch {}
-              ({ text, thinking } = extractTrailingText(transcriptPath, snapshotBytes));
+              const extracted = extractTrailingText(transcriptPath, snapshotBytes);
+              if (extracted.text) text = extracted.text;
+              // Only update thinking if we didn't find it in the first attempt
+              if (!thinking && extracted.thinking) thinking = extracted.thinking;
               log(`Stop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`, 'warn');
             }
           }
