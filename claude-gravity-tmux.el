@@ -109,9 +109,7 @@ Returns (ENV-VARS . CLI-ARGS) where ENV-VARS are strings like
 Reads marketplace.json and expands each plugin source path."
   (let ((manifest (expand-file-name "marketplace.json" plugin-root)))
     (if (file-exists-p manifest)
-        (let* ((json-object-type 'alist)
-               (json-array-type 'list)
-               (data (json-read-file manifest))
+        (let* ((data (claude-gravity--json-read-file manifest))
                (plugins (alist-get 'plugins data)))
           (cl-mapcan (lambda (p)
                        (let ((src (alist-get 'source p)))
@@ -309,15 +307,18 @@ If SESSION-ID is nil, uses the current buffer's session."
 
 
 (defun claude-gravity--compose-insert-history (session)
-  "Insert conversation history from SESSION's :prompts."
-  (let ((prompts (plist-get session :prompts)))
-    (when prompts
-      (dolist (entry prompts)
-        (let ((ptype (alist-get 'type entry))
-              (text (alist-get 'text entry))
-              (stop-text (alist-get 'stop_text entry)))
-          ;; Skip question/phase-boundary entries
-          (unless (memq ptype '(question phase-boundary))
+  "Insert conversation history from SESSION's turn tree."
+  (let* ((turns-tl (plist-get session :turns))
+         (turn-nodes (when turns-tl (claude-gravity--tlist-items turns-tl))))
+    (when turn-nodes
+      (dolist (turn-node turn-nodes)
+        (let* ((entry (alist-get 'prompt turn-node))
+               (ptype (and (listp entry) (alist-get 'type entry)))
+               (text (and (listp entry) (alist-get 'text entry)))
+               (stop-text (and (listp entry) (alist-get 'stop_text entry))))
+          ;; Skip question/phase-boundary entries and turn 0
+          (unless (or (memq ptype '(question phase-boundary))
+                      (= (alist-get 'turn-number turn-node) 0))
             (when text
               (insert (propertize (concat "❯ " text "\n")
                                   'face 'claude-gravity-prompt)))

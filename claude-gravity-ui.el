@@ -130,8 +130,7 @@ Groups non-idle items by session and shows badge counts."
                             (label (claude-gravity--session-label session))
                             (status (plist-get session :status))
                             (claude-st (plist-get session :claude-status))
-                            (tools (alist-get 'tools (plist-get session :state)))
-                            (n-tools (length tools))
+                            (n-tools (claude-gravity--tree-total-tool-count session))
                             (indicator (if (eq status 'active)
                                            (propertize "●" 'face 'claude-gravity-tool-running)
                                          (propertize "○" 'face 'claude-gravity-session-ended)))
@@ -357,8 +356,7 @@ Only shows permission, question, and plan-review items (not idle)."
 
 (defun claude-gravity--render-session-buffer (session)
   "Render the magit-section UI for SESSION into its buffer."
-  (let* ((state (plist-get session :state))
-         (buf (or (let ((b (plist-get session :buffer)))
+  (let* ((buf (or (let ((b (plist-get session :buffer)))
                     (and b (buffer-live-p b) b))
                   (get-buffer (claude-gravity--session-buffer-name session)))))
     (when buf
@@ -474,8 +472,7 @@ Only shows permission, question, and plan-review items (not idle)."
                                      'face 'claude-gravity-status-idle))))
            (slug (propertize (claude-gravity--session-label session)
                              'face 'claude-gravity-slug))
-           (state (plist-get session :state))
-           (tool-count (length (alist-get 'tools state)))
+           (tool-count (claude-gravity--tree-total-tool-count session))
            (elapsed (claude-gravity--session-total-elapsed session))
            (usage (plist-get session :token-usage))
            (in-tokens (when usage
@@ -659,10 +656,8 @@ Returns a list from most specific to most general, with nils removed."
                      (settings-path (expand-file-name ".claude/settings.local.json" cwd)))
                 (when (y-or-n-p (format "Add \"%s\" to %s? " chosen
                                         (file-name-nondirectory settings-path)))
-                  (let* ((json-object-type 'alist)
-                         (json-array-type 'list)
-                         (data (if (file-exists-p settings-path)
-                                   (json-read-file settings-path)
+                  (let* ((data (if (file-exists-p settings-path)
+                                   (claude-gravity--json-read-file settings-path)
                                  (list (cons 'permissions (list (cons 'allow nil))))))
                          (perms (or (alist-get 'permissions data)
                                     (list (cons 'allow nil))))

@@ -188,7 +188,9 @@ the model mutation API to update session state."
                              (cons 'status "running")
                              (cons 'timestamp (current-time))
                              (cons 'turn (or (plist-get session :current-turn) 0))
-                             (cons 'agent-tools [])
+                             (cons 'cycles (claude-gravity--tlist-new))
+                             (cons 'tool-count 0)
+                             (cons 'task-tool nil)
                              (cons 'transcript_path (alist-get 'agent_transcript_path data))
                              (cons 'stop_text nil)
                              (cons 'stop_thinking nil)
@@ -204,9 +206,7 @@ the model mutation API to update session state."
         session agent-id
         :transcript-path (alist-get 'agent_transcript_path data)
         :stop-text stop-text
-        :stop-thinking stop-thinking)
-       (claude-gravity-model-move-tools-to-agent
-        session agent-id (alist-get 'agent_tool_ids data))))
+        :stop-thinking stop-thinking)))
 
     ("PreToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))

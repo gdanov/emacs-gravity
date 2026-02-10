@@ -76,7 +76,9 @@
       "Bash(for ext in \"*.el\" \"*.ts\" \"*.js\" \"*.md\")",
       "Bash(do echo \"=== $ext ===\")",
       "Bash(done)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(git checkout:*)",
+      "Bash(git restore:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

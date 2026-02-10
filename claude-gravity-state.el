@@ -131,7 +131,7 @@ Returns the new item."
   (when claude-gravity--refresh-timer
     (cancel-timer claude-gravity--refresh-timer))
   (setq claude-gravity--refresh-timer
-        (run-with-idle-timer 0.1 nil #'claude-gravity--do-refresh)))
+        (run-with-idle-timer 0.05 nil #'claude-gravity--do-refresh)))
 
 
 (defun claude-gravity--do-refresh ()
@@ -146,7 +146,7 @@ Returns the new item."
   (let ((existing (gethash session-id claude-gravity--session-refresh-timers)))
     (when existing (cancel-timer existing))
     (puthash session-id
-             (run-with-idle-timer 0.1 nil
+             (run-with-idle-timer 0.05 nil
                                   #'claude-gravity--do-session-refresh session-id)
              claude-gravity--session-refresh-timers)))
 
@@ -204,13 +204,14 @@ Returns the new item."
        (pcase tool-name
          ("TaskCreate"
           ;; Store with tool_use_id as temp key; we'll re-key on PostToolUse
-          (puthash (concat "_pending_" tool-use-id)
-                   (list (cons 'subject (alist-get 'subject tool-input))
-                         (cons 'description (alist-get 'description tool-input))
-                         (cons 'activeForm (alist-get 'activeForm tool-input))
-                         (cons 'status "pending")
-                         (cons 'turn (or (plist-get session :current-turn) 0)))
-                   tasks))
+          (let ((entry (list (cons 'subject (alist-get 'subject tool-input))
+                             (cons 'description (alist-get 'description tool-input))
+                             (cons 'activeForm (alist-get 'activeForm tool-input))
+                             (cons 'status "pending")
+                             (cons 'turn (or (plist-get session :current-turn) 0)))))
+            (puthash (concat "_pending_" tool-use-id) entry tasks)
+            ;; Tree path: also add task to current turn node
+            (claude-gravity--tree-add-task session entry)))
          ("TaskUpdate"
           (let* ((task-id (alist-get 'taskId tool-input))
                  (entry (gethash task-id tasks)))
@@ -256,46 +257,199 @@ Returns the new item."
 
 ;;; Agent helpers
 
-(defun claude-gravity--find-agent-by-id (agents agent-id)
-  "Find index of agent in AGENTS list matching AGENT-ID.
-For vector AGENTS (legacy), searches with aref; for lists, uses cl-position."
-  (cond
-   ((vectorp agents)
-    (let ((idx nil))
-      (dotimes (i (length agents))
-        (when (equal (alist-get 'agent_id (aref agents i)) agent-id)
-          (setq idx i)))
-      idx))
-   ((listp agents)
-    (cl-position agent-id agents :test #'equal :key (lambda (a) (alist-get 'agent_id a))))
-   (t nil)))
-
-
 (defun claude-gravity--find-agent (session agent-id)
-  "Find and return agent alist for AGENT-ID in SESSION, or nil."
-  (let ((agents (plist-get session :agents)))
-    (cl-find agent-id agents :test #'equal :key (lambda (a) (alist-get 'agent_id a)))))
+  "Find and return agent alist for AGENT-ID in SESSION, or nil.
+Uses :agent-index hash table for O(1) lookup."
+  (let ((idx (plist-get session :agent-index)))
+    (when (hash-table-p idx)
+      (gethash agent-id idx))))
 
 
-(defun claude-gravity--agent-tools-list (session agent-id)
-  "Return the tools list for AGENT-ID in SESSION.
-If AGENT-ID is nil, return the root tools list.
-If the agent is not found, return nil."
-  (if (null agent-id)
-      (alist-get 'tools (plist-get session :state))
-    (let ((agent (claude-gravity--find-agent session agent-id)))
-      (when agent
-        (alist-get 'agent-tools agent)))))
+;;; Turn tree structure
+;;
+;; The turn tree mirrors the screen: Session → Turns → Cycles → Tools.
+;; Hooks write directly to the tree; the renderer iterates it.
 
+(defun claude-gravity--make-turn-node (turn-number)
+  "Create a new turn node alist for TURN-NUMBER."
+  (list (cons 'turn-number turn-number)
+        (cons 'prompt nil)
+        (cons 'cycles (claude-gravity--tlist-new))
+        (cons 'agents (claude-gravity--tlist-new))
+        (cons 'tasks nil)
+        (cons 'tool-count 0)
+        (cons 'agent-count 0)
+        (cons 'frozen nil)))
 
-(defun claude-gravity--set-agent-tools-list (session agent-id new-list)
-  "Set the tools list for AGENT-ID in SESSION to NEW-LIST.
-If AGENT-ID is nil, set root tools."
-  (if (null agent-id)
-      (setf (alist-get 'tools (plist-get session :state)) new-list)
-    (let ((agent (claude-gravity--find-agent session agent-id)))
-      (when agent
-        (setf (alist-get 'agent-tools agent) new-list)))))
+(defun claude-gravity--make-cycle-node (&optional thinking text)
+  "Create a new cycle node alist with optional THINKING and TEXT."
+  (list (cons 'thinking thinking)
+        (cons 'text text)
+        (cons 'tools (claude-gravity--tlist-new))))
+
+(defun claude-gravity--current-turn-node (session)
+  "Return the current (last) turn node from SESSION's :turns tlist."
+  (claude-gravity--tlist-last-item (plist-get session :turns)))
+
+(defun claude-gravity--get-turn-node (session turn-number)
+  "Return turn node for TURN-NUMBER from SESSION, or nil."
+  (cl-find turn-number (claude-gravity--tlist-items (plist-get session :turns))
+           :key (lambda (t-node) (alist-get 'turn-number t-node))))
+
+(defun claude-gravity--current-cycle (turn-node)
+  "Return the current (last) cycle from TURN-NODE, or nil."
+  (claude-gravity--tlist-last-item (alist-get 'cycles turn-node)))
+
+(defun claude-gravity--ensure-cycle (turn-node &optional thinking text)
+  "Return current cycle in TURN-NODE, creating one if empty.
+If THINKING or TEXT differ from current cycle, start a new cycle."
+  (let* ((cycles-tl (alist-get 'cycles turn-node))
+         (current (claude-gravity--tlist-last-item cycles-tl)))
+    (if (and current
+             (not (and thinking
+                       (not (equal thinking (alist-get 'thinking current)))))
+             (not (and text
+                       (not (string-empty-p text))
+                       (alist-get 'text current)
+                       (not (string-empty-p (alist-get 'text current)))
+                       (not (claude-gravity--text-subsumes-p text (alist-get 'text current))))))
+        current
+      ;; Create new cycle
+      (let ((new-cycle (claude-gravity--make-cycle-node thinking text)))
+        (claude-gravity--tlist-append cycles-tl new-cycle)
+        new-cycle))))
+
+(defun claude-gravity--tree-add-tool (session tool &optional agent-id)
+  "Add TOOL to SESSION's turn tree, routing based on AGENT-ID.
+Handles cycle boundary detection at insertion time."
+  (let* ((turn-num (or (alist-get 'turn tool) 0))
+         (turn-node (or (claude-gravity--get-turn-node session turn-num)
+                        (claude-gravity--current-turn-node session)))
+         (athink (alist-get 'assistant_thinking tool))
+         (atext (alist-get 'assistant_text tool)))
+    (when turn-node
+      (if (and agent-id (not (equal agent-id "ambiguous")))
+          ;; Route to agent's cycles
+          (let ((agent (claude-gravity--find-agent session agent-id)))
+            (when agent
+              (let* ((agent-cycles (alist-get 'cycles agent))
+                     (cycle (if (not (claude-gravity--tlist-items agent-cycles))
+                                ;; First cycle for this agent
+                                (let ((c (claude-gravity--make-cycle-node athink atext)))
+                                  (claude-gravity--tlist-append agent-cycles c)
+                                  c)
+                              (claude-gravity--agent-ensure-cycle agent athink atext))))
+                (claude-gravity--tlist-append (alist-get 'tools cycle) tool)
+                (cl-incf (alist-get 'tool-count agent)))))
+        ;; Route to turn's root cycles (including ambiguous)
+        (let* ((cycles-tl (alist-get 'cycles turn-node))
+               (current (claude-gravity--tlist-last-item cycles-tl))
+               ;; Dedup: if same assistant_text as current cycle, clear it (parallel call)
+               (atext (if (and atext current
+                               (equal atext (alist-get 'text current)))
+                          (progn (setf (alist-get 'assistant_text tool) nil) nil)
+                        atext))
+               (athink (if (and athink current
+                                (equal athink (alist-get 'thinking current)))
+                           (progn (setf (alist-get 'assistant_thinking tool) nil) nil)
+                         athink))
+               ;; Start new cycle if we have new assistant text
+               (cycle (if (or (not current)
+                              (and atext (not (string-empty-p atext))
+                                   (alist-get 'text current)
+                                   (not (string-empty-p (alist-get 'text current)))
+                                   (not (claude-gravity--text-subsumes-p atext (alist-get 'text current))))
+                              (and athink (not (string-empty-p athink))
+                                   (alist-get 'thinking current)
+                                   (not (string-empty-p (alist-get 'thinking current)))
+                                   (not (equal athink (alist-get 'thinking current)))))
+                          ;; New cycle
+                          (let ((c (claude-gravity--make-cycle-node athink atext)))
+                            (claude-gravity--tlist-append cycles-tl c)
+                            c)
+                        ;; Reuse current cycle, but set text/thinking if not yet set
+                        (progn
+                          (when (and atext (not (string-empty-p atext))
+                                     (or (not (alist-get 'text current))
+                                         (string-empty-p (alist-get 'text current))))
+                            (setf (alist-get 'text current) atext))
+                          (when (and athink (not (string-empty-p athink))
+                                     (or (not (alist-get 'thinking current))
+                                         (string-empty-p (alist-get 'thinking current))))
+                            (setf (alist-get 'thinking current) athink))
+                          current))))
+          (claude-gravity--tlist-append (alist-get 'tools cycle) tool)
+          ;; Only increment turn tool count for root (non-agent) tools
+          (cl-incf (alist-get 'tool-count turn-node)))))))
+
+(defun claude-gravity--agent-ensure-cycle (agent &optional thinking text)
+  "Ensure AGENT has a current cycle, creating new one if needed."
+  (let* ((cycles-tl (alist-get 'cycles agent))
+         (current (claude-gravity--tlist-last-item cycles-tl)))
+    (if (and current
+             (not (and text
+                       (not (string-empty-p text))
+                       (alist-get 'text current)
+                       (not (string-empty-p (alist-get 'text current)))
+                       (not (claude-gravity--text-subsumes-p text (alist-get 'text current))))))
+        (progn
+          ;; Set text/thinking if not yet set
+          (when (and text (not (string-empty-p text))
+                     (or (not (alist-get 'text current))
+                         (string-empty-p (alist-get 'text current))))
+            (setf (alist-get 'text current) text))
+          (when (and thinking (not (string-empty-p thinking))
+                     (or (not (alist-get 'thinking current))
+                         (string-empty-p (alist-get 'thinking current))))
+            (setf (alist-get 'thinking current) thinking))
+          current)
+      ;; New cycle
+      (let ((c (claude-gravity--make-cycle-node thinking text)))
+        (claude-gravity--tlist-append cycles-tl c)
+        c))))
+
+(defun claude-gravity--tree-add-agent (session agent)
+  "Add AGENT to current turn node's agents tlist in SESSION."
+  (let ((turn-node (claude-gravity--current-turn-node session)))
+    (when turn-node
+      (claude-gravity--tlist-append (alist-get 'agents turn-node) agent)
+      (cl-incf (alist-get 'agent-count turn-node))
+      ;; Try to link agent to its spawning Task tool
+      (claude-gravity--link-agent-to-task-tool session turn-node agent))))
+
+(defun claude-gravity--link-agent-to-task-tool (session turn-node agent)
+  "Link AGENT to its spawning Task tool in TURN-NODE.
+Scans recent tools in the turn for an unlinked Task tool matching agent type."
+  (let* ((atype (alist-get 'type agent))
+         (cycles (claude-gravity--tlist-items (alist-get 'cycles turn-node)))
+         (found nil))
+    (when atype
+      ;; Scan cycles in reverse (most recent first) for matching unlinked Task tool
+      (dolist (cycle (reverse cycles))
+        (unless found
+          (dolist (tool (reverse (claude-gravity--tlist-items (alist-get 'tools cycle))))
+            (when (and (not found)
+                       (equal (alist-get 'name tool) "Task")
+                       (equal (alist-get 'subagent_type (alist-get 'input tool)) atype)
+                       (not (alist-get 'agent tool)))
+              ;; Bidirectional link — use nconc since 'agent key doesn't exist yet
+              (nconc tool (list (cons 'agent agent)))
+              (setf (alist-get 'task-tool agent) tool)
+              (setq found t))))))))
+
+(defun claude-gravity--tree-add-task (session task)
+  "Add TASK alist to current turn node's tasks list in SESSION."
+  (let ((turn-node (claude-gravity--current-turn-node session)))
+    (when turn-node
+      (setf (alist-get 'tasks turn-node)
+            (nconc (alist-get 'tasks turn-node) (list task))))))
+
+(defun claude-gravity--tree-total-tool-count (session)
+  "Return total tool count across all turns in SESSION."
+  (let ((total 0))
+    (dolist (turn-node (claude-gravity--tlist-items (plist-get session :turns)))
+      (cl-incf total (or (alist-get 'tool-count turn-node) 0)))
+    total))
 
 
 ;;; Model mutation API
@@ -332,18 +486,24 @@ If AGENT-ID is nil, set root tools."
 
 
 (defun claude-gravity-model-add-prompt (session entry)
-  "Append prompt ENTRY to SESSION's :prompts and increment :current-turn."
-  (plist-put session :prompts
-             (nconc (plist-get session :prompts) (list entry)))
-  (plist-put session :current-turn
-             (1+ (or (plist-get session :current-turn) 0))))
+  "Append prompt ENTRY to SESSION and increment :current-turn.
+Creates a new turn node in the :turns tree."
+  (let ((new-turn (1+ (or (plist-get session :current-turn) 0))))
+    (plist-put session :current-turn new-turn)
+    ;; Freeze previous turn, create new turn node
+    (let ((prev-turn (claude-gravity--current-turn-node session)))
+      (when prev-turn
+        (setf (alist-get 'frozen prev-turn) t)))
+    (let ((turn-node (claude-gravity--make-turn-node new-turn)))
+      (setf (alist-get 'prompt turn-node) entry)
+      (claude-gravity--tlist-append (plist-get session :turns) turn-node))))
 
 
 (defun claude-gravity-model-finalize-last-prompt (session &optional stop-text stop-thinking)
   "Compute elapsed time on SESSION's last prompt.
 Optionally store STOP-TEXT and STOP-THINKING."
-  (let* ((prompts (plist-get session :prompts))
-         (last-prompt (car (last prompts))))
+  (let* ((last-turn (claude-gravity--current-turn-node session))
+         (last-prompt (when last-turn (alist-get 'prompt last-turn))))
     (when last-prompt
       ;; Elapsed: key exists in alist (created as nil), so setf is in-place
       (when (and (listp last-prompt)
@@ -363,10 +523,11 @@ Optionally store STOP-TEXT and STOP-THINKING."
 
 (defun claude-gravity-model-update-prompt-answer (session tool-use-id answer)
   "Update the question prompt matching TOOL-USE-ID in SESSION with ANSWER."
-  (let ((prompts (plist-get session :prompts)))
-    (when (and prompts tool-use-id)
-      (dolist (p prompts)
-        (when (and (equal (alist-get 'type p) 'question)
+  (when tool-use-id
+    (dolist (turn-node (claude-gravity--tlist-items (plist-get session :turns)))
+      (let ((p (alist-get 'prompt turn-node)))
+        (when (and p
+                   (equal (alist-get 'type p) 'question)
                    (equal (alist-get 'tool_use_id p) tool-use-id))
           (setf (alist-get 'answer p) answer)
           (setf (alist-get 'elapsed p)
@@ -375,57 +536,30 @@ Optionally store STOP-TEXT and STOP-THINKING."
 
 
 (defun claude-gravity-model-add-tool (session tool agent-id candidate-ids)
-  "Add TOOL to SESSION, routing based on AGENT-ID.
+  "Add TOOL to SESSION's turn tree, routing based on AGENT-ID.
 AGENT-ID can be a string (definitive agent), \"ambiguous\", or nil (root).
 CANDIDATE-IDS is a list of possible agent IDs when ambiguous.
 Deduplicates by tool_use_id — skips if a tool with the same ID already exists."
   (let ((tid (alist-get 'tool_use_id tool)))
     (when (or (null tid) (null (claude-gravity-model-find-tool session tid)))
-      (cond
-       ;; Definitively attributed to an agent
-       ((and agent-id (not (equal agent-id "ambiguous")))
-        (let ((agent-tools (claude-gravity--agent-tools-list session agent-id)))
-          (if agent-tools
-              (claude-gravity--set-agent-tools-list
-               session agent-id (nconc agent-tools (list tool)))
-            ;; Agent not found — fall back to root
-            (setf (alist-get 'tools (plist-get session :state))
-                  (nconc (alist-get 'tools (plist-get session :state)) (list tool))))))
-       ;; Ambiguous — store in root with ambiguous flag
-       ((equal agent-id "ambiguous")
+      ;; Set ambiguous flag if needed
+      (when (equal agent-id "ambiguous")
         (setf (alist-get 'ambiguous tool) t)
         (when candidate-ids
           (setf (alist-get 'candidate-agents tool)
-                (append candidate-ids nil)))
-        (setf (alist-get 'tools (plist-get session :state))
-              (nconc (alist-get 'tools (plist-get session :state)) (list tool))))
-       ;; No agent context — root tool
-       (t
-        (setf (alist-get 'tools (plist-get session :state))
-              (nconc (alist-get 'tools (plist-get session :state)) (list tool)))))
+                (append candidate-ids nil))))
       ;; Register in tool index for O(1) lookup
       (when tid
-        (puthash tid tool (plist-get session :tool-index))))))
+        (puthash tid tool (plist-get session :tool-index)))
+      ;; Route to turn tree
+      (claude-gravity--tree-add-tool session tool agent-id))))
 
 
-(defun claude-gravity-model-complete-tool (session tool-use-id agent-id result)
+(defun claude-gravity-model-complete-tool (session tool-use-id _agent-id result)
   "Mark tool TOOL-USE-ID as done in SESSION with RESULT.
-AGENT-ID is used for routing; handles re-attribution of ambiguous tools."
+_AGENT-ID is accepted for API compatibility but not used (tree routes at insertion)."
   (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
     (when tool
-      ;; Re-attribute ambiguous root tool to agent if now definitive
-      (when (and (alist-get 'ambiguous tool)
-                 agent-id (not (equal agent-id "ambiguous")))
-        (let ((agent-tools (claude-gravity--agent-tools-list session agent-id)))
-          (when agent-tools
-            (setf (alist-get 'ambiguous tool) nil)
-            ;; Remove from root tools list
-            (setf (alist-get 'tools (plist-get session :state))
-                  (delq tool (alist-get 'tools (plist-get session :state))))
-            ;; Add to agent tools
-            (claude-gravity--set-agent-tools-list
-             session agent-id (nconc agent-tools (list tool))))))
-      ;; Mark as done
       (setf (alist-get 'status tool) "done")
       (setf (alist-get 'result tool) result))))
 
@@ -437,12 +571,17 @@ Uses the :tool-index hash table for O(1) lookup."
 
 
 (defun claude-gravity-model-add-agent (session agent)
-  "Add AGENT alist to SESSION's :agents list if not already present."
+  "Add AGENT alist to SESSION if not already present.
+Registers in :agent-index for O(1) lookup and adds to turn tree."
   (let* ((new-id (alist-get 'agent_id agent))
          (existing (claude-gravity--find-agent session new-id)))
     (unless existing
-      (plist-put session :agents
-                 (nconc (plist-get session :agents) (list agent))))))
+      ;; Register in agent-index
+      (let ((idx (plist-get session :agent-index)))
+        (when (hash-table-p idx)
+          (puthash new-id agent idx)))
+      ;; Add to turn tree
+      (claude-gravity--tree-add-agent session agent))))
 
 
 (defun claude-gravity-model-complete-agent (session agent-id &rest props)
@@ -468,33 +607,6 @@ PROPS is a plist with optional keys:
       (let ((sth (plist-get props :stop-thinking)))
         (when sth
           (setf (alist-get 'stop_thinking agent) sth))))))
-
-
-(defun claude-gravity-model-move-tools-to-agent (session agent-id tool-ids)
-  "Move ambiguous root tools matching TOOL-IDS to agent AGENT-ID in SESSION."
-  (when (and tool-ids (> (length tool-ids) 0))
-    (let ((agent (claude-gravity--find-agent session agent-id)))
-      (when agent
-        (let* ((root-tools (alist-get 'tools (plist-get session :state)))
-               (agent-tools (alist-get 'agent-tools agent))
-               (to-move nil)
-               (keep nil))
-          (dolist (tool root-tools)
-            (let ((tid (alist-get 'tool_use_id tool)))
-              (if (and (alist-get 'ambiguous tool)
-                       tid
-                       (seq-contains-p tool-ids tid #'equal))
-                  (progn
-                    (setf (alist-get 'ambiguous tool) nil)
-                    (push tool to-move))
-                (push tool keep))))
-          (when to-move
-            (setf (alist-get 'tools (plist-get session :state))
-                  (nreverse keep))
-            (setf (alist-get 'agent-tools agent)
-                  (nconc (or agent-tools nil) (nreverse to-move)))
-            (claude-gravity--log 'debug "Claude Gravity: moved %d tools to agent %s"
-                     (length to-move) agent-id)))))))
 
 
 (defun claude-gravity-model-add-notification (session notif)

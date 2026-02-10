@@ -300,14 +300,9 @@ TID the tool_use_id for updating prompts."
                                       answer-label (or q-text "") answer-label)))))))
       (claude-gravity--send-bidirectional-response proc response))
     ;; Update the prompt entry with the answer
-    (let* ((session (claude-gravity--get-session session-id))
-           (prompts (when session (plist-get session :prompts)))
-           (tid tid))
-      (when (and prompts tid)
-        (dolist (p prompts)
-          (when (and (equal (alist-get 'type p) 'question)
-                     (equal (alist-get 'tool_use_id p) tid))
-            (setf (alist-get 'answer p) answer-label)))))
+    (let ((session (claude-gravity--get-session session-id)))
+      (when (and session tid)
+        (claude-gravity-model-update-prompt-answer session tid answer-label)))
     (claude-gravity--log 'debug "Answered: %s" answer-label)))
 
 
@@ -369,10 +364,8 @@ SESSION-ID and CWD identify the session project."
          (chosen (car suggestions))
          (settings-path (expand-file-name ".claude/settings.local.json" cwd)))
     (when chosen
-      (let* ((json-object-type 'alist)
-             (json-array-type 'list)
-             (data (if (file-exists-p settings-path)
-                       (json-read-file settings-path)
+      (let* ((data (if (file-exists-p settings-path)
+                       (claude-gravity--json-read-file settings-path)
                      (list (cons 'permissions (list (cons 'allow nil))))))
              (perms (or (alist-get 'permissions data)
                         (list (cons 'allow nil))))

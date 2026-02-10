@@ -144,5 +144,58 @@ Dynamically let-bound inside agent branches for nested tint selection.")
    ((< n 1000000) (format "%.1fk" (/ n 1000.0)))
    (t (format "%.1fM" (/ n 1000000.0)))))
 
+(defun claude-gravity--text-subsumes-p (a b)
+  "Return non-nil if text A fully contains B's content.
+Checks equality and paragraph-boundary prefix match."
+  (and a b
+       (not (string-empty-p a))
+       (not (string-empty-p b))
+       (or (equal a b)
+           (string-prefix-p (concat b "\n\n") a)
+           (string-prefix-p (concat a "\n\n") b))))
+
+
+;;; tlist — O(1) append list with tail pointer
+;;
+;; A tlist is a cons cell (HEAD . LAST-CONS) where HEAD is the list and
+;; LAST-CONS points to its tail.  Provides O(1) append and O(n) iteration.
+
+(defsubst claude-gravity--tlist-new ()
+  "Create a new empty tlist."
+  (cons nil nil))
+
+(defun claude-gravity--tlist-append (tl item)
+  "Append ITEM to tlist TL.  O(1) operation."
+  (let ((new-cell (list item)))
+    (if (cdr tl)
+        ;; Non-empty: link after current tail, update tail pointer
+        (progn
+          (setcdr (cdr tl) new-cell)
+          (setcdr tl new-cell))
+      ;; Empty: set both head and tail
+      (setcar tl new-cell)
+      (setcdr tl new-cell)))
+  tl)
+
+(defsubst claude-gravity--tlist-items (tl)
+  "Return the items list from tlist TL."
+  (car tl))
+
+(defsubst claude-gravity--tlist-last-item (tl)
+  "Return the last appended item from tlist TL, or nil if empty."
+  (car (cdr tl)))
+
+(defsubst claude-gravity--tlist-length (tl)
+  "Return the number of items in tlist TL."
+  (length (car tl)))
+
+
+(defun claude-gravity--json-read-file (path)
+  "Read JSON file at PATH using the fast C parser.
+Returns alist for objects, list for arrays."
+  (with-temp-buffer
+    (insert-file-contents path)
+    (json-parse-buffer :object-type 'alist :array-type 'list)))
+
 (provide 'claude-gravity-core)
 ;;; claude-gravity-core.el ends here
