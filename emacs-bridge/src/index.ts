@@ -50,7 +50,7 @@ function getSocketPath(): string {
 }
 
 // Helper to send data to Emacs socket
-async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pid: number | null, payload: any) {
+async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pid: number | null, payload: any, hookInput?: any) {
   log(`Sending event: ${eventName} session: ${sessionId}`);
   const socketPath = getSocketPath();
   log(`Socket path: ${socketPath}`);
@@ -60,8 +60,9 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pi
 
     client.on("connect", () => {
       log("Connected to socket");
-      const message =
-        JSON.stringify({ event: eventName, session_id: sessionId, cwd: cwd, pid: pid, data: payload }) + "\n";
+      const msg: any = { event: eventName, session_id: sessionId, cwd: cwd, pid: pid, data: payload };
+      if (hookInput) msg.hook_input = hookInput;
+      const message = JSON.stringify(msg) + "\n";
       client.write(message);
       client.end();
     });
@@ -81,7 +82,7 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pi
 
 // Helper to send data to Emacs socket and wait for a response (bidirectional).
 // Used for PermissionRequest where Emacs must reply with allow/deny.
-async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: string, pid: number | null, payload: any, timeoutMs: number = 345600000): Promise<any> {
+async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: string, pid: number | null, payload: any, timeoutMs: number = 345600000, hookInput?: any): Promise<any> {
   log(`Sending event (wait): ${eventName} session: ${sessionId}`);
   const socketPath = getSocketPath();
 
@@ -101,8 +102,9 @@ async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: str
 
     client.on("connect", () => {
       log("Connected to socket (wait mode)");
-      const message =
-        JSON.stringify({ event: eventName, session_id: sessionId, cwd: cwd, pid: pid, needs_response: true, data: payload }) + "\n";
+      const msg: any = { event: eventName, session_id: sessionId, cwd: cwd, pid: pid, needs_response: true, data: payload };
+      if (hookInput) msg.hook_input = hookInput;
+      const message = JSON.stringify(msg) + "\n";
       client.write(message);
       // Do NOT call client.end() — keep connection open for response
     });
@@ -675,6 +677,10 @@ async function main() {
 
     log(`Payload: ${JSON.stringify(inputData)}`);
 
+    // Snapshot raw hook input before any enrichment mutations.
+    // Sent alongside enriched data so Emacs debug viewer can show both.
+    const rawHookInput = JSON.parse(JSON.stringify(inputData));
+
     // Extract session identifiers from hook input
     const sessionId = (inputData as any).session_id || "unknown";
     const cwd = (inputData as any).cwd || "";
@@ -964,10 +970,10 @@ async function main() {
 
     // Send to Emacs — PermissionRequest and AskUserQuestionIntercept use bidirectional wait
     if (eventName === "PermissionRequest") {
-      const response = await sendToEmacsAndWait(eventName, sessionId, cwd, pid, inputData);
+      const response = await sendToEmacsAndWait(eventName, sessionId, cwd, pid, inputData, undefined, rawHookInput);
       console.log(JSON.stringify(response));
     } else if (eventName === "AskUserQuestionIntercept") {
-      const response = await sendToEmacsAndWait("PreToolUse", sessionId, cwd, pid, inputData);
+      const response = await sendToEmacsAndWait("PreToolUse", sessionId, cwd, pid, inputData, undefined, rawHookInput);
       if (response && response.hookSpecificOutput) {
         console.log(JSON.stringify(response));
       } else {
@@ -979,7 +985,7 @@ async function main() {
       if (eventName === "SubagentStop") {
         log(`[FINAL_CHECK_BEFORE_SEND] agent_stop_text=${typeof (inputData as any).agent_stop_text === 'string' ? `"${((inputData as any).agent_stop_text as string).substring(0, 40)}"` : (inputData as any).agent_stop_text}`, 'warn');
       }
-      await sendToEmacs(eventName, sessionId, cwd, pid, inputData);
+      await sendToEmacs(eventName, sessionId, cwd, pid, inputData, rawHookInput);
       // Always output valid JSON to stdout as expected by Claude Code
       console.log(JSON.stringify({}));
     }

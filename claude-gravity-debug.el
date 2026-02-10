@@ -10,7 +10,7 @@
 (defvar claude-gravity--debug-messages nil
   "Ring buffer of captured bridge messages.
 Each entry is an alist with keys: timestamp, event, session-id,
-cwd, pid, needs-response, data, raw, parse-error.")
+cwd, pid, needs-response, data, hook-input, raw, parse-error.")
 
 (defvar claude-gravity--debug-messages-max 200
   "Maximum messages to retain (oldest dropped).")
@@ -31,6 +31,7 @@ PARSE-ERROR is the error object (or nil)."
            (pid (when parsed-data (alist-get 'pid parsed-data)))
            (needs-resp (when parsed-data (alist-get 'needs_response parsed-data)))
            (payload (when parsed-data (alist-get 'data parsed-data)))
+           (hook-input (when parsed-data (alist-get 'hook_input parsed-data)))
            (entry `((timestamp . ,(current-time))
                     (event . ,event)
                     (session-id . ,session-id)
@@ -38,6 +39,7 @@ PARSE-ERROR is the error object (or nil)."
                     (pid . ,pid)
                     (needs-response . ,needs-resp)
                     (data . ,payload)
+                    (hook-input . ,hook-input)
                     (raw . ,raw-json)
                     (parse-error . ,(when parse-error
                                       (error-message-string parse-error))))))
@@ -52,14 +54,22 @@ PARSE-ERROR is the error object (or nil)."
 (defvar claude-gravity--debug-refresh-timer nil
   "Timer for debounced debug buffer refresh.")
 
+(defvar claude-gravity--debug-bridge-refresh-timer nil
+  "Timer for debounced bridge debug buffer refresh.")
+
 (defun claude-gravity--debug-schedule-refresh ()
   "Schedule debug buffer refresh if visible."
-  (when (and claude-gravity--debug-messages-enabled
-             (get-buffer-window "*Claude Debug: Messages*"))
-    (when claude-gravity--debug-refresh-timer
-      (cancel-timer claude-gravity--debug-refresh-timer))
-    (setq claude-gravity--debug-refresh-timer
-          (run-with-idle-timer 0.1 nil #'claude-gravity--debug-do-refresh))))
+  (when claude-gravity--debug-messages-enabled
+    (when (get-buffer-window "*Claude Debug: Messages*")
+      (when claude-gravity--debug-refresh-timer
+        (cancel-timer claude-gravity--debug-refresh-timer))
+      (setq claude-gravity--debug-refresh-timer
+            (run-with-idle-timer 0.1 nil #'claude-gravity--debug-do-refresh)))
+    (when (get-buffer-window "*Claude Debug: Bridge*")
+      (when claude-gravity--debug-bridge-refresh-timer
+        (cancel-timer claude-gravity--debug-bridge-refresh-timer))
+      (setq claude-gravity--debug-bridge-refresh-timer
+            (run-with-idle-timer 0.1 nil #'claude-gravity--debug-bridge-do-refresh)))))
 
 (defun claude-gravity--debug-do-refresh ()
   "Perform actual debug buffer refresh."
@@ -68,6 +78,14 @@ PARSE-ERROR is the error object (or nil)."
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (claude-gravity--debug-render)))))
+
+(defun claude-gravity--debug-bridge-do-refresh ()
+  "Perform actual bridge debug buffer refresh."
+  (setq claude-gravity--debug-bridge-refresh-timer nil)
+  (when-let ((buf (get-buffer "*Claude Debug: Bridge*")))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (claude-gravity--debug-bridge-render)))))
 
 ;;; Mode
 
@@ -443,6 +461,176 @@ Objects and arrays are expanded with syntax highlighting."
     (setq claude-gravity--debug-messages nil)
     (setq claude-gravity--debug-expanded (make-hash-table :test 'equal))
     (claude-gravity--debug-render)))
+
+
+;;; ================================================================
+;;; Bridge Debug Viewer — raw hook input vs enriched output
+;;; ================================================================
+
+(defvar claude-gravity-debug-bridge-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "g") #'claude-gravity-debug-bridge-refresh)
+    (define-key map (kbd "c") #'claude-gravity-debug-bridge-copy-hook-input)
+    (define-key map (kbd "C") #'claude-gravity-debug-bridge-copy-enriched)
+    (define-key map (kbd "RET") #'claude-gravity-debug-bridge-toggle-expand)
+    (define-key map (kbd "f") #'claude-gravity-debug-filter-event)
+    (define-key map (kbd "s") #'claude-gravity-debug-filter-session)
+    (define-key map (kbd "/") #'claude-gravity-debug-search)
+    (define-key map (kbd "x") #'claude-gravity-debug-clear)
+    map)
+  "Keymap for `claude-gravity-debug-bridge-mode'.")
+
+(define-derived-mode claude-gravity-debug-bridge-mode special-mode "Claude-Bridge-Debug"
+  "Major mode for Claude Gravity bridge debug viewer.
+Shows raw hook inputs and enrichment delta.
+\\{claude-gravity-debug-bridge-mode-map}"
+  (setq truncate-lines t)
+  (setq buffer-read-only t))
+
+(defvar-local claude-gravity--debug-bridge-expanded (make-hash-table :test 'equal)
+  "Hash table of message indices that are expanded in bridge debug buffer.")
+
+;;; Bridge debug entry point
+
+(defun claude-gravity-debug-bridge-show ()
+  "Show the bridge debug buffer (raw hook input vs enriched output)."
+  (interactive)
+  (unless claude-gravity--debug-messages-enabled
+    (setq claude-gravity--debug-messages-enabled t)
+    (claude-gravity--log 'info "Debug message capture ENABLED"))
+  (let ((buf (get-buffer-create "*Claude Debug: Bridge*")))
+    (with-current-buffer buf
+      (unless (eq major-mode 'claude-gravity-debug-bridge-mode)
+        (claude-gravity-debug-bridge-mode)
+        (setq claude-gravity--debug-bridge-expanded (make-hash-table :test 'equal)))
+      (claude-gravity--debug-bridge-render))
+    (display-buffer-in-side-window buf '((side . right) (window-width . 100)))
+    (select-window (get-buffer-window buf))))
+
+;;; Bridge debug rendering
+
+(defun claude-gravity--debug-bridge-render ()
+  "Render the bridge debug buffer."
+  (let ((inhibit-read-only t)
+        (pos (point))
+        (messages claude-gravity--debug-messages)
+        (idx 0))
+    (erase-buffer)
+    (claude-gravity--debug-bridge-insert-header (length messages))
+    (dolist (msg messages)
+      (when (claude-gravity--debug-passes-filter msg)
+        (claude-gravity--debug-insert-message msg idx)
+        (when (gethash idx claude-gravity--debug-bridge-expanded)
+          (claude-gravity--debug-bridge-insert-expanded msg)))
+      (setq idx (1+ idx)))
+    (claude-gravity--debug-bridge-insert-footer)
+    (goto-char (min pos (point-max)))))
+
+(defun claude-gravity--debug-bridge-insert-header (count)
+  "Insert bridge debug buffer header with COUNT messages."
+  (let ((filter-info
+         (concat
+          (when claude-gravity--debug-filter-event
+            (format "  filter: %s" claude-gravity--debug-filter-event))
+          (when claude-gravity--debug-filter-session
+            (format "  session: %s..."
+                    (substring claude-gravity--debug-filter-session
+                               0 (min 7 (length claude-gravity--debug-filter-session))))))))
+    (insert (propertize (make-string 96 ?\u2501) 'face 'claude-gravity-divider) "\n")
+    (insert (propertize "Claude Debug: Bridge" 'face 'bold))
+    (insert (propertize "  (raw hook input vs enriched)" 'face 'claude-gravity-detail-label))
+    (insert (propertize (format "  [%d messages]" count) 'face 'claude-gravity-detail-label))
+    (when filter-info
+      (insert (propertize filter-info 'face 'claude-gravity-detail-label)))
+    (insert "\n")
+    (insert (propertize (make-string 96 ?\u2501) 'face 'claude-gravity-divider) "\n\n")))
+
+(defun claude-gravity--debug-bridge-insert-footer ()
+  "Insert bridge debug buffer footer."
+  (insert "\n" (propertize (make-string 96 ?\u2501) 'face 'claude-gravity-divider) "\n")
+  (insert "  RET=expand  c=copy-hook-input  C=copy-enriched  f=filter  s=session  /=search  x=clear  g=refresh  q=quit\n"))
+
+(defun claude-gravity--debug-bridge-insert-expanded (msg)
+  "Insert expanded bridge view of MSG showing hook input and enrichment delta."
+  (let ((hook-input (alist-get 'hook-input msg))
+        (data (alist-get 'data msg)))
+    ;; Section 1: Raw hook input
+    (insert (propertize "  Hook Input (raw from Claude Code):\n"
+                        'face '(:foreground "#88aacc" :weight bold)))
+    (if hook-input
+        (claude-gravity--debug-insert-json hook-input "    " 0)
+      (insert (propertize "    (not available — bridge may need rebuild)\n"
+                          'face 'font-lock-comment-face)))
+    (insert "\n")
+    ;; Section 2: Enrichment delta (keys in data but not in hook-input)
+    (insert (propertize "  Enriched (bridge added):\n"
+                        'face '(:foreground "#ccaa88" :weight bold)))
+    (let ((delta (claude-gravity--debug-compute-delta hook-input data)))
+      (if delta
+          (claude-gravity--debug-insert-json delta "    " 0)
+        (insert (propertize "    (no enrichment — identical to hook input)\n"
+                            'face 'font-lock-comment-face))))
+    (insert "\n\n")))
+
+(defun claude-gravity--debug-compute-delta (hook-input data)
+  "Compute enrichment delta: keys in DATA not present in HOOK-INPUT.
+Returns an alist of added/changed fields, or nil if identical."
+  (when (and data hook-input)
+    (let ((delta nil))
+      (cond
+       ;; Both are alists
+       ((and (listp data) (consp (car-safe data)) (symbolp (car-safe (car-safe data)))
+             (listp hook-input) (consp (car-safe hook-input)) (symbolp (car-safe (car-safe hook-input))))
+        (dolist (pair data)
+          (let* ((key (car pair))
+                 (val (cdr pair))
+                 (original (alist-get key hook-input)))
+            (unless (equal val original)
+              (push pair delta))))
+        (nreverse delta))
+       ;; Data exists but hook-input is nil — entire data is delta
+       (t data)))))
+
+;;; Bridge debug commands
+
+(defun claude-gravity-debug-bridge-refresh ()
+  "Refresh bridge debug buffer."
+  (interactive)
+  (claude-gravity--debug-bridge-render))
+
+(defun claude-gravity-debug-bridge-toggle-expand ()
+  "Expand/collapse message at point in bridge debug buffer."
+  (interactive)
+  (when-let ((idx (claude-gravity--debug-idx-at-point)))
+    (if (gethash idx claude-gravity--debug-bridge-expanded)
+        (remhash idx claude-gravity--debug-bridge-expanded)
+      (puthash idx t claude-gravity--debug-bridge-expanded))
+    (claude-gravity--debug-bridge-render)))
+
+(defun claude-gravity-debug-bridge-copy-hook-input ()
+  "Copy raw hook input of message at point to kill ring."
+  (interactive)
+  (let* ((msg (claude-gravity--debug-msg-at-point))
+         (hook-input (when msg (alist-get 'hook-input msg))))
+    (if hook-input
+        (let ((json-str (json-encode hook-input)))
+          (kill-new json-str)
+          (message "Copied hook input (%d chars)" (length json-str)))
+      (message "No hook input at point"))))
+
+(defun claude-gravity-debug-bridge-copy-enriched ()
+  "Copy enrichment delta of message at point to kill ring."
+  (interactive)
+  (let* ((msg (claude-gravity--debug-msg-at-point))
+         (hook-input (when msg (alist-get 'hook-input msg)))
+         (data (when msg (alist-get 'data msg)))
+         (delta (when msg (claude-gravity--debug-compute-delta hook-input data))))
+    (if delta
+        (let ((json-str (json-encode delta)))
+          (kill-new json-str)
+          (message "Copied enrichment delta (%d chars)" (length json-str)))
+      (message "No enrichment delta at point"))))
 
 (provide 'claude-gravity-debug)
 ;;; claude-gravity-debug.el ends here
