@@ -11,6 +11,8 @@
 (require 'claude-gravity-diff)
 
 (declare-function claude-gravity--render-overview "claude-gravity-ui")
+(declare-function claude-gravity--session-buffer-name "claude-gravity-ui")
+(declare-function claude-gravity--follow-detect-manual "claude-gravity-ui")
 (declare-function claude-gravity--inbox-act-permission "claude-gravity-actions")
 (declare-function claude-gravity--inbox-act-question "claude-gravity-actions")
 (declare-function claude-gravity--inbox-act-plan-review "claude-gravity-actions")
@@ -608,6 +610,21 @@ Returns the formatted markdown string.  Omits empty sections."
     (kill-buffer buf)))
 
 
+(defun claude-gravity--enable-session-follow-mode (session-id)
+  "Enable follow mode on the session buffer for SESSION-ID.
+Does nothing if the buffer doesn't exist or follow mode is already on."
+  (let* ((session (claude-gravity--get-session session-id))
+         (buf (when session
+                (or (let ((b (plist-get session :buffer)))
+                      (and b (buffer-live-p b) b))
+                    (get-buffer (claude-gravity--session-buffer-name session))))))
+    (when (and buf (not (buffer-local-value 'claude-gravity--follow-mode buf)))
+      (with-current-buffer buf
+        (setq claude-gravity--follow-mode t)
+        (add-hook 'post-command-hook #'claude-gravity--follow-detect-manual nil t)
+        (force-mode-line-update)))))
+
+
 (defun claude-gravity-plan-review-approve ()
   "Approve the plan and send allow decision to Claude Code.
 If the user has made edits, added inline comments, or inserted
@@ -616,7 +633,8 @@ incorporate the feedback (the allow channel cannot carry feedback)."
   (interactive)
   (let ((diff (claude-gravity--plan-review-compute-diff))
         (comments (claude-gravity--plan-review-collect-feedback))
-        (markers (claude-gravity--plan-review-scan-markers)))
+        (markers (claude-gravity--plan-review-scan-markers))
+        (session-id claude-gravity--plan-review-session-id))
     (if (or diff comments markers)
         ;; Feedback exists — deny so Claude sees it
         (let ((deny-message (claude-gravity--plan-review-build-feedback-message
@@ -628,6 +646,7 @@ incorporate the feedback (the allow channel cannot carry feedback)."
                                              (message . ,deny-message))))))))
             (claude-gravity--plan-review-send-response response))
           (claude-gravity--plan-review-cleanup-and-close)
+          (claude-gravity--enable-session-follow-mode session-id)
           (claude-gravity--log 'debug "Feedback detected — denied for revision"))
       ;; No feedback — clean approve
       (let ((response `((hookSpecificOutput
@@ -635,6 +654,7 @@ incorporate the feedback (the allow channel cannot carry feedback)."
                             (decision . ((behavior . "allow"))))))))
         (claude-gravity--plan-review-send-response response))
       (claude-gravity--plan-review-cleanup-and-close)
+      (claude-gravity--enable-session-follow-mode session-id)
       (claude-gravity--log 'debug "Plan approved"))))
 
 
