@@ -400,7 +400,14 @@ else current session."
     (let* ((choice (completing-read "Session: " candidates nil t nil nil default-label))
            (sid (cdr (assoc choice id-map))))
       (when sid
-        (claude-gravity-open-session sid)))))
+        (claude-gravity-open-session sid)
+        ;; Auto-navigate to inbox if session has pending notifications
+        (when (cl-some (lambda (item)
+                         (and (equal (alist-get 'session-id item) sid)
+                              (memq (alist-get 'type item)
+                                    '(permission question plan-review))))
+                       claude-gravity--inbox)
+          (claude-gravity-inbox-list))))))
 
 
 (defun claude-gravity--apply-visibility ()

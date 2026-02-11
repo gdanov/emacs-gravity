@@ -272,7 +272,16 @@ Signals error if no session found or not alive."
                      (cons 'stop_text nil)
                      (cons 'stop_thinking nil)))
       (claude-gravity-model-set-claude-status session 'responding)
-      (claude-gravity--schedule-session-refresh sid)))
+      (claude-gravity--schedule-session-refresh sid)
+      ;; Auto-enable follow mode so the buffer tails the response
+      (let ((buf (or (let ((b (plist-get session :buffer)))
+                       (and b (buffer-live-p b) b))
+                     (get-buffer (claude-gravity--session-buffer-name session)))))
+        (when (and buf (not (buffer-local-value 'claude-gravity--follow-mode buf)))
+          (with-current-buffer buf
+            (setq claude-gravity--follow-mode t)
+            (add-hook 'post-command-hook #'claude-gravity--follow-detect-manual nil t)
+            (force-mode-line-update))))))
   (claude-gravity--log 'debug "Sent prompt to Claude [%s]" sid))
 
 
