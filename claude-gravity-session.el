@@ -102,6 +102,8 @@ Ensures :tool-index, :agent-index, and :turns exist. Idempotent."
                                      tl (claude-gravity--make-turn-node 0))
                                     tl)
                            :current-turn 0
+                           :total-tool-count 0
+                           :header-line-cache nil
                            :permission-mode nil
                            :slug nil
                            :buffer nil)))
@@ -125,6 +127,8 @@ Called when a session is restarted (e.g. via /reset or /clear)."
     (claude-gravity--tlist-append tl (claude-gravity--make-turn-node 0))
     (plist-put session :turns tl))
   (plist-put session :current-turn 0)
+  (plist-put session :total-tool-count 0)
+  (plist-put session :header-line-cache nil)
   (plist-put session :permission-mode nil)
   (plist-put session :slug nil)
   (plist-put session :status 'active)

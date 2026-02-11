@@ -179,28 +179,34 @@ Closes the bridge socket proc and kills associated action buffers."
   (when claude-gravity--refresh-timer
     (cancel-timer claude-gravity--refresh-timer))
   (setq claude-gravity--refresh-timer
-        (run-with-idle-timer 0.05 nil #'claude-gravity--do-refresh)))
+        (run-with-idle-timer claude-gravity-refresh-interval nil
+                             #'claude-gravity--do-refresh)))
 
 
 (defun claude-gravity--do-refresh ()
   "Perform the actual debounced overview refresh."
   (setq claude-gravity--refresh-timer nil)
-  (when (get-buffer claude-gravity-buffer-name)
-    (claude-gravity--render-overview)))
+  (let ((buf (get-buffer claude-gravity-buffer-name)))
+    (when (and buf (get-buffer-window buf t))
+      (claude-gravity--render-overview))))
 
 
 (defun claude-gravity--schedule-session-refresh (session-id)
-  "Schedule a refresh for the session buffer of SESSION-ID."
-  (let ((existing (gethash session-id claude-gravity--session-refresh-timers)))
+  "Schedule a refresh for the session buffer of SESSION-ID.
+Also invalidates cached header-line so next redisplay recomputes it."
+  (let ((existing (gethash session-id claude-gravity--session-refresh-timers))
+        (session (gethash session-id claude-gravity--sessions)))
     (when existing (cancel-timer existing))
+    ;; Invalidate header-line cache so next redisplay picks up new state
+    (when session (plist-put session :header-line-cache nil))
     (puthash session-id
-             (run-with-idle-timer 0.05 nil
+             (run-with-idle-timer claude-gravity-refresh-interval nil
                                   #'claude-gravity--do-session-refresh session-id)
              claude-gravity--session-refresh-timers)))
 
 
 (defun claude-gravity--do-session-refresh (session-id)
-  "Refresh the buffer for SESSION-ID if it exists."
+  "Refresh the buffer for SESSION-ID if it exists and is visible."
   (remhash session-id claude-gravity--session-refresh-timers)
   (let* ((session (claude-gravity--get-session session-id))
          (owned-buf (when session
@@ -216,10 +222,12 @@ Closes the bridge socket proc and kills associated action buffers."
         (plist-put session :buffer buf)
         (with-current-buffer buf
           (setq claude-gravity--buffer-session-id session-id)))
-      (claude-gravity--render-session-buffer session)
-      (when (buffer-local-value 'claude-gravity--follow-mode buf)
-        (with-current-buffer buf
-          (claude-gravity-tail))))))
+      ;; Only render if the buffer is visible in some window
+      (when (get-buffer-window buf t)
+        (claude-gravity--render-session-buffer session)
+        (when (buffer-local-value 'claude-gravity--follow-mode buf)
+          (with-current-buffer buf
+            (claude-gravity-tail)))))))
 
 
 ;;; Tool helpers
@@ -503,11 +511,14 @@ Scans recent tools in the turn for an unlinked Task tool matching agent type."
             (nconc (alist-get 'tasks turn-node) (list task))))))
 
 (defun claude-gravity--tree-total-tool-count (session)
-  "Return total tool count across all turns in SESSION."
-  (let ((total 0))
-    (dolist (turn-node (claude-gravity--tlist-items (plist-get session :turns)))
-      (cl-incf total (or (alist-get 'tool-count turn-node) 0)))
-    total))
+  "Return total tool count across all turns in SESSION.
+Uses the cached :total-tool-count when available."
+  (or (plist-get session :total-tool-count)
+      (let ((total 0))
+        (dolist (turn-node (claude-gravity--tlist-items (plist-get session :turns)))
+          (cl-incf total (or (alist-get 'tool-count turn-node) 0)))
+        (plist-put session :total-tool-count total)
+        total)))
 
 
 ;;; Model mutation API
@@ -613,6 +624,9 @@ Deduplicates by tool_use_id — skips if a tool with the same ID already exists.
       ;; Register in tool index for O(1) lookup
       (when tid
         (puthash tid tool (plist-get session :tool-index)))
+      ;; Bump session-level tool counter (invalidates cached total)
+      (let ((cur (plist-get session :total-tool-count)))
+        (when cur (plist-put session :total-tool-count (1+ cur))))
       ;; Route to turn tree
       (claude-gravity--tree-add-tool session tool agent-id))))
 

@@ -462,7 +462,11 @@ Only shows permission, question, and plan-review items (not idle)."
             (claude-gravity-insert-files session)
             (claude-gravity-insert-allow-patterns session))
           (goto-char (min pos (point-max)))
-          (claude-gravity--apply-visibility))))))
+          (claude-gravity--apply-visibility)))
+      ;; Pre-warm header-line cache after render (state is fresh)
+      (plist-put session :header-line-cache
+                 (claude-gravity--build-header-line
+                  session (plist-get session :session-id))))))
 
 
 ;;; Modes
@@ -533,90 +537,95 @@ Only shows permission, question, and plan-review items (not idle)."
 
 
 (defun claude-gravity--session-header-line ()
-  "Return header-line string for the current session buffer."
+  "Return header-line string for the current session buffer.
+Returns a cached string when available; cache is invalidated by
+`claude-gravity--schedule-session-refresh'."
   (when-let* ((sid claude-gravity--buffer-session-id)
               (session (gethash sid claude-gravity--sessions)))
-    (let* ((status (plist-get session :status))
-           (claude-st (plist-get session :claude-status))
-           (last-event (plist-get session :last-event-time))
-           (idle-time (when (and last-event (eq claude-st 'idle))
-                        (float-time (time-subtract (current-time) last-event))))
-           (idle-str (when idle-time
-                       (cond
-                        ((< idle-time 60) "")
-                        ((< idle-time 3600) (format " %dm" (truncate (/ idle-time 60))))
-                        (t (format " %dh" (truncate (/ idle-time 3600)))))))
-           (dot (cond
-                 ((eq status 'ended)
-                  (propertize "○" 'face 'claude-gravity-session-ended))
-                 ((eq claude-st 'responding)
-                  (propertize "●" 'face 'claude-gravity-status-responding))
-                 (t
-                  (propertize "●" 'face 'claude-gravity-status-idle))))
-           (status-word (cond
-                         ((eq status 'ended)
-                          (propertize "ended" 'face 'claude-gravity-session-ended))
-                         ((eq claude-st 'responding)
-                          (propertize "responding" 'face 'claude-gravity-status-responding))
-                         (t
-                          (propertize (concat "idle" (or idle-str ""))
-                                     'face 'claude-gravity-status-idle))))
-           (slug (propertize (claude-gravity--session-label session)
-                             'face 'claude-gravity-slug))
-           (tool-count (claude-gravity--tree-total-tool-count session))
-           (elapsed (claude-gravity--session-total-elapsed session))
-           (usage (plist-get session :token-usage))
-           (in-tokens (when usage
-                        (+ (or (alist-get 'input_tokens usage) 0)
-                           (or (alist-get 'cache_read_input_tokens usage) 0)
-                           (or (alist-get 'cache_creation_input_tokens usage) 0))))
-           (out-tokens (when usage (or (alist-get 'output_tokens usage) 0)))
-           (perm-mode (plist-get session :permission-mode))
-           (model-name (plist-get session :model-name))
-           (parts (list " " dot " " status-word "  " slug
-                        (when perm-mode
-                          (propertize (format "  [%s]" perm-mode)
-                                     'face 'claude-gravity-detail-label))
-                        (when model-name
-                          (propertize (format "  %s" model-name)
-                                     'face 'claude-gravity-detail-label))
-                        (propertize (format "  ◆ %d tools" tool-count)
-                                    'face 'claude-gravity-detail-label))))
-      (when elapsed
-        (setq parts (append parts
-                            (list (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))
-                                             'face 'claude-gravity-detail-label)))))
-      (when (and in-tokens (> in-tokens 0))
-        (setq parts (append parts
-                            (list (propertize (format "  ↓%s ↑%s tokens"
-                                                     (claude-gravity--format-token-count in-tokens)
-                                                     (claude-gravity--format-token-count out-tokens))
-                                             'face 'claude-gravity-detail-label)))))
-      ;; StatusLine data: cost, context %, lines changed
-      (let ((cost (plist-get session :cost))
-            (ctx-pct (plist-get session :context-pct))
-            (lines-add (plist-get session :sl-lines-added))
-            (lines-rm (plist-get session :sl-lines-removed)))
-        (when cost
-          (setq parts (append parts
-                              (list (propertize (format "  $%.2f" cost)
-                                               'face 'claude-gravity-detail-label)))))
-        (when ctx-pct
-          (let ((face (cond ((>= ctx-pct 90) 'error)
-                            ((>= ctx-pct 70) 'warning)
-                            (t 'claude-gravity-detail-label))))
-            (setq parts (append parts
-                                (list (propertize (format "  ctx:%d%%" ctx-pct)
-                                                 'face face))))))
-        (when (and lines-add lines-rm (or (> lines-add 0) (> lines-rm 0)))
-          (setq parts (append parts
-                              (list (propertize (format "  +%d -%d" lines-add lines-rm)
-                                               'face 'claude-gravity-detail-label))))))
-      ;; Inbox badges for actionable items
-      (let ((inbox-badge (claude-gravity--inbox-badges sid)))
-        (unless (string-empty-p inbox-badge)
-          (setq parts (append parts (list inbox-badge)))))
-      (apply #'concat (delq nil parts)))))
+    (or (plist-get session :header-line-cache)
+        (let ((val (claude-gravity--build-header-line session sid)))
+          (plist-put session :header-line-cache val)
+          val))))
+
+
+(defun claude-gravity--build-header-line (session sid)
+  "Build header-line string for SESSION with SID."
+  (let* ((status (plist-get session :status))
+         (claude-st (plist-get session :claude-status))
+         (last-event (plist-get session :last-event-time))
+         (idle-time (when (and last-event (eq claude-st 'idle))
+                      (float-time (time-subtract (current-time) last-event))))
+         (idle-str (when idle-time
+                     (cond
+                      ((< idle-time 60) "")
+                      ((< idle-time 3600) (format " %dm" (truncate (/ idle-time 60))))
+                      (t (format " %dh" (truncate (/ idle-time 3600)))))))
+         (dot (cond
+               ((eq status 'ended)
+                (propertize "○" 'face 'claude-gravity-session-ended))
+               ((eq claude-st 'responding)
+                (propertize "●" 'face 'claude-gravity-status-responding))
+               (t
+                (propertize "●" 'face 'claude-gravity-status-idle))))
+         (status-word (cond
+                       ((eq status 'ended)
+                        (propertize "ended" 'face 'claude-gravity-session-ended))
+                       ((eq claude-st 'responding)
+                        (propertize "responding" 'face 'claude-gravity-status-responding))
+                       (t
+                        (propertize (concat "idle" (or idle-str ""))
+                                   'face 'claude-gravity-status-idle))))
+         (slug (propertize (claude-gravity--session-label session)
+                           'face 'claude-gravity-slug))
+         (tool-count (claude-gravity--tree-total-tool-count session))
+         (elapsed (claude-gravity--session-total-elapsed session))
+         (usage (plist-get session :token-usage))
+         (in-tokens (when usage
+                      (+ (or (alist-get 'input_tokens usage) 0)
+                         (or (alist-get 'cache_read_input_tokens usage) 0)
+                         (or (alist-get 'cache_creation_input_tokens usage) 0))))
+         (out-tokens (when usage (or (alist-get 'output_tokens usage) 0)))
+         (perm-mode (plist-get session :permission-mode))
+         (model-name (plist-get session :model-name))
+         (cost (plist-get session :cost))
+         (ctx-pct (plist-get session :context-pct))
+         (lines-add (plist-get session :sl-lines-added))
+         (lines-rm (plist-get session :sl-lines-removed))
+         (inbox-badge (claude-gravity--inbox-badges sid))
+         ;; Build parts list using push + nreverse (O(1) per item)
+         (tail nil))
+    (when (and inbox-badge (not (string-empty-p inbox-badge)))
+      (push inbox-badge tail))
+    (when (and lines-add lines-rm (or (> lines-add 0) (> lines-rm 0)))
+      (push (propertize (format "  +%d -%d" lines-add lines-rm)
+                        'face 'claude-gravity-detail-label) tail))
+    (when ctx-pct
+      (let ((face (cond ((>= ctx-pct 90) 'error)
+                        ((>= ctx-pct 70) 'warning)
+                        (t 'claude-gravity-detail-label))))
+        (push (propertize (format "  ctx:%d%%" ctx-pct) 'face face) tail)))
+    (when cost
+      (push (propertize (format "  $%.2f" cost) 'face 'claude-gravity-detail-label) tail))
+    (when (and in-tokens (> in-tokens 0))
+      (push (propertize (format "  ↓%s ↑%s tokens"
+                                (claude-gravity--format-token-count in-tokens)
+                                (claude-gravity--format-token-count out-tokens))
+                        'face 'claude-gravity-detail-label) tail))
+    (when elapsed
+      (push (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))
+                        'face 'claude-gravity-detail-label) tail))
+    (apply #'concat
+           (nconc (delq nil
+                        (list " " dot " " status-word "  " slug
+                              (when perm-mode
+                                (propertize (format "  [%s]" perm-mode)
+                                           'face 'claude-gravity-detail-label))
+                              (when model-name
+                                (propertize (format "  %s" model-name)
+                                           'face 'claude-gravity-detail-label))
+                              (propertize (format "  ◆ %d tools" tool-count)
+                                          'face 'claude-gravity-detail-label)))
+                  (nreverse tail)))))
 
 
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
@@ -658,6 +667,8 @@ On an agent, parse transcript.  Otherwise toggle."
       ;; Per-session buffer
       (let ((session (claude-gravity--get-session claude-gravity--buffer-session-id)))
         (when session
+          ;; Invalidate header-line cache on manual refresh
+          (plist-put session :header-line-cache nil)
           (claude-gravity--render-session-buffer session)))
     ;; Overview buffer
     (claude-gravity--render-overview)))
