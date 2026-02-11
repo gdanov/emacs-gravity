@@ -109,20 +109,48 @@ Use as the argument to `magit-insert-heading'."
     (mapconcat #'identity (nreverse result) "\n")))
 
 
+(defvar claude-gravity--fontify-cache (make-hash-table :test 'equal :size 256)
+  "Cache of fontified markdown strings.  Key is raw text, value is fontified text.")
+
+(defvar claude-gravity--md-buffer nil
+  "Persistent buffer with `markdown-mode' for fontification reuse.")
+
+(defun claude-gravity--get-md-buffer ()
+  "Return a persistent markdown-mode buffer for fontification."
+  (if (and claude-gravity--md-buffer (buffer-live-p claude-gravity--md-buffer))
+      claude-gravity--md-buffer
+    (setq claude-gravity--md-buffer
+          (with-current-buffer (get-buffer-create " *claude-gravity-md*")
+            (when (fboundp 'markdown-mode) (markdown-mode))
+            (current-buffer)))))
+
+(defun claude-gravity--fontify-cache-clear ()
+  "Clear the markdown fontification cache."
+  (clrhash claude-gravity--fontify-cache))
+
 (defun claude-gravity--fontify-markdown (text)
   "Return TEXT with markdown fontification, markup hiding, and table rendering.
 Renders markdown tables as box-drawn tables.
 Uses `markdown-mode' if available for inline markup; returns TEXT with
-tables rendered regardless."
+tables rendered regardless.  Results are cached to avoid repeated
+`markdown-mode' font-lock calls."
   (let ((text (claude-gravity--render-tables-in-text text)))
-    (if (fboundp 'markdown-mode)
-        (with-temp-buffer
-          (insert text)
-          (markdown-mode)
-          (let ((markdown-hide-markup t))
-            (font-lock-ensure))
-          (buffer-string))
-      text)))
+    (or (gethash text claude-gravity--fontify-cache)
+        (let ((result
+               (if (fboundp 'markdown-mode)
+                   (with-current-buffer (claude-gravity--get-md-buffer)
+                     (let ((inhibit-read-only t))
+                       (erase-buffer)
+                       (insert text)
+                       (let ((markdown-hide-markup t))
+                         (font-lock-ensure))
+                       (buffer-string)))
+                 text)))
+          ;; Evict cache when too large
+          (when (> (hash-table-count claude-gravity--fontify-cache) 512)
+            (clrhash claude-gravity--fontify-cache))
+          (puthash text result claude-gravity--fontify-cache)
+          result))))
 
 
 (defun claude-gravity--insert-wrapped-with-margin (text indent-or-nil face)

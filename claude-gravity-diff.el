@@ -173,15 +173,29 @@ falling back to INPUT fields."
      (t nil))))
 
 
+(defvar claude-gravity--diff-cache (make-hash-table :test 'equal :size 128)
+  "Cache of LCS diff results.  Key is (old-str . new-str), value is diff-text.")
+
+(defun claude-gravity--diff-cache-clear ()
+  "Clear the LCS diff result cache."
+  (clrhash claude-gravity--diff-cache))
+
 (defun claude-gravity--insert-inline-diff (old-str new-str label)
   "Insert inline word-level diff between OLD-STR and NEW-STR.
-LABEL is the section header like \"Diff:\" or \"Diff (pending):\"."
+LABEL is the section header like \"Diff:\" or \"Diff (pending):\".
+Caches diff computation results for reuse across renders."
   (let* ((prefix (claude-gravity--indent))
          (old-str (or old-str ""))
-         (old-tokens (claude-gravity--word-tokenize old-str))
-         (new-tokens (claude-gravity--word-tokenize new-str))
-         (diff-ops (claude-gravity--lcs-diff old-tokens new-tokens))
-         (diff-text (claude-gravity--propertize-diff diff-ops))
+         (cache-key (cons old-str new-str))
+         (diff-text (or (gethash cache-key claude-gravity--diff-cache)
+                        (let* ((old-tokens (claude-gravity--word-tokenize old-str))
+                               (new-tokens (claude-gravity--word-tokenize new-str))
+                               (diff-ops (claude-gravity--lcs-diff old-tokens new-tokens))
+                               (text (claude-gravity--propertize-diff diff-ops)))
+                          (when (> (hash-table-count claude-gravity--diff-cache) 256)
+                            (clrhash claude-gravity--diff-cache))
+                          (puthash cache-key text claude-gravity--diff-cache)
+                          text)))
          (lines (split-string diff-text "\n"))
          (nlines (length lines))
          (max-lines claude-gravity-diff-max-lines)

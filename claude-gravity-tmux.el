@@ -542,19 +542,32 @@ Sends Shift-Tab to the managed tmux session."
 ;;; Tmux heartbeat — detect dead sessions
 
 (defun claude-gravity--tmux-heartbeat ()
-  "Check all tmux sessions for liveness; mark dead ones as ended."
-  (let ((dead nil))
-    (maphash (lambda (sid tmux-name)
-               (unless (claude-gravity--tmux-alive-p tmux-name)
-                 (push sid dead)))
-             claude-gravity--tmux-sessions)
-    (dolist (sid dead)
-      (remhash sid claude-gravity--tmux-sessions)
-      (let ((session (claude-gravity--get-session sid)))
-        (when (and session (eq (plist-get session :status) 'active))
-          (claude-gravity-model-session-end session)
-          (claude-gravity--schedule-refresh)
-          (claude-gravity--schedule-session-refresh sid))))))
+  "Check all tmux sessions for liveness asynchronously.
+Uses a single `tmux list-sessions' call instead of N `has-session' calls."
+  (when (> (hash-table-count claude-gravity--tmux-sessions) 0)
+    (let ((buf (generate-new-buffer " *tmux-heartbeat*")))
+      (set-process-sentinel
+       (start-process "tmux-heartbeat" buf "tmux" "list-sessions"
+                      "-F" "#{session_name}")
+       (lambda (proc _event)
+         (when (memq (process-status proc) '(exit signal))
+           (let ((alive-names
+                  (when (= (process-exit-status proc) 0)
+                    (with-current-buffer (process-buffer proc)
+                      (split-string (buffer-string) "\n" t))))
+                 (dead nil))
+             (maphash (lambda (sid tmux-name)
+                        (unless (member tmux-name alive-names)
+                          (push sid dead)))
+                      claude-gravity--tmux-sessions)
+             (dolist (sid dead)
+               (remhash sid claude-gravity--tmux-sessions)
+               (let ((session (claude-gravity--get-session sid)))
+                 (when (and session (eq (plist-get session :status) 'active))
+                   (claude-gravity-model-session-end session)
+                   (claude-gravity--schedule-refresh)
+                   (claude-gravity--schedule-session-refresh sid)))))
+           (kill-buffer (process-buffer proc))))))))
 
 
 (defun claude-gravity--tmux-ensure-heartbeat ()

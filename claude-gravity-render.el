@@ -418,6 +418,9 @@ Deduplicates against the last tool's post_text/post_thinking."
             (claude-gravity--insert-wrapped-with-margin
              stop-think nil 'claude-gravity-thinking))
           (when (and stop-text (not (string-empty-p stop-text)))
+            (insert (claude-gravity--indent)
+                    (propertize "┊ ⏹ " 'face 'claude-gravity-agent-stop-text)
+                    "\n")
             (claude-gravity--insert-wrapped-with-margin
              stop-text nil 'claude-gravity-agent-stop-text)))))))
 

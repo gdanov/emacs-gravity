@@ -190,7 +190,7 @@ export function readHead(filePath: string, maxBytes: number): string {
 export function extractPrecedingContent(transcriptPath: string, toolUseId: string): { text: string; thinking: string } {
   const result = { text: "", thinking: "" };
   try {
-    const content = readTail(transcriptPath, 10 * 1024 * 1024);
+    const content = readTail(transcriptPath, 2 * 1024 * 1024);
     const lines = content.split("\n").filter((l) => l.length > 0);
 
     // Try to find the tool_use line matching toolUseId (may exist if transcript is pre-written)
@@ -265,7 +265,7 @@ export function extractTokenUsage(transcriptPath: string): {
 } {
   const result = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   try {
-    const content = readTail(transcriptPath, 10 * 1024 * 1024);
+    const content = readTail(transcriptPath, 2 * 1024 * 1024);
     const lines = content.split("\n").filter((l) => l.length > 0);
     for (const line of lines) {
       try {
@@ -294,7 +294,7 @@ export function extractTokenUsage(transcriptPath: string): {
 export function extractFollowingContent(transcriptPath: string, toolUseId: string): { text: string; thinking: string } {
   const result = { text: "", thinking: "" };
   try {
-    const content = readTail(transcriptPath, 10 * 1024 * 1024);
+    const content = readTail(transcriptPath, 2 * 1024 * 1024);
     const lines = content.split("\n").filter((l) => l.length > 0);
 
     // Find the tool_result matching toolUseId
@@ -435,7 +435,7 @@ export function extractTrailingText(transcriptPath: string, maxBytes?: number): 
     // Otherwise fall back to reading the tail.
     const content = maxBytes
       ? readHead(transcriptPath, maxBytes)
-      : readTail(transcriptPath, 10 * 1024 * 1024);
+      : readTail(transcriptPath, 2 * 1024 * 1024);
     const lines = content.split("\n").filter((l) => l.length > 0);
 
     // Detect sidechain format (agent transcripts) by checking first non-progress line
@@ -883,15 +883,7 @@ async function main() {
         : transcriptPath;
       if (effectiveTranscript && toolUseId) {
         try {
-          let { text, thinking } = extractFollowingContent(effectiveTranscript, toolUseId);
-          if (!text && !thinking) {
-            const maxRetries = 3;
-            const delayMs = 150;
-            for (let retry = 0; retry < maxRetries && !text && !thinking; retry++) {
-              await new Promise(r => setTimeout(r, delayMs));
-              ({ text, thinking } = extractFollowingContent(effectiveTranscript, toolUseId));
-            }
-          }
+          const { text, thinking } = extractFollowingContent(effectiveTranscript, toolUseId);
           if (text) {
             (inputData as any).post_tool_text = text;
             log(`Extracted post-tool text (${text.length} chars) for ${toolUseId}`);
@@ -929,8 +921,8 @@ async function main() {
           // the actual assistant response (stop_text). Thinking may arrive earlier,
           // causing the initial extraction to miss the subsequent text message.
           if (!text) {
-            const maxRetries = 5;
-            const delayMs = 250;
+            const maxRetries = 3;
+            const delayMs = 100;
             for (let retry = 0; retry < maxRetries && !text; retry++) {
               await new Promise(r => setTimeout(r, delayMs));
               // Re-stat to get updated size (file may be flushing)
