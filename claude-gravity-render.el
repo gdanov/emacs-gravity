@@ -419,7 +419,7 @@ Deduplicates against the last tool's post_text/post_thinking."
              stop-think nil 'claude-gravity-thinking))
           (when (and stop-text (not (string-empty-p stop-text)))
             (claude-gravity--insert-wrapped-with-margin
-             stop-text nil 'claude-gravity-assistant-text)))))))
+             stop-text nil 'claude-gravity-agent-stop-text)))))))
 
 
 (defun claude-gravity--insert-task-item (task)
