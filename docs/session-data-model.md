@@ -5,7 +5,7 @@ Reference documentation for how session transcript state is stored in-memory in 
 ## Session Plist
 
 Stored in `claude-gravity--sessions` hash table (session-id → plist).
-Created in `claude-gravity-session.el:92` (`--ensure-session`).
+Created in `claude-gravity-session.el:83` (`--ensure-session`).
 
 ```
 Session (plist)
@@ -22,12 +22,16 @@ Session (plist)
 ├── :permission-mode string|nil
 ├── :buffer          buffer|nil — session detail buffer
 │
-├── :state           alist      — { tools: list-of-tool-alists }
-├── :prompts         list       — prompt alists (one per turn)
-├── :agents          list       — agent alists
-├── :tasks           hash-table — taskId → task alist
+│  Turn tree (hierarchical — mirrors screen layout):
+├── :turns           tlist      — tlist of turn-node alists
+│
+│  Indexes (O(1) lookup):
+├── :tool-index      hash-table — tool_use_id → tool alist (pointer)
+├── :agent-index     hash-table — agent_id → agent alist (pointer)
+│
+│  Other collections:
 ├── :files           hash-table — filepath → { ops, last-touched }
-├── :tool-index      hash-table — tool_use_id → tool alist (O(1))
+├── :tasks           hash-table — taskId → task alist
 │
 ├── :plan            plist|nil  — { :content, :file-path, :allowed-prompts }
 ├── :token-usage     alist|nil  — { input_tokens, output_tokens, cache_* }
@@ -35,16 +39,54 @@ Session (plist)
 └── :notifications   list
 ```
 
+## Turn Tree
+
+The primary data structure. Mirrors the screen layout: Session → Turns → Cycles → Tools.
+Hooks write directly to the tree at insertion time; the renderer iterates it without grouping or dedup.
+
+Defined in `claude-gravity-state.el:276`.
+
+```
+:turns (tlist)
+└── turn-node (alist)
+    ├── turn-number    integer    — 0-based, monotonic
+    ├── prompt         alist|nil  — user prompt for this turn (see below)
+    ├── cycles         tlist      — response cycles (see below)
+    ├── agents         tlist      — agents spawned in this turn
+    ├── tasks          list       — task alists for this turn
+    ├── tool-count     integer    — root tools in this turn (pre-computed)
+    ├── agent-count    integer    — agents in this turn (pre-computed)
+    ├── frozen         bool|nil   — turn is complete (no more tools)
+    ├── stop_text      string|nil — trailing assistant text (set by Stop)
+    └── stop_thinking  string|nil — trailing thinking (set by Stop)
+```
+
+Turn 0 is always pre-allocated for "pre-prompt activity" (tools that run before any user prompt).
+
+### Cycle Node
+
+A response cycle groups tools under a single assistant text/thinking block. Cycle boundaries are detected at insertion time in `claude-gravity--tree-add-tool` — the renderer just iterates.
+
+```
+cycle-node (alist)
+├── thinking   string|nil  — assistant thinking for this cycle
+├── text       string|nil  — assistant monologue for this cycle
+└── tools      tlist       — tool alists in this cycle
+```
+
+New cycle is created when:
+- No current cycle exists (first tool in turn)
+- New `assistant_text` differs from current cycle's text
+- New `assistant_thinking` differs from current cycle's thinking
+
 ## Prompt Alist
 
-One per turn in `:prompts`. Created by UserPromptSubmit, AskUserQuestion, ExitPlanMode in `claude-gravity-events.el`.
+Stored as the `prompt` key of a turn-node. Created by UserPromptSubmit, AskUserQuestion, ExitPlanMode in `claude-gravity-events.el`.
 
 ```
 ├── text            string     — user prompt (XML-stripped)
 ├── submitted       time       — when sent
 ├── elapsed         float|nil  — seconds to Stop (set by model-finalize-last-prompt)
-├── stop_text       string|nil — trailing assistant text (set by Stop handler)
-├── stop_thinking   string|nil — trailing thinking (set by Stop handler)
 │
 │  Question prompts only:
 ├── type            symbol     — 'question | 'phase-boundary | nil
@@ -54,7 +96,7 @@ One per turn in `:prompts`. Created by UserPromptSubmit, AskUserQuestion, ExitPl
 
 ## Tool Alist
 
-In `:state.tools` (root) or agent's `agent-tools`. Created by PreToolUse, completed by PostToolUse.
+In a cycle's `:tools` tlist. Created by PreToolUse, completed by PostToolUse.
 
 ```
 ├── tool_use_id       string     — unique ID
@@ -74,12 +116,17 @@ In `:state.tools` (root) or agent's `agent-tools`. Created by PreToolUse, comple
 │
 ├── parent_agent_id   string|nil — owning agent (nil = root)
 ├── ambiguous         bool|nil
-└── candidate-agents  list|nil
+├── candidate-agents  list|nil
+│
+│  Agent link (set by --link-agent-to-task-tool for Task tools):
+└── agent             alist|nil  — pointer to agent alist (bidirectional)
 ```
 
 ## Agent Alist
 
-In `:agents`. Created by SubagentStart, completed by SubagentStop.
+In a turn-node's `:agents` tlist. Created by SubagentStart, completed by SubagentStop.
+
+Agents have their own `:cycles` tlist (same structure as turn-node cycles), enabling nested tool rendering.
 
 ```
 ├── agent_id          string     — unique ID
@@ -88,10 +135,14 @@ In `:agents`. Created by SubagentStart, completed by SubagentStop.
 ├── timestamp         time
 ├── turn              integer
 ├── duration          float|nil  — seconds (set on SubagentStop)
-├── agent-tools       list       — nested tool alists (same shape as root)
+├── cycles            tlist      — agent's own response cycles (same as turn cycles)
+├── tool-count        integer    — number of tools in this agent
 ├── transcript_path   string|nil
 ├── stop_text         string|nil — agent summary text
 ├── stop_thinking     string|nil — agent final thinking
+│
+│  Bidirectional link:
+├── task-tool         alist|nil  — pointer to spawning Task tool
 │
 │  Set by RET → parse transcript:
 ├── transcript_parsed      bool|nil
@@ -100,191 +151,125 @@ In `:agents`. Created by SubagentStart, completed by SubagentStop.
 └── transcript_tool_count  integer|nil
 ```
 
-## Turn Grouping
+## tlist (O(1) Append List)
 
-Everything is tied together by `turn` number:
+Defined in `claude-gravity-core.el:158`. A cons cell `(items-head . tail-pointer)` enabling O(1) append.
 
-```
-Turn N:
-  prompts[N]           — the user prompt + stop_text/elapsed
-  state.tools[turn=N]  — root tools for this turn
-  agents[turn=N]       — agents spawned in this turn
-    └── agent-tools    — agent's nested tools
-  tasks[turn=N]        — tasks created/updated in this turn
+```elisp
+(claude-gravity--tlist-new)          → empty tlist
+(claude-gravity--tlist-append tl x)  → append item, O(1)
+(claude-gravity--tlist-items tl)     → list of items
+(claude-gravity--tlist-last-item tl) → last appended item
 ```
 
-The renderer groups by turn, iterating prompts 0..current-turn and collecting tools/agents/tasks with matching turn number.
+## Full Session Diagram
 
-## Full Session Diagram (Real Data)
-
-Diagram of session `33e00903` (4 turns, 119 tools, 1 agent) showing the hash table structure, nested collections, and pointer-based tool index:
+Diagram showing the tree structure with indexes:
 
 ```
 claude-gravity--sessions (hash-table)
 │
-├── "33e00903-..." ─────────────────────────────────────────────────────────
-│   │
-│   │  Session Plist
-│   │  :status=ended  :claude-status=responding  :current-turn=4
-│   │
-│   ├── :prompts ─── list of 4 alists ──────────────────────────────────────
-│   │   │
-│   │   ├─[0] turn 1: "emacs mcp is connected..."
-│   │   │      submitted=T  elapsed=656s  stop_text="Done. Here's..."
-│   │   │
-│   │   ├─[1] turn 2: "good job. let's test..."
-│   │   │      submitted=T  elapsed=nil   stop_text=nil     ← Stop lost
-│   │   │
-│   │   ├─[2] turn 3: "check if we're using async..."
-│   │   │      submitted=T  elapsed=nil   stop_text=nil     ← Stop lost
-│   │   │
-│   │   └─[3] turn 4: "let's do 2. Fix O(n^2)..."
-│   │          submitted=T  elapsed=nil   stop_text=nil     ← Stop lost
-│   │
-│   ├── :state ─── alist ──────────────────────────────────────────────────
-│   │   │
-│   │   └── tools ─── list of 119 tool alists
-│   │       │
-│   │       │  turn 0: 34 tools (pre-prompt)
-│   │       │  ┌─────────────────────────────────────────────────────┐
-│   │       ├──│ {tool_use_id, name="Glob", turn=0, status="done",  │
-│   │       │  │  assistant_text=nil, post_text=nil}                 │
-│   │       ├──│ {tool_use_id, name="Read", turn=0, status="done",  │
-│   │       │  │  assistant_text="Let me read...", post_text=nil}    │
-│   │       │  │ ...32 more                                         │
-│   │       │  └─────────────────────────────────────────────────────┘
-│   │       │
-│   │       │  turn 1: 42 tools
-│   │       │  ┌─────────────────────────────────────────────────────┐
-│   │       ├──│ {name="Edit", turn=1, status="done",               │
-│   │       │  │  assistant_text="Now I'll fix...",                  │
-│   │       │  │  post_text="The edit was successful."}              │
-│   │       │  │ ...41 more                                         │
-│   │       │  └─────────────────────────────────────────────────────┘
-│   │       │
-│   │       │  turn 2: 28 tools    turn 3: 10 tools    turn 4: 5 tools
-│   │       └──...
-│   │
-│   ├── :agents ─── list of 1 alist ───────────────────────────────────────
-│   │   │
-│   │   └─[0] {agent_id="...", type="Explore", status="done",
-│   │          turn=1, duration=3.2,
-│   │          stop_text="Based on my search...",
-│   │          agent-tools: [] }              ← nested tools (same shape)
-│   │
-│   ├── :tool-index ─── hash-table (119 entries) ─────────────────────────
-│   │   │
-│   │   │  "toolu_014HGB..." ──→ ─┐
-│   │   │  "toolu_01ABC..." ──→ ──┤  same alist objects as in
-│   │   │  "toolu_01XYZ..." ──→ ──┤  :state.tools and agent-tools
-│   │   │  ...                    │  (pointer, not copy)
-│   │   └─────────────────────────┘
-│   │
-│   ├── :files ─── hash-table (6 entries) ─────────────────────────────────
-│   │   │  "/path/to/file.el" → {ops: ("read" "edit"), last-touched: T}
-│   │   └── ...
-│   │
-│   ├── :tasks ─── hash-table (0 entries) ─────────────────────────────────
-│   │
-│   └── :plan, :token-usage, :allow-patterns, :notifications ...
-│
-├── "e4dd8db7-..." ─── (current session, same structure) ──────────────────
-│
-└── "test-liv..." ──── (test session) ─────────────────────────────────────
+└── "session-uuid" ───────────────────────────────────────────────
+    │
+    │  Session Plist
+    │  :status=active  :claude-status=responding  :current-turn=2
+    │
+    ├── :turns (tlist) ───────────────────────────────────────────
+    │   │
+    │   ├─ turn-node [turn-number=0]  "Pre-prompt activity"
+    │   │   ├── prompt: nil
+    │   │   ├── cycles (tlist)
+    │   │   │   └─ cycle-0
+    │   │   │       ├── thinking: nil
+    │   │   │       ├── text: nil
+    │   │   │       └── tools (tlist)
+    │   │   │           ├── {id:"tu_001" name:"Glob"  status:"done"}
+    │   │   │           └── {id:"tu_002" name:"Read"  status:"done"}
+    │   │   ├── agents (tlist): []
+    │   │   ├── tasks: []
+    │   │   └── tool-count: 2
+    │   │
+    │   ├─ turn-node [turn-number=1]
+    │   │   ├── prompt: {text:"Fix the auth bug" elapsed:45.2}
+    │   │   ├── cycles (tlist)
+    │   │   │   ├─ cycle-0
+    │   │   │   │   ├── thinking: nil
+    │   │   │   │   ├── text: "Let me find the files..."
+    │   │   │   │   └── tools (tlist)
+    │   │   │   │       ├── {id:"tu_003" name:"Glob" status:"done"}
+    │   │   │   │       └── {id:"tu_004" name:"Read" status:"done"}
+    │   │   │   └─ cycle-1
+    │   │   │       ├── thinking: nil
+    │   │   │       ├── text: "I see the issue..."
+    │   │   │       └── tools (tlist)
+    │   │   │           ├── {id:"tu_005" name:"Edit" status:"done"}
+    │   │   │           └── {id:"tu_006" name:"Bash" status:"done"
+    │   │   │                 post_text:"Tests pass."}
+    │   │   ├── agents (tlist)
+    │   │   │   └── {agent_id:"ag_01" type:"Explore" status:"done"
+    │   │   │         duration:3.1 task-tool:→tu_007
+    │   │   │         cycles (tlist)
+    │   │   │           └─ cycle-0
+    │   │   │               └── tools: [{name:"Glob"} {name:"Read"}]}
+    │   │   ├── tasks: [{subject:"Fix auth" status:"completed"}]
+    │   │   ├── stop_text: "All tests pass now."
+    │   │   └── tool-count: 4  agent-count: 1
+    │   │
+    │   └─ turn-node [turn-number=2]
+    │       ├── prompt: {text:"Also update the docs"}
+    │       ├── cycles (tlist)
+    │       │   └─ cycle-0
+    │       │       ├── text: "Now for the docs..."
+    │       │       └── tools (tlist)
+    │       │           ├── {id:"tu_008" name:"Read" status:"done"}
+    │       │           └── {id:"tu_009" name:"Edit" status:"running"}
+    │       └── tool-count: 2
+    │
+    ├── :tool-index (hash-table) ─────────────────────────────────
+    │   "tu_001" → ● (pointer to tool in turn-0/cycle-0)
+    │   "tu_003" → ● (pointer to tool in turn-1/cycle-0)
+    │   "tu_005" → ● (pointer to tool in turn-1/cycle-1)
+    │   ...
+    │
+    ├── :agent-index (hash-table) ────────────────────────────────
+    │   "ag_01" → ● (pointer to agent in turn-1)
+    │
+    ├── :files (hash-table)
+    │   "/src/auth.ts" → {ops: ("read" "edit"), last-touched: T}
+    │
+    └── :tasks, :plan, :token-usage, :allow-patterns, :notifications ...
 ```
 
-## Key Relationships
+## Rendering Mapping
 
-Turn number is the join key connecting all collections:
-
-```
-                    ┌──────────────────────────────────────┐
-                    │          TURN NUMBER                  │
-                    │    (the join key for everything)      │
-                    └──────┬──────┬──────┬──────┬──────────┘
-                           │      │      │      │
-                    prompts[N]    │      │      │
-                           │   tools     │      │
-                           │  [turn=N]   │      │
-                           │      │   agents    │
-                           │      │  [turn=N]   │
-                           │      │      │    tasks
-                           │      │      │   [turn=N]
-                           │      │      │
-                           │      │      └─── agent-tools[]
-                           │      │              │
-                           │      └──────────────┘
-                           │             │
-                           │      :tool-index{tid} ──→ (same objects)
-                           │
-              stop_text ◄──┘
-              elapsed   ◄──┘  (set by Stop handler on last prompt)
-```
-
-The `tool-index` hash is a secondary index — it stores pointers to the same alist objects that live in `state.tools` and `agent-tools`, enabling O(1) lookup by `tool_use_id` without duplicating data.
-
-## ASCII Visualization: Turn Grouping Example
-
-A real session with 2 turns, showing how data maps to the rendered UI:
+The tree mirrors the screen. The renderer (`claude-gravity-render.el`) iterates without grouping:
 
 ```
-SESSION abc-123
-├── :current-turn 1
-├── :prompts
-│   ├── [0] (text: "Fix the auth bug"  submitted: T0  elapsed: 45.2)
-│   │       (stop_text: "All tests pass now."  stop_thinking: nil)
-│   └── [1] (text: "Also update the docs"  submitted: T1  elapsed: nil)
-│
-├── :state.tools
-│   ├── tool{turn:0 name:"Glob"   id:"tu_001" status:"done"  assistant_text:"Let me find the files..."}
-│   ├── tool{turn:0 name:"Read"   id:"tu_002" status:"done"  assistant_text:nil}
-│   ├── tool{turn:0 name:"Edit"   id:"tu_003" status:"done"  assistant_text:"I see the issue..."}
-│   ├── tool{turn:0 name:"Bash"   id:"tu_004" status:"done"  post_text:"Tests pass."}
-│   ├── tool{turn:1 name:"Read"   id:"tu_005" status:"done"  assistant_text:"Now for the docs..."}
-│   └── tool{turn:1 name:"Edit"   id:"tu_006" status:"running"}
-│
-├── :agents
-│   └── agent{turn:0 id:"ag_01" type:"Explore" status:"done" duration:3.1}
-│       └── agent-tools
-│           ├── tool{name:"Glob" id:"tu_010" status:"done"}
-│           └── tool{name:"Read" id:"tu_011" status:"done"}
-│
-└── :tasks
-    └── "task_1" → {subject:"Fix auth" status:"completed" turn:0}
+TREE STRUCTURE                          RENDERED UI
+─────────────                           ──────────
+:turns tlist                            ── Turns (N) ──────
+  turn-node[0]                            Pre-prompt activity  [0t 0a 2 tools]
+    cycle-0                                 ┊ 2 tools
+      tool, tool                              [x] Glob  [x] Read
 
-RENDERS AS:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-── Turns (2) ───────────────────────────────
-
-╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
-❯ Fix the auth bug
-  [1t 1a 4 tools]  45.2s
-
-  ┊ Let me find the files...                    ← tu_001.assistant_text
-  ┊ 2 tools                                     ← tu_001 + tu_002 (grouped)
-    [x] Glob  **/*.ts
-    [x] Read  /src/auth.ts
-
-  ┊ I see the issue...                          ← tu_003.assistant_text
-  ┊ 2 tools                                     ← tu_003 + tu_004
-    [x] Edit  /src/auth.ts
-    [x] Bash  npm test
-      Tests pass.                                ← tu_004.post_text
-
-    [x] Explore auth patterns                   ← agent ag_01
-      Task(Explore)  → Explore (ag_01)  3.1s
-
-  Tasks (1/1)
-    [x] Fix auth
-
-  ┊ All tests pass now.                         ← prompts[0].stop_text
-
-╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
-❯ Also update the docs
-  [0t 0a 2 tools]
-
-  ┊ Now for the docs...                         ← tu_005.assistant_text
-  ┊ 2 tools
-    [x] Read  /docs/auth.md
-    [/] Edit  /docs/auth.md                      ← tu_006 (running)
+  turn-node[1]                          ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+    prompt                              ❯ Fix the auth bug  [1t 1a 4 tools]  45.2s
+    cycle-0                               ┊ Let me find the files...
+      tool, tool                            ┊ 2 tools  [x] Glob  [x] Read
+    cycle-1                               ┊ I see the issue...
+      tool, tool                            ┊ 2 tools  [x] Edit  [x] Bash
+    agents                                  [x] Explore (ag_01)  3.1s
+      agent.cycles                            ┊ 2 tools  [x] Glob  [x] Read
+    tasks                                 Tasks (1/1)  [x] Fix auth
+    stop_text                             ┊ All tests pass now.
 ```
+
+## Key Design Points
+
+1. **Insertion-time grouping**: Cycle boundaries are detected when tools are added (`--tree-add-tool`), not at render time. This eliminates dedup logic from the renderer.
+
+2. **O(1) lookups**: `:tool-index` and `:agent-index` hash tables store pointers to the same alist objects in the tree. Updates via `PostToolUse`/`SubagentStop` use hash lookup, not tree traversal.
+
+3. **Bidirectional agent↔tool links**: `--link-agent-to-task-tool` sets `agent` key on the Task tool and `task-tool` key on the agent alist, enabling the renderer to show agent branches nested under their spawning Task tool.
+
+4. **Pre-computed counts**: `tool-count` and `agent-count` on turn-nodes are incremented at insertion time, avoiding tree walks for header display.
