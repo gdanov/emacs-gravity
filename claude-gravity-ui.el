@@ -321,6 +321,88 @@ Only idle items can be dismissed.  Bidirectional items need a response."
         (pop-to-buffer (current-buffer))))))
 
 
+(defun claude-gravity-switch-session ()
+  "Switch to a session buffer via completing-read.
+Pre-selects: session with oldest pending notification, else longest-idle,
+else current session."
+  (interactive)
+  (let ((candidates nil)
+        (id-map nil)
+        (default-label nil)
+        (self-id claude-gravity--buffer-session-id))
+    ;; Build candidates
+    (maphash
+     (lambda (_id session)
+       (when (eq (plist-get session :status) 'active)
+         (let* ((sid (plist-get session :session-id))
+                (label (claude-gravity--session-label session))
+                (claude-st (plist-get session :claude-status))
+                (n-tools (claude-gravity--tree-total-tool-count session))
+                (badges (claude-gravity--inbox-badges sid))
+                (status-str (if (eq claude-st 'responding) "responding"
+                              (let* ((last-ev (plist-get session :last-event-time))
+                                     (idle-secs (and last-ev
+                                                     (float-time
+                                                      (time-subtract (current-time) last-ev)))))
+                                (cond
+                                 ((null idle-secs) "idle")
+                                 ((< idle-secs 60) "idle")
+                                 ((< idle-secs 3600) (format "idle %dm" (truncate (/ idle-secs 60))))
+                                 (t (format "idle %dh" (truncate (/ idle-secs 3600))))))))
+                (entry (format "%-20s %s  [%d tools]%s" label status-str n-tools badges)))
+           (push entry candidates)
+           (push (cons entry sid) id-map))))
+     claude-gravity--sessions)
+    (unless candidates
+      (user-error "No active sessions"))
+    ;; Determine default: 1) oldest notification, 2) longest idle, 3) self
+    (let ((notif-oldest-sid nil)
+          (notif-oldest-time nil))
+      ;; Find session with oldest non-idle inbox item
+      (dolist (item claude-gravity--inbox)
+        (unless (eq (alist-get 'type item) 'idle)
+          (let ((ts (alist-get 'timestamp item))
+                (sid (alist-get 'session-id item)))
+            (when (and ts (or (null notif-oldest-time)
+                              (time-less-p ts notif-oldest-time)))
+              (setq notif-oldest-time ts
+                    notif-oldest-sid sid)))))
+      (cond
+       ;; 1) Session with oldest notification
+       (notif-oldest-sid
+        (setq default-label
+              (car (cl-find-if (lambda (pair) (equal (cdr pair) notif-oldest-sid))
+                               id-map))))
+       ;; 2) Longest idle active session
+       (t
+        (let ((best-sid nil) (best-time nil))
+          (maphash
+           (lambda (_id session)
+             (when (and (eq (plist-get session :status) 'active)
+                        (eq (plist-get session :claude-status) 'idle))
+               (let ((last-ev (plist-get session :last-event-time)))
+                 (when (and last-ev
+                            (or (null best-time)
+                                (time-less-p last-ev best-time)))
+                   (setq best-time last-ev
+                         best-sid (plist-get session :session-id))))))
+           claude-gravity--sessions)
+          (when best-sid
+            (setq default-label
+                  (car (cl-find-if (lambda (pair) (equal (cdr pair) best-sid))
+                                   id-map))))))))
+    ;; 3) Fallback: self
+    (unless default-label
+      (when self-id
+        (setq default-label
+              (car (cl-find-if (lambda (pair) (equal (cdr pair) self-id))
+                               id-map)))))
+    (let* ((choice (completing-read "Session: " candidates nil t nil nil default-label))
+           (sid (cdr (assoc choice id-map))))
+      (when sid
+        (claude-gravity-open-session sid)))))
+
+
 (defun claude-gravity--apply-visibility ()
   "Apply overlay-based hiding for sections marked hidden.
 magit-section caches visibility but relies on paint hooks to apply
@@ -411,6 +493,8 @@ Only shows permission, question, and plan-review items (not idle)."
 (define-key claude-gravity-mode-map (kbd "t") 'claude-gravity-tail)
 
 (define-key claude-gravity-mode-map (kbd "f") 'claude-gravity-follow-mode)
+
+(define-key claude-gravity-mode-map (kbd "b") 'claude-gravity-switch-session)
 
 (define-key claude-gravity-mode-map (kbd "k") 'claude-gravity-inbox-dismiss)
 
@@ -719,6 +803,7 @@ Returns a list from most specific to most general, with nils removed."
     ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
     ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]]
   ["Navigation"
+   ("b" "Switch session" claude-gravity-switch-session)
    ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)
    ("TAB" "Toggle section" magit-section-toggle)
    ("k" "Dismiss inbox item" claude-gravity-inbox-dismiss)])
