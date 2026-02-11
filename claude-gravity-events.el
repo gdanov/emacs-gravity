@@ -58,6 +58,16 @@ the model mutation API to update session state."
     (when existing
       (claude-gravity-model-update-session-meta
        existing :pid pid :slug (alist-get 'slug data))))
+  ;; Auto-dismiss stale bidirectional inbox items.
+  ;; If we receive a completion/progress event for a session that has pending
+  ;; permission/question/plan-review items, the agent has moved on (user
+  ;; handled it outside Emacs, or it timed out).  Dismiss them.
+  ;; Excludes: SessionStart (new session), PreToolUse (fires concurrently
+  ;; with PermissionRequest for the same tool), Notification (informational).
+  (when (member event '("PostToolUse" "PostToolUseFailure" "Stop"
+                         "SubagentStart" "SubagentStop" "UserPromptSubmit"
+                         "SessionEnd"))
+    (claude-gravity--dismiss-stale-inbox-items session-id))
   (pcase event
     ("SessionStart"
      (let ((existing (claude-gravity--get-session session-id)))
@@ -85,7 +95,11 @@ the model mutation API to update session state."
                      (rename-buffer new-name t)
                      (setq claude-gravity--buffer-session-id session-id)))))
              ;; Reset conversational state (essential for /clear re-keying)
-             (claude-gravity--reset-session temp-session)))))
+             (claude-gravity--reset-session temp-session)
+             ;; Apply slug now — the pre-pcase update at lines 57-60 missed it
+             ;; because the session was still keyed under temp-id at that point.
+             (claude-gravity-model-update-session-meta
+              temp-session :pid pid :slug (alist-get 'slug data))))))
      (unless (equal (alist-get 'source data) "startup")
        (claude-gravity--ensure-session session-id cwd)))
 

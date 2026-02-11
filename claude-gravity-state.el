@@ -13,6 +13,7 @@
 (declare-function claude-gravity--session-buffer-name "claude-gravity-ui")
 (declare-function claude-gravity--tool-signature "claude-gravity-diff")
 (declare-function claude-gravity-tail "claude-gravity-ui")
+(declare-function claude-gravity--plan-review-on-kill "claude-gravity-socket")
 
 
 ;;; Inbox — Async queue for items needing user attention
@@ -78,6 +79,53 @@ Returns the new item."
   "Return inbox item with ID, or nil."
   (cl-find-if (lambda (item) (eq (alist-get 'id item) id))
               claude-gravity--inbox))
+
+
+(defun claude-gravity--dismiss-stale-inbox-items (session-id)
+  "Dismiss stale bidirectional inbox items for SESSION-ID.
+A subsequent event means the agent has moved on — any pending
+permission, question, or plan-review items are no longer actionable.
+Closes the bridge socket proc and kills associated action buffers."
+  (let ((stale (cl-remove-if-not
+                (lambda (item)
+                  (and (equal (alist-get 'session-id item) session-id)
+                       (memq (alist-get 'type item)
+                             '(permission question plan-review))))
+                claude-gravity--inbox)))
+    (when stale
+      (dolist (item stale)
+        (let ((proc (alist-get 'socket-proc item))
+              (item-type (alist-get 'type item)))
+          ;; Close the bridge socket (it's waiting for a response)
+          (when (and proc (process-live-p proc))
+            (delete-process proc))
+          ;; Kill associated action buffers
+          (pcase item-type
+            ('permission
+             (let ((buf (get-buffer "*Claude Action: Permission*")))
+               (when (and buf (buffer-live-p buf))
+                 (kill-buffer buf))))
+            ('question
+             (let ((buf (get-buffer "*Claude Action: Question*")))
+               (when (and buf (buffer-live-p buf))
+                 (kill-buffer buf))))
+            ('plan-review
+             ;; Plan review buffers are named per session label
+             (let ((label (alist-get 'label item)))
+               (when label
+                 (let ((buf (get-buffer (format "*Claude Plan Review: %s*" label))))
+                   (when (and buf (buffer-live-p buf))
+                     ;; Remove kill-buffer hook to avoid double-send of deny
+                     (with-current-buffer buf
+                       (remove-hook 'kill-buffer-hook
+                                    #'claude-gravity--plan-review-on-kill t))
+                     (kill-buffer buf))))))))
+        (claude-gravity--log 'debug "Auto-dismissed stale %s for session %s"
+                             (alist-get 'type item) session-id))
+      ;; Remove all stale items from inbox
+      (claude-gravity--inbox-remove-for-session session-id 'permission)
+      (claude-gravity--inbox-remove-for-session session-id 'question)
+      (claude-gravity--inbox-remove-for-session session-id 'plan-review))))
 
 
 (defun claude-gravity--inbox-summary (type data)
