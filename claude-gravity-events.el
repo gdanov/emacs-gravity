@@ -114,28 +114,28 @@ the model mutation API to update session state."
      (let ((session (claude-gravity--get-session session-id)))
        (when session
          (let-alist data
-           (when .cost\.total_cost_usd
+           (when (numberp .cost\.total_cost_usd)
              (plist-put session :cost .cost\.total_cost_usd))
-           (when .context_window\.used_percentage
+           (when (numberp .context_window\.used_percentage)
              (plist-put session :context-pct
                         (truncate .context_window\.used_percentage)))
            (when .model\.display_name
              (plist-put session :model-name .model\.display_name))
            (when .model\.id
              (plist-put session :model-id .model\.id))
-           (when .context_window\.total_input_tokens
+           (when (numberp .context_window\.total_input_tokens)
              (plist-put session :sl-input-tokens
                         (truncate .context_window\.total_input_tokens)))
-           (when .context_window\.total_output_tokens
+           (when (numberp .context_window\.total_output_tokens)
              (plist-put session :sl-output-tokens
                         (truncate .context_window\.total_output_tokens)))
-           (when .cost\.total_duration_ms
+           (when (numberp .cost\.total_duration_ms)
              (plist-put session :sl-duration-ms
                         (truncate .cost\.total_duration_ms)))
-           (when .cost\.total_lines_added
+           (when (numberp .cost\.total_lines_added)
              (plist-put session :sl-lines-added
                         (truncate .cost\.total_lines_added)))
-           (when .cost\.total_lines_removed
+           (when (numberp .cost\.total_lines_removed)
              (plist-put session :sl-lines-removed
                         (truncate .cost\.total_lines_removed))))
          (claude-gravity--schedule-refresh))))

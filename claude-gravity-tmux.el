@@ -236,10 +236,14 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
 
 (defun claude-gravity--resolve-tmux-session (&optional session-id)
   "Resolve SESSION-ID to a (sid . tmux-name) cons.
-Falls back to buffer-local session, then any active tmux session.
+Falls back to buffer-local session, section at point, then any active tmux session.
 Signals error if no session found or not alive."
   (let* ((sid (or session-id
                   claude-gravity--buffer-session-id
+                  ;; In overview buffer: use session at point
+                  (let ((section (magit-current-section)))
+                    (when (and section (eq (oref section type) 'session-entry))
+                      (oref section value)))
                   (let ((found nil))
                     (maphash (lambda (id tmux-name)
                                (when (and (not found)
@@ -504,6 +508,9 @@ Sends Shift-Tab to the managed tmux session."
   (interactive)
   (let* ((sid (or session-id
                   claude-gravity--buffer-session-id
+                  (let ((section (magit-current-section)))
+                    (when (and section (eq (oref section type) 'session-entry))
+                      (oref section value)))
                   (let ((found nil))
                     (maphash (lambda (id tmux-name)
                                (when (and (not found)
