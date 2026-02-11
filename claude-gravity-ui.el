@@ -983,8 +983,11 @@ final reply text."
                   (setq last-cycle child)))
               (when last-cycle
                 (magit-section-show last-cycle)))
-            (goto-char (1- (oref last-turn end)))
-            (recenter -3)))))))
+            (let ((win (get-buffer-window (current-buffer))))
+              (when win
+                (with-selected-window win
+                  (goto-char (1- (oref last-turn end)))
+                  (recenter -3))))))))))
 
 
 ;;;###autoload

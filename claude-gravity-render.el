@@ -462,7 +462,7 @@ Shows stop_thinking and stop_text for all agents with status='done'."
                     (propertize label 'face 'claude-gravity-detail-label)
                     "\n"))
           (claude-gravity--insert-wrapped-with-margin
-           stop-text nil 'claude-gravity-assistant-text))))))
+           stop-text nil 'claude-gravity-agent-stop-text))))))
 
 
 (defun claude-gravity-insert-turns (session)

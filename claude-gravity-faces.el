@@ -121,6 +121,12 @@
   :group 'claude-gravity)
 
 
+(defface claude-gravity-agent-stop-text
+  '((t :foreground "#88ccaa"))
+  "Face for agent completion summary text (SubagentStop)."
+  :group 'claude-gravity)
+
+
 (defface claude-gravity-thinking
   '((t :foreground "#d0a0ff" :slant italic))
   "Face for assistant extended thinking text."
