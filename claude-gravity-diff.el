@@ -511,6 +511,35 @@ or `deleted'.  Returns nil if OLD-CONTENT is nil or contents are identical."
         (delete-file new-file)))))
 
 
+(defun claude-gravity--plan-revision-diff-async (old-content new-content callback)
+  "Compute line-level diff between OLD-CONTENT and NEW-CONTENT asynchronously.
+Calls CALLBACK with diff result (list of (LINE-NUM . STATUS)) or nil.
+Temp files are cleaned up in the sentinel."
+  (if (or (null old-content) (not (stringp old-content))
+          (string= old-content new-content))
+      (funcall callback nil)
+    (let ((orig-file (make-temp-file "plan-rev-old"))
+          (new-file (make-temp-file "plan-rev-new")))
+      (with-temp-file orig-file (insert old-content))
+      (with-temp-file new-file (insert new-content))
+      (let ((output-buf (generate-new-buffer " *plan-diff-output*")))
+        (make-process
+         :name "plan-revision-diff"
+         :buffer output-buf
+         :command (list "diff" "-u" orig-file new-file)
+         :sentinel
+         (lambda (proc _event)
+           (unwind-protect
+               (when (memq (process-status proc) '(exit signal))
+                 (let ((diff-output (with-current-buffer output-buf
+                                      (buffer-string))))
+                   (funcall callback
+                            (claude-gravity--parse-unified-diff-for-margins diff-output))))
+             (delete-file orig-file)
+             (delete-file new-file)
+             (kill-buffer output-buf))))))))
+
+
 (defun claude-gravity--parse-unified-diff-for-margins (diff-output)
   "Parse DIFF-OUTPUT (unified diff) into margin indicator data.
 Returns list of (LINE-NUM . STATUS) for the new file, where STATUS is

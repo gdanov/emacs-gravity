@@ -124,6 +124,13 @@ Use as the argument to `magit-insert-heading'."
             (when (fboundp 'markdown-mode) (markdown-mode))
             (current-buffer)))))
 
+(defvar claude-gravity--wrap-cache (make-hash-table :test 'equal :size 256)
+  "Cache of fill-region results.  Key is (text fill-column prefix), value is rendered string.")
+
+(defun claude-gravity--wrap-cache-clear ()
+  "Clear the fill-region wrap cache (e.g. on window resize)."
+  (clrhash claude-gravity--wrap-cache))
+
 (defun claude-gravity--fontify-cache-clear ()
   "Clear the markdown fontification cache."
   (clrhash claude-gravity--fontify-cache))
@@ -163,20 +170,31 @@ INDENT-OR-NIL and FACE work like `claude-gravity--insert-wrapped'."
            (margin (propertize (concat claude-gravity--margin-char " ")
                               'face claude-gravity--margin-face))
            (prefix (concat (make-string indent ?\s) margin))
-           (start (point))
-           (fill-column (max 40 (- (or (window-width) 80) 2)))
-           (fill-prefix prefix)
-           (plain-prefix (make-string (+ indent 2) ?\s)))
-      (dolist (para (split-string text "\n"))
-        (let ((para-start (point))
-              (is-box (claude-gravity--box-table-line-p para)))
-          (insert (if is-box plain-prefix prefix) para "\n")
-          (when (and (not is-box)
-                     (> (length para) (- fill-column indent 2))
-                     (not (claude-gravity--table-line-p para)))
-            (fill-region para-start (point)))))
-      (when face
-        (add-face-text-property start (point) face)))))
+           (fc (max 40 (- (or (window-width) 80) 2)))
+           (cache-key (list text fc prefix face))
+           (cached (gethash cache-key claude-gravity--wrap-cache)))
+      (if cached
+          (insert cached)
+        (let ((rendered
+               (with-temp-buffer
+                 (let ((fill-column fc)
+                       (fill-prefix prefix)
+                       (plain-prefix (make-string (+ indent 2) ?\s)))
+                   (dolist (para (split-string text "\n"))
+                     (let ((para-start (point))
+                           (is-box (claude-gravity--box-table-line-p para)))
+                       (insert (if is-box plain-prefix prefix) para "\n")
+                       (when (and (not is-box)
+                                  (> (length para) (- fc indent 2))
+                                  (not (claude-gravity--table-line-p para)))
+                         (fill-region para-start (point))))))
+                 (when face
+                   (add-face-text-property (point-min) (point-max) face))
+                 (buffer-string))))
+          (when (> (hash-table-count claude-gravity--wrap-cache) 512)
+            (clrhash claude-gravity--wrap-cache))
+          (puthash cache-key rendered claude-gravity--wrap-cache)
+          (insert rendered))))))
 
 
 (defun claude-gravity--split-margin-text (text face)
@@ -191,26 +209,34 @@ Uses current section depth for indentation."
                               'face claude-gravity--margin-face))
            (prefix (concat (make-string indent ?\s) margin))
            (fc (max 40 (- (or (window-width) 80) 2)))
-           (rendered
-            (with-temp-buffer
-              (let ((fill-column fc)
-                    (fill-prefix prefix))
-                (dolist (para (split-string text "\n"))
-                  (let ((para-start (point)))
-                    (insert prefix para "\n")
-                    (when (and (> (length para) (- fc indent 2))
-                               (not (claude-gravity--table-line-p para)))
-                      (fill-region para-start (point))))))
-              (when face
-                (add-face-text-property (point-min) (point-max) face))
-              (buffer-string))))
-      (unless (string-empty-p rendered)
-        (let ((nl-pos (string-match "\n" rendered)))
-          (if nl-pos
-              (let ((first (substring rendered 0 nl-pos))
-                    (rest (substring rendered (1+ nl-pos))))
-                (cons first (if (string-empty-p rest) nil rest)))
-            (cons rendered nil)))))))
+           (cache-key (list 'split text fc prefix face))
+           (cached (gethash cache-key claude-gravity--wrap-cache)))
+      (or cached
+          (let* ((rendered
+                  (with-temp-buffer
+                    (let ((fill-column fc)
+                          (fill-prefix prefix))
+                      (dolist (para (split-string text "\n"))
+                        (let ((para-start (point)))
+                          (insert prefix para "\n")
+                          (when (and (> (length para) (- fc indent 2))
+                                     (not (claude-gravity--table-line-p para)))
+                            (fill-region para-start (point))))))
+                    (when face
+                      (add-face-text-property (point-min) (point-max) face))
+                    (buffer-string)))
+                 (result
+                  (unless (string-empty-p rendered)
+                    (let ((nl-pos (string-match "\n" rendered)))
+                      (if nl-pos
+                          (let ((first (substring rendered 0 nl-pos))
+                                (rest (substring rendered (1+ nl-pos))))
+                            (cons first (if (string-empty-p rest) nil rest)))
+                        (cons rendered nil))))))
+            (when (> (hash-table-count claude-gravity--wrap-cache) 512)
+              (clrhash claude-gravity--wrap-cache))
+            (puthash cache-key result claude-gravity--wrap-cache)
+            result)))))
 
 
 (defun claude-gravity--insert-wrapped (text indent-or-nil &optional face)

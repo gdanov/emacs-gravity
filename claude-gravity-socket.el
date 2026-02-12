@@ -171,6 +171,9 @@ Accumulates partial data per connection until complete lines arrive."
   ;; Register notification indicator in mode-line
   (unless (memq 'claude-gravity--notification-indicator global-mode-string)
     (push 'claude-gravity--notification-indicator global-mode-string))
+  ;; Clear wrap cache on window resize (fill-column depends on window width)
+  (add-hook 'window-size-change-functions
+            (lambda (_frame) (claude-gravity--wrap-cache-clear)))
   (claude-gravity--log 'info "Claude Gravity server started at %s" claude-gravity-server-sock-path))
 
 
@@ -426,17 +429,19 @@ SESSION-ID identifies the Claude Code session."
       (setq-local claude-gravity--plan-review-proc proc)
       (setq-local claude-gravity--plan-review-original plan-content)
       (setq-local claude-gravity--plan-review-session-id session-id)
-      ;; Compute and apply revision diff margin indicators.
+      ;; Compute and apply revision diff margin indicators asynchronously.
       ;; Use :last-reviewed-plan (set on every review open, not just approval)
       ;; so deny-revise-resubmit flow also shows diffs.
-      (let* ((prev-content (when session
-                             (or (plist-get session :last-reviewed-plan)
-                                 (plist-get (plist-get session :plan) :content))))
-             (diff-data (when prev-content
-                          (claude-gravity--plan-revision-diff prev-content plan-content))))
-        (when diff-data
-          (claude-gravity--plan-review-apply-margin-indicators diff-data)
-          (setq-local claude-gravity--plan-review-prev-content prev-content))
+      (let ((prev-content (when session
+                            (or (plist-get session :last-reviewed-plan)
+                                (plist-get (plist-get session :plan) :content)))))
+        (when prev-content
+          (claude-gravity--plan-revision-diff-async prev-content plan-content
+            (lambda (diff-data)
+              (when (and diff-data (buffer-live-p buf))
+                (with-current-buffer buf
+                  (claude-gravity--plan-review-apply-margin-indicators diff-data)
+                  (setq-local claude-gravity--plan-review-prev-content prev-content))))))
         ;; Always store current plan for next review's diff
         (when session
           (plist-put session :last-reviewed-plan plan-content)))

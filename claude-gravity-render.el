@@ -528,7 +528,8 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                           ""))
                          (prompt-face (cond (is-phase-boundary 'claude-gravity-phase-boundary)
                                             (is-question 'claude-gravity-question)
-                                            (t 'claude-gravity-prompt))))
+                                            (t 'claude-gravity-prompt)))
+                         (frozen (alist-get 'frozen turn-node)))
                     ;; Turn separator between turns
                     (when prev-turn-rendered
                       (claude-gravity--turn-separator))
@@ -545,19 +546,36 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                           (when (> (length prompt-text) (- fill-column cont-indent))
                             (fill-region start (point)))
                           (add-face-text-property start (point) prompt-face))))
-                    (magit-insert-section (turn turn-num (not is-current))
-                      (magit-insert-heading
-                        (format "%s%s%s  %s"
-                                (claude-gravity--indent)
-                                (propertize counts 'face 'claude-gravity-detail-label)
-                                (propertize answer-suffix 'face 'claude-gravity-detail-label)
-                                (propertize elapsed-str 'face 'claude-gravity-detail-label)))
-                      ;; Children from tree
-                      (claude-gravity--insert-turn-children-from-tree turn-node)
-                      ;; Agent completions at top level
-                      (claude-gravity--insert-agent-completions turn-agents)
-                      ;; Trailing assistant text (from Stop event)
-                      (claude-gravity--insert-stop-text turn-node))))))))
+                    (if frozen
+                        ;; Frozen turn: heading only — skip expensive children
+                        (let* ((stop (alist-get 'stop_text turn-node))
+                               (summary (if (and stop (stringp stop)
+                                                 (not (string-empty-p stop)))
+                                            (claude-gravity--truncate
+                                             (replace-regexp-in-string "\n" " " stop) 60)
+                                          ""))
+                               (summary-str (if (string-empty-p summary) ""
+                                              (concat "  " (propertize summary 'face 'claude-gravity-detail-label)))))
+                          (insert (format "%s%s%s  %s%s\n"
+                                          (claude-gravity--indent)
+                                          (propertize counts 'face 'claude-gravity-detail-label)
+                                          (propertize answer-suffix 'face 'claude-gravity-detail-label)
+                                          (propertize elapsed-str 'face 'claude-gravity-detail-label)
+                                          summary-str)))
+                      ;; Active turn: full render
+                      (magit-insert-section (turn turn-num (not is-current))
+                        (magit-insert-heading
+                          (format "%s%s%s  %s"
+                                  (claude-gravity--indent)
+                                  (propertize counts 'face 'claude-gravity-detail-label)
+                                  (propertize answer-suffix 'face 'claude-gravity-detail-label)
+                                  (propertize elapsed-str 'face 'claude-gravity-detail-label)))
+                        ;; Children from tree
+                        (claude-gravity--insert-turn-children-from-tree turn-node)
+                        ;; Agent completions at top level
+                        (claude-gravity--insert-agent-completions turn-agents)
+                        ;; Trailing assistant text (from Stop event)
+                        (claude-gravity--insert-stop-text turn-node)))))))))
         (insert "\n")))))
 
 
