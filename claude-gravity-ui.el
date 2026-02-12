@@ -339,19 +339,61 @@ else current session."
                 (claude-st (plist-get session :claude-status))
                 (n-tools (claude-gravity--tree-total-tool-count session))
                 (badges (claude-gravity--inbox-badges sid))
+                (last-ev (plist-get session :last-event-time))
+                (idle-secs (and last-ev (float-time (time-subtract (current-time) last-ev))))
                 (status-str (if (eq claude-st 'responding) "responding"
-                              (let* ((last-ev (plist-get session :last-event-time))
-                                     (idle-secs (and last-ev
-                                                     (float-time
-                                                      (time-subtract (current-time) last-ev)))))
-                                (cond
-                                 ((null idle-secs) "idle")
-                                 ((< idle-secs 60) "idle")
-                                 ((< idle-secs 3600) (format "idle %dm" (truncate (/ idle-secs 60))))
-                                 (t (format "idle %dh" (truncate (/ idle-secs 3600))))))))
-                (entry (format "%-20s %s  [%d tools]%s" label status-str n-tools badges)))
-           (push entry candidates)
-           (push (cons entry sid) id-map))))
+                              (cond
+                               ((null idle-secs) "idle")
+                               ((< idle-secs 60) "idle")
+                               ((< idle-secs 3600) (format "idle %dm" (truncate (/ idle-secs 60))))
+                               (t (format "idle %dh" (truncate (/ idle-secs 3600)))))))
+                (dot (if (eq claude-st 'responding)
+                         (propertize "●" 'face 'claude-gravity-status-responding)
+                       (propertize "●" 'face 'claude-gravity-status-idle)))
+                (status-face (if (eq claude-st 'responding)
+                                 'claude-gravity-status-responding
+                               'claude-gravity-status-idle))
+                (elapsed (claude-gravity--session-total-elapsed session))
+                (usage (plist-get session :token-usage))
+                (in-tokens (when usage
+                             (+ (or (alist-get 'input_tokens usage) 0)
+                                (or (alist-get 'cache_read_input_tokens usage) 0)
+                                (or (alist-get 'cache_creation_input_tokens usage) 0))))
+                (out-tokens (when usage (or (alist-get 'output_tokens usage) 0)))
+                (cost (plist-get session :cost))
+                (ctx-pct (plist-get session :context-pct))
+                (model-name (plist-get session :model-name))
+                ;; Build entry parts
+                (parts (list dot " "
+                             (propertize status-str 'face status-face) "  "
+                             (propertize (format "%-20s" label) 'face 'claude-gravity-slug)
+                             (propertize (format "  ◆ %d tools" n-tools)
+                                         'face 'claude-gravity-detail-label)))
+                (tail nil))
+           (when (and model-name (not (string-empty-p model-name)))
+             (push (propertize (format "  %s" model-name)
+                               'face 'claude-gravity-detail-label) tail))
+           (when elapsed
+             (push (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))
+                               'face 'claude-gravity-detail-label) tail))
+           (when (and in-tokens (> in-tokens 0))
+             (push (propertize (format "  ↓%s ↑%s"
+                                       (claude-gravity--format-token-count in-tokens)
+                                       (claude-gravity--format-token-count out-tokens))
+                               'face 'claude-gravity-detail-label) tail))
+           (when cost
+             (push (propertize (format "  $%.2f" cost)
+                               'face 'claude-gravity-detail-label) tail))
+           (when ctx-pct
+             (let ((face (cond ((>= ctx-pct 90) 'error)
+                               ((>= ctx-pct 70) 'warning)
+                               (t 'claude-gravity-detail-label))))
+               (push (propertize (format "  ctx:%d%%" ctx-pct) 'face face) tail)))
+           (when (and badges (not (string-empty-p badges)))
+             (push badges tail))
+           (let ((entry (apply #'concat (append parts (nreverse tail)))))
+             (push entry candidates)
+             (push (cons entry sid) id-map)))))
      claude-gravity--sessions)
     (unless candidates
       (user-error "No active sessions"))
