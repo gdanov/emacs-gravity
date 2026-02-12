@@ -31,8 +31,9 @@
         (concat
          (propertize "Structured Claude Session" 'face 'claude-gravity-header-title)
          (propertize (format "  %s" slug) 'face 'claude-gravity-slug)
-         (when (gethash (plist-get session :session-id) claude-gravity--tmux-sessions)
-           (propertize " [tmux]" 'face 'claude-gravity-detail-label))
+         (let ((tmux-name (gethash (plist-get session :session-id) claude-gravity--tmux-sessions)))
+           (when tmux-name
+             (propertize (format " [%s]" tmux-name) 'face 'claude-gravity-detail-label)))
          (propertize (format "  ◆ %d tools" tool-count) 'face 'claude-gravity-detail-label)
          (when elapsed
            (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))

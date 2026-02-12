@@ -154,10 +154,12 @@ Groups non-idle items by session and shows badge counts."
                                  (propertize (format " [%s]" perm-mode)
                                              'face 'claude-gravity-detail-label)
                                "")))
-                       (let ((tmux-badge (if (gethash sid claude-gravity--tmux-sessions)
-                                                (propertize " [tmux]" 'face 'claude-gravity-detail-label)
-                                              ""))
-                             (inbox-badge (claude-gravity--inbox-badges sid)))
+                       (let* ((tmux-name (gethash sid claude-gravity--tmux-sessions))
+                              (tmux-badge (if tmux-name
+                                              (propertize (format " [%s]" tmux-name)
+                                                          'face 'claude-gravity-detail-label)
+                                            ""))
+                              (inbox-badge (claude-gravity--inbox-badges sid)))
                          (magit-insert-section (session-entry sid)
                            (magit-insert-heading
                              (format "%s%s%s %s  %s%s  [%d tools]%s"
