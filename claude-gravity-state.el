@@ -709,7 +709,7 @@ PROPS is a plist with optional keys:
 
 (defun claude-gravity-model-update-session-meta (session &rest props)
   "Update SESSION metadata from PROPS plist.
-Supported keys: :pid, :slug, :last-event-time."
+Supported keys: :pid, :slug, :branch, :last-event-time."
   (plist-put session :last-event-time
              (or (plist-get props :last-event-time) (current-time)))
   (let ((pid (plist-get props :pid)))
@@ -721,7 +721,10 @@ Supported keys: :pid, :slug, :last-event-time."
         (plist-put session :slug slug)
         (when (and old-buf (buffer-live-p old-buf))
           (with-current-buffer old-buf
-            (rename-buffer (claude-gravity--session-buffer-name session) t)))))))
+            (rename-buffer (claude-gravity--session-buffer-name session) t))))))
+  (let ((branch (plist-get props :branch)))
+    (when (and branch (stringp branch))
+      (plist-put session :branch branch))))
 
 (provide 'claude-gravity-state)
 ;;; claude-gravity-state.el ends here

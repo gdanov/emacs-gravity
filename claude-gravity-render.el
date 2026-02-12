@@ -13,7 +13,7 @@
 ;;; Section renderers (used by per-session buffers)
 
 (defun claude-gravity-insert-header (session)
-  "Insert header section showing session slug, tool count, elapsed time, and tokens from SESSION."
+  "Insert header section showing session slug and tool count from SESSION."
   (let* ((tool-count (claude-gravity--tree-total-tool-count session))
          (slug (claude-gravity--session-label session))
          (elapsed (claude-gravity--session-total-elapsed session))
@@ -415,15 +415,20 @@ Deduplicates against the last tool's post_text/post_thinking."
             (if (>= (length last-post-text) (length stop-text))
                 (setq stop-text nil)
               (setf (alist-get 'post_text last-tool) nil)))
-          (when (and stop-think (not (string-empty-p stop-think)))
-            (claude-gravity--insert-wrapped-with-margin
-             stop-think nil 'claude-gravity-thinking))
-          (when (and stop-text (not (string-empty-p stop-text)))
-            (insert (claude-gravity--indent)
-                    (propertize "┊ ⏹ " 'face 'claude-gravity-agent-stop-text)
-                    "\n")
-            (claude-gravity--insert-wrapped-with-margin
-             stop-text nil 'claude-gravity-agent-stop-text)))))))
+          (let ((has-think (and stop-think (not (string-empty-p stop-think))))
+                (has-text (and stop-text (not (string-empty-p stop-text)))))
+            (when (or has-think has-text)
+              (magit-insert-section (stop-message nil t)
+                (magit-insert-heading
+                  (format "%s%s\n"
+                          (claude-gravity--indent)
+                          (propertize "┊ ⏹ " 'face 'claude-gravity-agent-stop-text)))
+                (when has-think
+                  (claude-gravity--insert-wrapped-with-margin
+                   stop-think nil 'claude-gravity-thinking))
+                (when has-text
+                  (claude-gravity--insert-wrapped-with-margin
+                   stop-text nil 'claude-gravity-agent-stop-text))))))))))
 
 
 (defun claude-gravity--insert-task-item (task)
@@ -499,12 +504,13 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
               (when has-content
                 (if (= turn-num 0)
                     ;; Turn 0: pre-prompt activity
-                    (magit-insert-section (turn 0 t)
-                      (magit-insert-heading
-                        (format "%s  %s"
-                                (propertize "Pre-prompt activity" 'face 'claude-gravity-detail-label)
-                                (claude-gravity--turn-counts-from-node turn-node)))
-                      (claude-gravity--insert-turn-children-from-tree turn-node)
+                    (progn
+                      (magit-insert-section (turn 0 t)
+                        (magit-insert-heading
+                          (format "%s  %s"
+                                  (propertize "Pre-prompt activity" 'face 'claude-gravity-detail-label)
+                                  (claude-gravity--turn-counts-from-node turn-node)))
+                        (claude-gravity--insert-turn-children-from-tree turn-node))
                       (claude-gravity--insert-stop-text turn-node))
                   ;; Normal turns
                   (let* ((prompt-text (when prompt-entry
@@ -574,9 +580,9 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                         ;; Children from tree
                         (claude-gravity--insert-turn-children-from-tree turn-node)
                         ;; Agent completions at top level
-                        (claude-gravity--insert-agent-completions turn-agents)
-                        ;; Trailing assistant text (from Stop event)
-                        (claude-gravity--insert-stop-text turn-node)))))))))
+                        (claude-gravity--insert-agent-completions turn-agents))
+                      ;; Stop message: top-level section (sibling of turn)
+                      (claude-gravity--insert-stop-text turn-node))))))))
         (insert "\n")))))
 
 

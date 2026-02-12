@@ -106,6 +106,7 @@ Ensures :tool-index, :agent-index, and :turns exist. Idempotent."
                            :header-line-cache nil
                            :permission-mode nil
                            :slug nil
+                           :branch nil
                            :buffer nil)))
         (puthash session-id session claude-gravity--sessions)
         (claude-gravity--load-allow-patterns session)

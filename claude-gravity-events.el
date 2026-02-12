@@ -57,7 +57,8 @@ the model mutation API to update session state."
   (let ((existing (claude-gravity--get-session session-id)))
     (when existing
       (claude-gravity-model-update-session-meta
-       existing :pid pid :slug (alist-get 'slug data))))
+       existing :pid pid :slug (alist-get 'slug data)
+       :branch (alist-get 'branch data))))
   ;; Auto-dismiss stale bidirectional inbox items.
   ;; If we receive a completion/progress event for a session that has pending
   ;; permission/question/plan-review items, the agent has moved on (user

@@ -16,6 +16,23 @@
 (defvar claude-gravity--tmux-sessions)
 
 
+(defun claude-gravity--branch-or-cwd (session)
+  "Return propertized branch name or abbreviated cwd for SESSION.
+Returns nil if neither is available."
+  (let ((branch (plist-get session :branch))
+        (cwd (plist-get session :cwd)))
+    (cond
+     (branch
+      (let ((display (if (> (length branch) 40)
+                         (concat (substring branch 0 37) "...")
+                       branch)))
+        (propertize (format "(%s)" display) 'face 'claude-gravity-branch)))
+     ((and cwd (not (string-empty-p cwd)))
+      (propertize (format "(%s)" (abbreviate-file-name cwd))
+                  'face 'claude-gravity-branch))
+     (t nil))))
+
+
 ;;; Overview Buffer
 
 (defun claude-gravity--inbox-badges (session-id)
@@ -159,12 +176,14 @@ Groups non-idle items by session and shows badge counts."
                                               (propertize (format " [%s]" tmux-name)
                                                           'face 'claude-gravity-detail-label)
                                             ""))
+                              (branch-str (or (claude-gravity--branch-or-cwd session) ""))
                               (inbox-badge (claude-gravity--inbox-badges sid)))
                          (magit-insert-section (session-entry sid)
                            (magit-insert-heading
-                             (format "%s%s%s %s  %s%s  [%d tools]%s"
+                             (format "%s%s %s %s  %s%s  [%d tools]%s"
                                      (claude-gravity--indent)
-                                     indicator tmux-badge label
+                                     indicator branch-str label
+                                     tmux-badge
                                      (or status-label "")
                                      mode-badge
                                      n-tools inbox-badge))
@@ -365,12 +384,15 @@ else current session."
                 (cost (plist-get session :cost))
                 (ctx-pct (plist-get session :context-pct))
                 (model-name (plist-get session :model-name))
+                (branch-str (claude-gravity--branch-or-cwd session))
                 ;; Build entry parts
-                (parts (list dot " "
-                             (propertize status-str 'face status-face) "  "
-                             (propertize (format "%-20s" label) 'face 'claude-gravity-slug)
-                             (propertize (format "  ◆ %d tools" n-tools)
-                                         'face 'claude-gravity-detail-label)))
+                (parts (delq nil
+                             (list dot " "
+                                   (propertize status-str 'face status-face) "  "
+                                   (when branch-str (concat branch-str " "))
+                                   (propertize (format "%-20s" label) 'face 'claude-gravity-slug)
+                                   (propertize (format "  ◆ %d tools" n-tools)
+                                               'face 'claude-gravity-detail-label))))
                 (tail nil))
            (when (and model-name (not (string-empty-p model-name)))
              (push (propertize (format "  %s" model-name)
@@ -507,10 +529,7 @@ Only shows permission, question, and plan-review items (not idle)."
             (claude-gravity-insert-allow-patterns session))
           (goto-char (min pos (point-max)))
           (claude-gravity--apply-visibility)))
-      ;; Pre-warm header-line cache after render (state is fresh)
-      (plist-put session :header-line-cache
-                 (claude-gravity--build-header-line
-                  session (plist-get session :session-id))))))
+      )))
 
 
 ;;; Modes
@@ -580,20 +599,31 @@ Only shows permission, question, and plan-review items (not idle)."
 (define-key claude-gravity-mode-map (kbd "V") 'claude-gravity-open-agent-transcript)
 
 
+(defun claude-gravity--fit-header-segments (segments)
+  "Join SEGMENTS into a single string that fits window width.
+Segments are in priority order; drops from the end when space is tight."
+  (let* ((width (max 40 (1- (window-width))))
+         (result "")
+         (result-len 0))
+    (catch 'done
+      (dolist (seg segments)
+        (let ((seg-len (string-width seg)))
+          (if (<= (+ result-len seg-len) width)
+              (setq result (concat result seg)
+                    result-len (+ result-len seg-len))
+            (throw 'done nil)))))
+    result))
+
 (defun claude-gravity--session-header-line ()
   "Return header-line string for the current session buffer.
-Returns a cached string when available; cache is invalidated by
-`claude-gravity--schedule-session-refresh'."
+Re-computed on every redisplay so it adapts to window width changes."
   (when-let* ((sid claude-gravity--buffer-session-id)
               (session (gethash sid claude-gravity--sessions)))
-    (or (plist-get session :header-line-cache)
-        (let ((val (claude-gravity--build-header-line session sid)))
-          (plist-put session :header-line-cache val)
-          val))))
-
+    (claude-gravity--build-header-line session sid)))
 
 (defun claude-gravity--build-header-line (session sid)
-  "Build header-line string for SESSION with SID."
+  "Build header-line string for SESSION with SID.
+Wraps to multiple lines when content exceeds window width."
   (let* ((status (plist-get session :status))
          (claude-st (plist-get session :claude-status))
          (last-event (plist-get session :last-event-time))
@@ -621,6 +651,7 @@ Returns a cached string when available; cache is invalidated by
                                    'face 'claude-gravity-status-idle))))
          (slug (propertize (claude-gravity--session-label session)
                            'face 'claude-gravity-slug))
+         (branch-str (claude-gravity--branch-or-cwd session))
          (tool-count (claude-gravity--tree-total-tool-count session))
          (elapsed (claude-gravity--session-total-elapsed session))
          (usage (plist-get session :token-usage))
@@ -631,45 +662,43 @@ Returns a cached string when available; cache is invalidated by
          (out-tokens (when usage (or (alist-get 'output_tokens usage) 0)))
          (perm-mode (plist-get session :permission-mode))
          (model-name (plist-get session :model-name))
-         (cost (plist-get session :cost))
          (ctx-pct (plist-get session :context-pct))
          (lines-add (plist-get session :sl-lines-added))
          (lines-rm (plist-get session :sl-lines-removed))
          (inbox-badge (claude-gravity--inbox-badges sid))
-         ;; Build parts list using push + nreverse (O(1) per item)
-         (tail nil))
-    (when (and inbox-badge (not (string-empty-p inbox-badge)))
-      (push inbox-badge tail))
-    (when (and lines-add lines-rm (or (> lines-add 0) (> lines-rm 0)))
-      (push (propertize (format "  +%d -%d" lines-add lines-rm)
-                        'face 'claude-gravity-detail-label) tail))
-    (when ctx-pct
-      (let ((face (cond ((>= ctx-pct 90) 'error)
-                        ((>= ctx-pct 70) 'warning)
-                        (t 'claude-gravity-detail-label))))
-        (push (propertize (format "  ctx:%d%%" ctx-pct) 'face face) tail)))
-    (when cost
-      (push (propertize (format "  $%.2f" cost) 'face 'claude-gravity-detail-label) tail))
+         (segments nil))
+    (push (concat " " dot " " status-word) segments)
+    (push (concat "  " slug) segments)
+    (when branch-str
+      (push (concat "  " branch-str) segments))
+    (when perm-mode
+      (push (propertize (format "  [%s]" perm-mode)
+                        'face 'claude-gravity-detail-label) segments))
+    (when model-name
+      (push (propertize (format "  %s" model-name)
+                        'face 'claude-gravity-detail-label) segments))
+    (push (propertize (format "  ◆ %d tools" tool-count)
+                      'face 'claude-gravity-detail-label) segments)
+    (when elapsed
+      (push (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))
+                        'face 'claude-gravity-detail-label) segments))
     (when (and in-tokens (> in-tokens 0))
       (push (propertize (format "  ↓%s ↑%s tokens"
                                 (claude-gravity--format-token-count in-tokens)
                                 (claude-gravity--format-token-count out-tokens))
-                        'face 'claude-gravity-detail-label) tail))
-    (when elapsed
-      (push (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))
-                        'face 'claude-gravity-detail-label) tail))
-    (apply #'concat
-           (nconc (delq nil
-                        (list " " dot " " status-word "  " slug
-                              (when perm-mode
-                                (propertize (format "  [%s]" perm-mode)
-                                           'face 'claude-gravity-detail-label))
-                              (when model-name
-                                (propertize (format "  %s" model-name)
-                                           'face 'claude-gravity-detail-label))
-                              (propertize (format "  ◆ %d tools" tool-count)
-                                          'face 'claude-gravity-detail-label)))
-                  (nreverse tail)))))
+                        'face 'claude-gravity-detail-label) segments))
+    (when ctx-pct
+      (let ((face (cond ((>= ctx-pct 90) 'error)
+                        ((>= ctx-pct 70) 'warning)
+                        (t 'claude-gravity-detail-label))))
+        (push (propertize (format "  ctx:%d%%" ctx-pct) 'face face) segments)))
+    (when (and lines-add lines-rm (or (> lines-add 0) (> lines-rm 0)))
+      (push (propertize (format "  +%d -%d" lines-add lines-rm)
+                        'face 'claude-gravity-detail-label) segments))
+    (when (and inbox-badge (not (string-empty-p inbox-badge)))
+      (push inbox-badge segments))
+    (setq segments (nreverse segments))
+    (claude-gravity--fit-header-segments segments)))
 
 
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
@@ -711,8 +740,6 @@ On an agent, parse transcript.  Otherwise toggle."
       ;; Per-session buffer
       (let ((session (claude-gravity--get-session claude-gravity--buffer-session-id)))
         (when session
-          ;; Invalidate header-line cache on manual refresh
-          (plist-put session :header-line-cache nil)
           (claude-gravity--render-session-buffer session)))
     ;; Overview buffer
     (claude-gravity--render-overview)))
@@ -998,9 +1025,9 @@ Disables when you manually scroll or navigate."
 
 (defun claude-gravity-tail ()
   "Collapse all sections and focus on the tail of the latest turn.
-Hides Plan, Files, Allow Patterns, and past turns, then expands
-the most recent turn and scrolls to its last response cycle or
-final reply text."
+Hides Plan, Files, Allow Patterns, and past turns.  When a
+stop-message follows the latest turn, shows only the stop-message
+summary.  Otherwise expands the last turn and its last cycle."
   (interactive)
   (when magit-root-section
     ;; Single pass: collapse all top-level sections, find turns section
@@ -1011,27 +1038,39 @@ final reply text."
           (setq turns-section child)))
       (when turns-section
         (magit-section-show turns-section)
-        ;; Single pass over turns: hide all, track last
-        (let ((last-turn nil))
+        ;; Single pass: hide all turns children, track last turn and stop-message
+        (let ((last-turn nil)
+              (last-stop nil))
           (dolist (child (oref turns-section children))
-            (when (eq (oref child type) 'turn)
-              (magit-section-hide child)
-              (setq last-turn child)))
-          (when last-turn
-            (magit-section-show last-turn)
-            ;; Single pass over turn children: hide cycles, track last
-            (let ((last-cycle nil))
-              (dolist (child (oref last-turn children))
-                (when (eq (oref child type) 'response-cycle)
-                  (magit-section-hide child)
-                  (setq last-cycle child)))
-              (when last-cycle
-                (magit-section-show last-cycle)))
-            (let ((win (get-buffer-window (current-buffer))))
-              (when win
-                (with-selected-window win
-                  (goto-char (1- (oref last-turn end)))
-                  (recenter -3))))))))))
+            (pcase (oref child type)
+              ('turn (magit-section-hide child) (setq last-turn child))
+              ('stop-message (magit-section-hide child) (setq last-stop child))))
+          (if (and last-stop last-turn
+                   ;; stop-message follows the last turn in buffer order
+                   (> (oref last-stop start) (oref last-turn start)))
+              ;; Stop message present: keep turn collapsed, show stop-message
+              (progn
+                (magit-section-show last-stop)
+                (let ((win (get-buffer-window (current-buffer))))
+                  (when win
+                    (with-selected-window win
+                      (goto-char (oref last-stop start))
+                      (recenter -3)))))
+            ;; No stop message: expand last turn and its last cycle
+            (when last-turn
+              (magit-section-show last-turn)
+              (let ((last-cycle nil))
+                (dolist (child (oref last-turn children))
+                  (when (eq (oref child type) 'response-cycle)
+                    (magit-section-hide child)
+                    (setq last-cycle child)))
+                (when last-cycle
+                  (magit-section-show last-cycle)))
+              (let ((win (get-buffer-window (current-buffer))))
+                (when win
+                  (with-selected-window win
+                    (goto-char (1- (oref last-turn end)))
+                    (recenter -3)))))))))))
 
 
 ;;;###autoload

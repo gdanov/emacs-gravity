@@ -245,6 +245,13 @@
   "Face for the session slug shown in the header."
   :group 'claude-gravity)
 
+(defface claude-gravity-branch
+  '((((class color) (background dark))  :foreground "#5fafaf")
+    (((class color) (background light)) :foreground "#2e8b8b")
+    (t :foreground "cyan"))
+  "Face for git branch name in session list and header."
+  :group 'claude-gravity)
+
 (when (display-graphic-p)
   (define-fringe-bitmap 'claude-gravity-plan-added
     [#b00011100] nil nil '(center repeated))

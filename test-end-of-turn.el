@@ -2,7 +2,7 @@
 
 ;; Verifies end-of-turn message handling across the full Emacs pipeline:
 ;; a) View model state: stop_text/stop_thinking stored on turn nodes and agents
-;; b) Rendering: correct faces applied (claude-gravity-assistant-text, claude-gravity-thinking)
+;; b) Rendering: correct faces applied (claude-gravity-agent-stop-text, claude-gravity-thinking)
 ;; c) Deduplication: stop_text vs last tool's post_text
 
 ;;; Code:
@@ -301,15 +301,15 @@ AGENTS is a list of agent alists.  Returns the buffer."
 ;; ===========================================================================
 
 (ert-deftest test-eot/render-stop-text-face ()
-  "Stop text renders with `claude-gravity-assistant-text' face."
+  "Stop text renders with `claude-gravity-agent-stop-text' face."
   (let* ((turn (claude-gravity--make-turn-node 1)))
     (setf (alist-get 'stop_text turn) "All done, everything looks good.")
     (let ((buf (test-eot--render-stop-text turn)))
       (unwind-protect
           (progn
-            (should (test-eot--buffer-has-face-p buf 'claude-gravity-assistant-text))
+            (should (test-eot--buffer-has-face-p buf 'claude-gravity-agent-stop-text))
             (should (string-match-p "All done"
-                      (test-eot--buffer-text-with-face buf 'claude-gravity-assistant-text))))
+                      (test-eot--buffer-text-with-face buf 'claude-gravity-agent-stop-text))))
         (kill-buffer buf)))))
 
 
@@ -361,11 +361,11 @@ AGENTS is a list of agent alists.  Returns the buffer."
 
 
 (ert-deftest test-eot/render-empty-stop-nothing ()
-  "Turn with nil stop_text produces no assistant-text face."
+  "Turn with nil stop_text produces no agent-stop-text face."
   (let* ((turn (claude-gravity--make-turn-node 1))
          (buf (test-eot--render-stop-text turn)))
     (unwind-protect
-        (should-not (test-eot--buffer-has-face-p buf 'claude-gravity-assistant-text))
+        (should-not (test-eot--buffer-has-face-p buf 'claude-gravity-agent-stop-text))
       (kill-buffer buf))))
 
 
@@ -393,9 +393,9 @@ AGENTS is a list of agent alists.  Returns the buffer."
       (unwind-protect
           (progn
             ;; stop_text is longer, so post_text nilled, stop_text rendered
-            (should (test-eot--buffer-has-face-p buf 'claude-gravity-assistant-text))
+            (should (test-eot--buffer-has-face-p buf 'claude-gravity-agent-stop-text))
             (should (string-match-p "more context"
-                      (test-eot--buffer-text-with-face buf 'claude-gravity-assistant-text)))
+                      (test-eot--buffer-text-with-face buf 'claude-gravity-agent-stop-text)))
             ;; Verify the tool's post_text was cleared
             (let* ((cycles (claude-gravity--tlist-items (alist-get 'cycles turn)))
                    (last-cycle (car (last cycles)))
@@ -412,7 +412,7 @@ AGENTS is a list of agent alists.  Returns the buffer."
     (let ((buf (test-eot--render-stop-text turn)))
       (unwind-protect
           ;; stop_text shorter → suppressed. insert-stop-text renders nothing.
-          (should-not (test-eot--buffer-has-face-p buf 'claude-gravity-assistant-text))
+          (should-not (test-eot--buffer-has-face-p buf 'claude-gravity-agent-stop-text))
         (kill-buffer buf)))))
 
 
@@ -424,9 +424,9 @@ AGENTS is a list of agent alists.  Returns the buffer."
       (unwind-protect
           (progn
             ;; stop_text rendered (no dedup since texts differ)
-            (should (test-eot--buffer-has-face-p buf 'claude-gravity-assistant-text))
+            (should (test-eot--buffer-has-face-p buf 'claude-gravity-agent-stop-text))
             (should (string-match-p "different conclusion"
-                      (test-eot--buffer-text-with-face buf 'claude-gravity-assistant-text))))
+                      (test-eot--buffer-text-with-face buf 'claude-gravity-agent-stop-text))))
         (kill-buffer buf)))))
 
 
@@ -512,7 +512,7 @@ Returns the buffer (caller should kill it)."
                   (should (string-match-p "All fixed and working"
                             (test-eot--buffer-content buf)))
                   ;; stop_text has correct face
-                  (should (test-eot--buffer-has-face-p buf 'claude-gravity-assistant-text))
+                  (should (test-eot--buffer-has-face-p buf 'claude-gravity-agent-stop-text))
                   ;; Tool appears before stop_text
                   (should (test-eot--text-appears-before-p buf "Read" "All fixed")))
               (kill-buffer buf))))
@@ -542,7 +542,7 @@ Returns the buffer (caller should kill it)."
                   (should (string-match-p "Analysis complete" (test-eot--buffer-content buf)))
                   (should (string-match-p "Let me think" (test-eot--buffer-content buf)))
                   ;; Correct faces
-                  (should (test-eot--buffer-has-face-p buf 'claude-gravity-assistant-text))
+                  (should (test-eot--buffer-has-face-p buf 'claude-gravity-agent-stop-text))
                   (should (test-eot--buffer-has-face-p buf 'claude-gravity-thinking))
                   ;; Thinking appears before text
                   (should (test-eot--text-appears-before-p buf "Let me think" "Analysis complete")))
@@ -701,9 +701,8 @@ render should show only stop_text."
                   ;; Correct order
                   (should (test-eot--text-appears-before-p buf "Turn one" "Turn two"))
                   (should (test-eot--text-appears-before-p buf "Turn two" "Turn three"))
-                  ;; Each has the face
-                  (let ((face-text (test-eot--buffer-text-with-face buf 'claude-gravity-assistant-text)))
-                    (should (string-match-p "Turn one complete" face-text))
+                  ;; Current turn (3) has the face; frozen turns (1,2) use detail-label summary
+                  (let ((face-text (test-eot--buffer-text-with-face buf 'claude-gravity-agent-stop-text)))
                     (should (string-match-p "Turn three complete" face-text))))
               (kill-buffer buf))))
       (test-eot--cleanup-session sid))))
@@ -733,10 +732,12 @@ render should show only stop_text."
                   (should (string-match-p "All tasks complete" content))
                   ;; post_tool_text appears before stop_text
                   (should (test-eot--text-appears-before-p buf "Build succeeded" "All tasks complete"))
-                  ;; Both have assistant-text face
-                  (let ((face-text (test-eot--buffer-text-with-face buf 'claude-gravity-assistant-text)))
-                    (should (string-match-p "Build succeeded" face-text))
-                    (should (string-match-p "All tasks complete" face-text))))
+                  ;; post_tool_text has assistant-text face
+                  (should (string-match-p "Build succeeded"
+                            (test-eot--buffer-text-with-face buf 'claude-gravity-assistant-text)))
+                  ;; stop_text has agent-stop-text face
+                  (should (string-match-p "All tasks complete"
+                            (test-eot--buffer-text-with-face buf 'claude-gravity-agent-stop-text))))
               (kill-buffer buf))))
       (test-eot--cleanup-session sid))))
 
@@ -765,7 +766,7 @@ render should show only stop_text."
                   (should (string-match-p "5 elisp files" content))
                   ;; Correct face
                   (should (string-match-p "5 elisp files"
-                            (test-eot--buffer-text-with-face buf 'claude-gravity-assistant-text))))
+                            (test-eot--buffer-text-with-face buf 'claude-gravity-agent-stop-text))))
               (kill-buffer buf))))
       (test-eot--cleanup-session sid))))
 
@@ -789,8 +790,141 @@ render should show only stop_text."
                 (progn
                   ;; Tool rendered
                   (should (string-match-p "Read" (test-eot--buffer-content buf)))
-                  ;; No assistant text face (no stop_text, no post_tool_text)
-                  (should-not (test-eot--buffer-has-face-p buf 'claude-gravity-assistant-text)))
+                  ;; No stop text face (no stop_text, no post_tool_text)
+                  (should-not (test-eot--buffer-has-face-p buf 'claude-gravity-agent-stop-text)))
+              (kill-buffer buf))))
+      (test-eot--cleanup-session sid))))
+
+
+;; ===========================================================================
+;; Group 5: Stop Message as Collapsible Section
+;; ===========================================================================
+
+(defun test-eot--find-sections-by-type (buf section-type)
+  "Find all magit-sections of SECTION-TYPE in BUF.
+Returns a list of section objects."
+  (with-current-buffer buf
+    (let (result)
+      (magit-section-case
+        ;; Walk the full tree
+        )
+      ;; Walk manually via magit-section API
+      (goto-char (point-min))
+      (let ((root (magit-current-section)))
+        (when root
+          (cl-labels ((walk (section)
+                        (when (eq (oref section type) section-type)
+                          (push section result))
+                        (dolist (child (oref section children))
+                          (walk child))))
+            (walk root))))
+      (nreverse result))))
+
+(defun test-eot--section-content-text (buf section)
+  "Return the visible text content of SECTION in BUF."
+  (with-current-buffer buf
+    (buffer-substring-no-properties
+     (oref section start)
+     (oref section end))))
+
+(ert-deftest test-eot/stop-text-is-collapsible-section ()
+  "Stop text is rendered as a magit-section of type `stop-message'."
+  (let* ((sid (test-eot--unique-id)))
+    (unwind-protect
+        (progn
+          (test-eot--feed-event "UserPromptSubmit" sid '((prompt . "Fix it")))
+          (test-eot--feed-event "PreToolUse" sid
+            `((tool_use_id . "cs1") (tool_name . "Read")
+              (tool_input . ((file_path . "/src/main.ts")))))
+          (test-eot--feed-event "PostToolUse" sid
+            `((tool_use_id . "cs1") (tool_name . "Read")
+              (tool_response . "file contents")))
+          (test-eot--feed-event "Stop" sid
+            `((stop_text . "All fixed and verified.")))
+          (let* ((session (test-eot--get-session sid))
+                 (buf (test-eot--render-full-turns session)))
+            (unwind-protect
+                (let ((sections (test-eot--find-sections-by-type buf 'stop-message)))
+                  ;; A stop-message section exists
+                  (should (= 1 (length sections)))
+                  ;; Its parent is the turns section (top-level, sibling of turn)
+                  (let ((parent (oref (car sections) parent)))
+                    (should parent)
+                    (should (eq (oref parent type) 'turns)))
+                  ;; Its content includes the stop text
+                  (should (string-match-p "All fixed and verified"
+                            (test-eot--section-content-text buf (car sections)))))
+              (kill-buffer buf))))
+      (test-eot--cleanup-session sid))))
+
+
+(ert-deftest test-eot/stop-thinking-and-text-in-section ()
+  "Both stop_thinking and stop_text appear inside the stop-message section."
+  (let* ((sid (test-eot--unique-id)))
+    (unwind-protect
+        (progn
+          (test-eot--feed-event "UserPromptSubmit" sid '((prompt . "Analyze")))
+          (test-eot--feed-event "PreToolUse" sid
+            `((tool_use_id . "cs2") (tool_name . "Glob")
+              (tool_input . ((pattern . "**/*.ts")))))
+          (test-eot--feed-event "PostToolUse" sid
+            `((tool_use_id . "cs2") (tool_name . "Glob")
+              (tool_response . "found files")))
+          (test-eot--feed-event "Stop" sid
+            `((stop_text . "Analysis complete.")
+              (stop_thinking . "Deep reflection here.")))
+          (let* ((session (test-eot--get-session sid))
+                 (buf (test-eot--render-full-turns session)))
+            (unwind-protect
+                (let* ((sections (test-eot--find-sections-by-type buf 'stop-message))
+                       (content (test-eot--section-content-text buf (car sections))))
+                  (should (= 1 (length sections)))
+                  (should (string-match-p "Analysis complete" content))
+                  (should (string-match-p "Deep reflection" content)))
+              (kill-buffer buf))))
+      (test-eot--cleanup-session sid))))
+
+
+(ert-deftest test-eot/no-stop-section-when-empty ()
+  "No stop-message section created when there is no stop text."
+  (let* ((sid (test-eot--unique-id)))
+    (unwind-protect
+        (progn
+          (test-eot--feed-event "UserPromptSubmit" sid '((prompt . "Do stuff")))
+          (test-eot--feed-event "PreToolUse" sid
+            `((tool_use_id . "cs3") (tool_name . "Read")
+              (tool_input . ((file_path . "/x.ts")))))
+          (test-eot--feed-event "PostToolUse" sid
+            `((tool_use_id . "cs3") (tool_name . "Read")
+              (tool_response . "content")))
+          (test-eot--feed-event "Stop" sid '())
+          (let* ((session (test-eot--get-session sid))
+                 (buf (test-eot--render-full-turns session)))
+            (unwind-protect
+                (should (= 0 (length (test-eot--find-sections-by-type buf 'stop-message))))
+              (kill-buffer buf))))
+      (test-eot--cleanup-session sid))))
+
+
+(ert-deftest test-eot/stop-section-deduped-no-section ()
+  "No stop-message section when stop_text fully deduped against post_text."
+  (let* ((sid (test-eot--unique-id)))
+    (unwind-protect
+        (progn
+          (test-eot--feed-event "UserPromptSubmit" sid '((prompt . "Check")))
+          (test-eot--feed-event "PreToolUse" sid
+            `((tool_use_id . "cs4") (tool_name . "Read")
+              (tool_input . ((file_path . "/src/config.ts")))))
+          (test-eot--feed-event "PostToolUse" sid
+            `((tool_use_id . "cs4") (tool_name . "Read")
+              (tool_response . "config data")
+              (post_tool_text . "The config looks correct.")))
+          (test-eot--feed-event "Stop" sid
+            `((stop_text . "The config looks correct.")))
+          (let* ((session (test-eot--get-session sid))
+                 (buf (test-eot--render-full-turns session)))
+            (unwind-protect
+                (should (= 0 (length (test-eot--find-sections-by-type buf 'stop-message))))
               (kill-buffer buf))))
       (test-eot--cleanup-session sid))))
 

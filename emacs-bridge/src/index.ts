@@ -524,24 +524,37 @@ export function extractTrailingText(transcriptPath: string, maxBytes?: number): 
 // Extract session slug from the transcript JSONL.
 // The slug field appears on `progress` entries which may not be the first line
 // (e.g. `file-history-snapshot` often comes first), so we scan several lines.
-function extractSlug(transcriptPath: string): string | null {
+interface TranscriptMeta {
+  slug: string | null;
+  gitBranch: string | null;
+}
+
+function extractTranscriptMeta(transcriptPath: string): TranscriptMeta {
+  const result: TranscriptMeta = { slug: null, gitBranch: null };
   try {
     const fd = openSync(transcriptPath, "r");
     const buffer = Buffer.alloc(64 * 1024);
     const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
     closeSync(fd);
-    if (bytesRead === 0) return null;
+    if (bytesRead === 0) return result;
     const text = buffer.toString("utf-8", 0, bytesRead);
     const lines = text.split("\n");
     for (const line of lines) {
       if (!line.length) continue;
       try {
         const obj = JSON.parse(line);
-        if (obj.slug) return obj.slug;
+        if (!result.slug && obj.slug) result.slug = obj.slug;
+        if (!result.gitBranch && obj.gitBranch) result.gitBranch = obj.gitBranch;
+        if (result.slug && result.gitBranch) break;
       } catch { continue; }
     }
   } catch {}
-  return null;
+  return result;
+}
+
+/** @deprecated Use extractTranscriptMeta instead */
+function extractSlug(transcriptPath: string): string | null {
+  return extractTranscriptMeta(transcriptPath).slug;
 }
 
 // --- Active Agent List ---
@@ -698,13 +711,16 @@ async function main() {
       writeDumpFile(dumpDir, dumpSeq, eventName, "raw", inputData);
     }
 
-    // Extract session slug from transcript
+    // Extract session metadata from transcript (slug, gitBranch)
     const transcriptPath = (inputData as any).transcript_path;
     if (transcriptPath) {
-      const slug = extractSlug(transcriptPath);
-      if (slug) {
-        (inputData as any).slug = slug;
-        log(`Extracted slug: ${slug}`);
+      const meta = extractTranscriptMeta(transcriptPath);
+      if (meta.slug) {
+        (inputData as any).slug = meta.slug;
+        log(`Extracted slug: ${meta.slug}`);
+      }
+      if (meta.gitBranch) {
+        (inputData as any).branch = meta.gitBranch;
       }
     }
 
