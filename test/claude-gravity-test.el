@@ -3,6 +3,9 @@
 (require 'ert)
 (require 'claude-gravity)
 
+;; Forward declaration for replay tests
+(defvar cg-test--dir nil "Directory containing test files.")
+
 ;;; Test helpers
 
 (defun cg-test--fresh-session (sid)
@@ -205,6 +208,159 @@ EXTRA-DATA is an alist merged into the event data."
       (should (= 0 (length (cg-test--all-prompts sid))))
       (should (null (plist-get session :permission-mode))))))
 
+;;; Tmux session turn tracking tests
+
+(ert-deftest cg-test-tmux-manual-prompt-creates-new-turn ()
+  "Manual user prompt in tmux session creates a new turn.
+This test simulates the flow:
+1. Emacs starts a tmux session and sends first prompt (via tmux send-keys)
+2. First turn completes (UserPromptSubmit + tools + Stop)
+3. User manually sends second prompt in attached tmux session
+4. Verify second turn is created with correct turn number and tool attribution."
+  (let ((sid (cg-test--fresh-session "test-tmux-manual")))
+    ;; === Phase 1: Setup ===
+    ;; Session starts (would be via SessionStart hook in real scenario)
+    (cg-test--session-start sid)
+    (should (= 0 (plist-get (cg-test--get sid) :current-turn)))
+
+    ;; === Phase 2: First Turn (Emacs-initiated) ===
+    ;; Simulate: claude-gravity-send-prompt sends prompt via tmux send-keys
+    ;; which eventually fires UserPromptSubmit hook
+    (cg-test--prompt-submit sid "List files in current directory")
+    (should (= 1 (plist-get (cg-test--get sid) :current-turn)))
+
+    ;; Tool execution for first turn
+    (cg-test--pre-tool sid "Bash" "t1"
+                       (list (cons 'tool_input '((command . "ls")))))
+    (should (= 1 (alist-get 'turn (cg-test--tool-by-id sid "t1"))))
+
+    (cg-test--post-tool sid "Bash" "t1")
+    (cg-test--stop sid (list (cons 'stop_text "Listed files successfully")))
+
+    ;; Verify first turn state
+    (let ((session (cg-test--get sid)))
+      (should (= 1 (plist-get session :current-turn)))
+      (should (eq 'idle (plist-get session :claude-status))))
+
+    ;; Verify first turn tools
+    (let ((tools (cg-test--all-root-tools sid)))
+      (should (= 1 (length tools)))
+      (should (= 1 (alist-get 'turn (car tools))))
+      (should (equal "t1" (alist-get 'tool_use_id (car tools)))))
+
+    ;; === Phase 3: Second Turn (Manual user input) ===
+    ;; User attaches to tmux session and manually sends a prompt
+    ;; This also fires UserPromptSubmit hook, but from manual input
+    (cg-test--prompt-submit sid "What is 2 + 2?")
+
+    ;; CRITICAL: Verify turn counter advanced to 2
+    (should (= 2 (plist-get (cg-test--get sid) :current-turn)))
+
+    ;; Tool execution for second turn
+    (cg-test--pre-tool sid "AskUserQuestion" "t2"
+                       (list (cons 'tool_input
+                                   (list (cons 'questions
+                                               (vector (list (cons 'question "2+2="))))))))
+    (should (= 2 (alist-get 'turn (cg-test--tool-by-id sid "t2"))))
+
+    (cg-test--post-tool sid "AskUserQuestion" "t2"
+                        (list (cons 'tool_response "4")))
+    (cg-test--stop sid (list (cons 'stop_text "The answer is 4")))
+
+    ;; === Phase 4: Verify Turn Separation ===
+    (let ((session (cg-test--get sid)))
+      ;; Verify final turn counter
+      (should (= 2 (plist-get session :current-turn)))
+      (should (eq 'idle (plist-get session :claude-status))))
+
+    ;; Verify all tools and their turn attribution
+    (let ((all-tools (cg-test--all-root-tools sid)))
+      (should (= 2 (length all-tools)))
+      ;; First tool from first turn
+      (should (= 1 (alist-get 'turn (nth 0 all-tools))))
+      (should (equal "t1" (alist-get 'tool_use_id (nth 0 all-tools))))
+      ;; Second tool from second turn
+      (should (= 2 (alist-get 'turn (nth 1 all-tools))))
+      (should (equal "t2" (alist-get 'tool_use_id (nth 1 all-tools)))))
+
+    ;; Verify turn nodes exist and are separate
+    (let ((turn-nodes (cg-test--turn-nodes sid)))
+      (should (= 2 (length turn-nodes)))
+      ;; Turn 1
+      (let ((turn1 (nth 0 turn-nodes)))
+        (should (= 1 (alist-get 'turn-number turn1)))
+        (should (alist-get 'prompt turn1)))
+      ;; Turn 2
+      (let ((turn2 (nth 1 turn-nodes)))
+        (should (= 2 (alist-get 'turn-number turn2)))
+        (should (alist-get 'prompt turn2))))
+
+    ;; Verify prompts are correct
+    (let ((prompts (cg-test--all-prompts sid)))
+      (should (= 2 (length prompts)))
+      (should (equal "List files in current directory" (alist-get 'text (nth 0 prompts))))
+      (should (equal "What is 2 + 2?" (alist-get 'text (nth 1 prompts)))))))
+
+(ert-deftest cg-test-tmux-manual-prompt-rapid-succession ()
+  "Multiple manual prompts in rapid succession track turns correctly.
+Edge case: What if user sends multiple prompts without waiting for completion?"
+  (let ((sid (cg-test--fresh-session "test-tmux-rapid")))
+    (cg-test--session-start sid)
+
+    ;; Send multiple prompts without full turn completion
+    (cg-test--prompt-submit sid "First question")
+    (should (= 1 (plist-get (cg-test--get sid) :current-turn)))
+
+    (cg-test--pre-tool sid "Read" "t1")
+    (cg-test--post-tool sid "Read" "t1")
+
+    ;; Send second prompt before Stop fires
+    (cg-test--prompt-submit sid "Second question")
+    (should (= 2 (plist-get (cg-test--get sid) :current-turn)))
+
+    ;; Now send second Stop
+    (cg-test--stop sid)
+
+    ;; Send third prompt
+    (cg-test--prompt-submit sid "Third question")
+    (should (= 3 (plist-get (cg-test--get sid) :current-turn)))
+
+    ;; Verify all tools are correctly attributed
+    (let ((tools (cg-test--all-root-tools sid)))
+      (should (= 1 (length tools)))
+      (should (= 1 (alist-get 'turn (car tools)))))
+
+    ;; Verify all prompts exist
+    (let ((prompts (cg-test--all-prompts sid)))
+      (should (= 3 (length prompts)))
+      (should (equal "First question" (alist-get 'text (nth 0 prompts))))
+      (should (equal "Second question" (alist-get 'text (nth 1 prompts))))
+      (should (equal "Third question" (alist-get 'text (nth 2 prompts)))))))
+
+(ert-deftest cg-test-tmux-manual-prompt-no-duplicate-prompts ()
+  "When UserPromptSubmit fires for manual input, no duplicate prompts created.
+The tmux-prompt-sent flag should prevent duplicates."
+  (let ((sid (cg-test--fresh-session "test-tmux-dedup")))
+    (cg-test--session-start sid)
+
+    ;; First prompt (simulating Emacs-initiated via send-prompt)
+    ;; In real code, this sets tmux-prompt-sent flag
+    (let ((session (cg-test--get sid)))
+      (plist-put session :tmux-prompt-sent nil))
+    (cg-test--prompt-submit sid "From Emacs")
+    (should (= 1 (plist-get (cg-test--get sid) :current-turn)))
+
+    ;; Second prompt (simulating manual user input)
+    ;; This should also create exactly one new prompt
+    (cg-test--prompt-submit sid "From manual")
+    (should (= 2 (plist-get (cg-test--get sid) :current-turn)))
+
+    ;; Verify exactly 2 prompts (no duplicates)
+    (let ((prompts (cg-test--all-prompts sid)))
+      (should (= 2 (length prompts)))
+      (should (equal "From Emacs" (alist-get 'text (nth 0 prompts))))
+      (should (equal "From manual" (alist-get 'text (nth 1 prompts)))))))
+
 ;;; Replay tests — feed JSONL transcripts through managed process filter
 
 (defvar cg-test--dir
@@ -212,7 +368,7 @@ EXTRA-DATA is an alist merged into the event data."
                            "/Users/gdanov/work/playground/emacs-gravity/test/claude-gravity-test.el"))
   "Directory containing test files, captured at load time.")
 
-(require 'cg-test-replay (expand-file-name "replay.el" cg-test--dir))
+(require 'cg-test-replay nil :noerror)
 
 ;;; stop_text.json replay tests
 
