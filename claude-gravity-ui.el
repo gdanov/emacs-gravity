@@ -180,7 +180,7 @@ Groups non-idle items by session and shows badge counts."
                               (inbox-badge (claude-gravity--inbox-badges sid)))
                          (magit-insert-section (session-entry sid)
                            (magit-insert-heading
-                             (format "%s%s %s %s  %s%s  [%d tools]%s"
+                             (format "%s%s %s %s %s  %s%s  [%d tools]%s"
                                      (claude-gravity--indent)
                                      indicator branch-str label
                                      tmux-badge
@@ -599,31 +599,46 @@ Only shows permission, question, and plan-review items (not idle)."
 (define-key claude-gravity-mode-map (kbd "V") 'claude-gravity-open-agent-transcript)
 
 
-(defun claude-gravity--fit-header-segments (segments)
-  "Join SEGMENTS into a single string that fits window width.
-Segments are in priority order; drops from the end when space is tight."
+(defun claude-gravity--layout-header-segments (segments)
+  "Split SEGMENTS across two lines based on window width.
+Returns (LINE1 . LINE2-OR-NIL).  Line 1 is filled greedily;
+overflow segments go to line 2.  If everything fits, LINE2 is nil."
   (let* ((width (max 40 (1- (window-width))))
-         (result "")
-         (result-len 0))
-    (catch 'done
-      (dolist (seg segments)
-        (let ((seg-len (string-width seg)))
-          (if (<= (+ result-len seg-len) width)
-              (setq result (concat result seg)
-                    result-len (+ result-len seg-len))
-            (throw 'done nil)))))
-    result))
+         (line1 "")
+         (line1-len 0)
+         (overflow nil))
+    (dolist (seg segments)
+      (let ((seg-len (string-width seg)))
+        (if (and (not overflow) (<= (+ line1-len seg-len) width))
+            (setq line1 (concat line1 seg)
+                  line1-len (+ line1-len seg-len))
+          (push seg overflow))))
+    (if overflow
+        (cons line1 (concat " " (mapconcat #'identity (nreverse overflow) "")))
+      (cons line1 nil))))
 
 (defun claude-gravity--session-header-line ()
   "Return header-line string for the current session buffer.
-Re-computed on every redisplay so it adapts to window width changes."
+Re-computed on every redisplay so it adapts to window width changes.
+When segments overflow, dynamically enables `tab-line-format' as a
+second sticky line above the header-line."
   (when-let* ((sid claude-gravity--buffer-session-id)
               (session (gethash sid claude-gravity--sessions)))
-    (claude-gravity--build-header-line session sid)))
+    (pcase-let ((`(,line1 . ,line2)
+                 (claude-gravity--build-header-lines session sid)))
+      ;; line2 non-nil means overflow: tab-line gets line1, header gets line2
+      ;; line2 nil means fits: tab-line hidden, header gets line1
+      ;; Escape literal % chars — mode-line format interprets them as constructs
+      (let* ((esc (lambda (s) (replace-regexp-in-string "%" "%%" s)))
+             (new-tab (when line2 (funcall esc line1))))
+        (unless (equal tab-line-format new-tab)
+          (setq-local tab-line-format new-tab)))
+      (let ((result (or line2 line1)))
+        (replace-regexp-in-string "%" "%%" result)))))
 
-(defun claude-gravity--build-header-line (session sid)
-  "Build header-line string for SESSION with SID.
-Wraps to multiple lines when content exceeds window width."
+(defun claude-gravity--build-header-lines (session sid)
+  "Build header-line segments for SESSION with SID.
+Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
   (let* ((status (plist-get session :status))
          (claude-st (plist-get session :claude-status))
          (last-event (plist-get session :last-event-time))
@@ -698,7 +713,7 @@ Wraps to multiple lines when content exceeds window width."
     (when (and inbox-badge (not (string-empty-p inbox-badge)))
       (push inbox-badge segments))
     (setq segments (nreverse segments))
-    (claude-gravity--fit-header-segments segments)))
+    (claude-gravity--layout-header-segments segments)))
 
 
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
@@ -706,7 +721,10 @@ Wraps to multiple lines when content exceeds window width."
   (setq mode-name '(:eval (if claude-gravity--follow-mode
                               "Claude[F]"
                             "Claude")))
-  (setq header-line-format '(:eval (claude-gravity--session-header-line))))
+  (setq header-line-format '(:eval (claude-gravity--session-header-line)))
+  ;; tab-line-format is set dynamically by --session-header-line when overflow.
+  ;; Make tab-line face match header-line so the two lines look consistent.
+  (face-remap-add-relative 'tab-line 'header-line))
 
 
 (defun claude-gravity-visit-or-toggle ()
