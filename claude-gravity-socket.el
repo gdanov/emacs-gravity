@@ -23,6 +23,12 @@
 
 ;;; Socket Server
 
+(defvar claude-gravity--server-stopping nil
+  "Non-nil when server stop is intentional (suppress sentinel auto-restart).")
+
+(defvar claude-gravity--health-timer nil
+  "Repeating timer that checks server liveness and reconciles sessions.")
+
 ;;; Notification mode-line indicator
 
 (defvar claude-gravity--notification-indicator ""
@@ -150,15 +156,53 @@ Accumulates partial data per connection until complete lines arrive."
 
 
 (defun claude-gravity--ensure-server ()
-  "Start the socket server if it is not already running."
-  (unless (claude-gravity-server-alive-p)
+  "Start the socket server if it is not already running.
+Respects `claude-gravity--server-stopping' to avoid restarting after intentional stop."
+  (unless (or claude-gravity--server-stopping
+              (claude-gravity-server-alive-p))
     (claude-gravity-server-start)))
+
+
+(defun claude-gravity--server-sentinel (_proc event)
+  "Auto-restart server on unexpected death (not user-initiated stop).
+EVENT is the process status change string."
+  (claude-gravity--log 'warn "Server process event: %s" (string-trim event))
+  (unless claude-gravity--server-stopping
+    (run-at-time 1 nil #'claude-gravity--ensure-server)))
+
+
+(defun claude-gravity--reconcile-sessions ()
+  "Re-check ended sessions and mark active if their PID is still alive.
+Called after server restart to recover sessions that were falsely marked ended."
+  (let ((recovered 0))
+    (maphash (lambda (_id session)
+               (let ((pid (plist-get session :pid)))
+                 (when (and (eq (plist-get session :status) 'ended)
+                            pid (numberp pid) (> pid 0)
+                            (claude-gravity--process-alive-p pid))
+                   (plist-put session :status 'active)
+                   (plist-put session :claude-status 'idle)
+                   (cl-incf recovered))))
+             claude-gravity--sessions)
+    (when (> recovered 0)
+      (claude-gravity--log 'info "Reconciled %d session(s) back to active" recovered)
+      (claude-gravity--render-overview))))
+
+
+(defun claude-gravity--health-check ()
+  "Periodic check: restart server if dead, reconcile session liveness."
+  (unless (claude-gravity-server-alive-p)
+    (claude-gravity--log 'warn "Health check: server dead, restarting")
+    (claude-gravity--ensure-server)
+    (claude-gravity--reconcile-sessions)))
 
 
 (defun claude-gravity-server-start ()
   "Start the Unix socket server for Claude Gravity."
   (interactive)
+  (setq claude-gravity--server-stopping t)  ; suppress sentinel during restart
   (claude-gravity-server-stop)
+  (setq claude-gravity--server-stopping nil)
   (when (file-exists-p claude-gravity-server-sock-path)
     (delete-file claude-gravity-server-sock-path))
   (setq claude-gravity-server-process
@@ -167,19 +211,33 @@ Accumulates partial data per connection until complete lines arrive."
          :server t
          :family 'local
          :service claude-gravity-server-sock-path
-         :filter 'claude-gravity--server-filter))
-  ;; Register notification indicator in mode-line
+         :filter 'claude-gravity--server-filter
+         :sentinel 'claude-gravity--server-sentinel))
+  ;; Register notification indicator in global-mode-string (shown in mode-line misc-info).
+  ;; global-mode-string must start with "" for format-mode-line to work;
+  ;; without it, a bare symbol list is interpreted as an invalid mode-line construct.
   (unless (memq 'claude-gravity--notification-indicator global-mode-string)
-    (push 'claude-gravity--notification-indicator global-mode-string))
+    (if (or (null global-mode-string) (equal global-mode-string '("")))
+        (setq global-mode-string '("" claude-gravity--notification-indicator))
+      (push 'claude-gravity--notification-indicator (cdr (last global-mode-string)))))
   ;; Clear wrap cache on window resize (fill-column depends on window width)
   (add-hook 'window-size-change-functions
             (lambda (_frame) (claude-gravity--wrap-cache-clear)))
+  ;; Start periodic health check (catches silent socket death from suspend/resume)
+  (when claude-gravity--health-timer
+    (cancel-timer claude-gravity--health-timer))
+  (setq claude-gravity--health-timer
+        (run-with-timer 30 30 #'claude-gravity--health-check))
   (claude-gravity--log 'info "Claude Gravity server started at %s" claude-gravity-server-sock-path))
 
 
 (defun claude-gravity-server-stop ()
   "Stop the Claude Gravity server."
   (interactive)
+  (setq claude-gravity--server-stopping t)
+  (when claude-gravity--health-timer
+    (cancel-timer claude-gravity--health-timer)
+    (setq claude-gravity--health-timer nil))
   (when claude-gravity-server-process
     (delete-process claude-gravity-server-process)
     (setq claude-gravity-server-process nil))
