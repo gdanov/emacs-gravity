@@ -115,7 +115,19 @@ the model mutation API to update session state."
              (claude-gravity-model-update-session-meta
               temp-session :pid pid :slug (alist-get 'slug data))))))
      (unless (equal (alist-get 'source data) "startup")
-       (claude-gravity--ensure-session session-id cwd)))
+       (claude-gravity--ensure-session session-id cwd))
+     ;; Apply slug/branch/source from data AFTER session exists.
+     ;; The pre-pcase meta update at top misses new sessions because
+     ;; the session doesn't exist yet when that code runs.
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity-model-update-session-meta
+          session :pid pid :slug (alist-get 'slug data)
+          :branch (alist-get 'branch data))
+         (when (and source (equal source "opencode"))
+           (claude-gravity--session-set-source session "opencode"
+             (alist-get 'instance_port data)
+             (alist-get 'instance_dir data))))))
 
     ("SessionEnd"
      (let ((session (claude-gravity--get-session session-id)))
@@ -255,6 +267,7 @@ the model mutation API to update session state."
                             (cons 'name (alist-get 'tool_name data))
                             (cons 'input (alist-get 'tool_input data))
                             (cons 'status "running")
+                            (cons 'result nil)
                             (cons 'timestamp (current-time))
                             (cons 'turn (or (plist-get session :current-turn) 0))
                             (cons 'permission_mode (alist-get 'permission_mode data))
@@ -403,12 +416,8 @@ the model mutation API to update session state."
            (alist-get 'instance_port data)
            (alist-get 'instance_dir data)))))
 
-    ("UserPromptSubmit"
-     (let ((session (claude-gravity--ensure-session session-id cwd)))
-       (when session
-         (claude-gravity--session-set-source session "opencode"
-           (alist-get 'instance_port data)
-           (alist-get 'instance_dir data)))))
+    ;; NOTE: No duplicate "UserPromptSubmit" clause here — OC source is set
+    ;; via the pre-pcase source check (lines 70-74) and the original handler.
 
     ("AssistantMessage"
      (let ((session (claude-gravity--get-session session-id)))
