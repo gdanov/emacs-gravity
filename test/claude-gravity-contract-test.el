@@ -585,5 +585,195 @@ Data is nested JSON (not flat dotted keys) — let-alist uses nested access."
     (let ((prompts (cgc--all-prompts "s27")))
       (should (eq 'phase-boundary (alist-get 'type (nth 1 prompts)))))))
 
+
+;;; ─── Part 11: OpenCode MessagePart tool lifecycle ──────────────────
+
+(ert-deftest cgc-oc-messagepart-tool-running ()
+  "MessagePart with tool state=running creates a running tool entry."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc1" '((slug . "oc-test")) "opencode")
+  (cgc--event "UserPromptSubmit" "oc1" '() "opencode")
+  (cgc--event "MessagePart" "oc1"
+              '((part_type . "tool")
+                (part_id . "p1")
+                (message_id . "m1")
+                (tool . ((call_id . "t1") (tool_name . "Read") (state . "running"))))
+              "opencode")
+  (let* ((tools (cgc--all-root-tools "oc1"))
+         (tool (car tools)))
+    (should (= 1 (length tools)))
+    (should (equal "t1" (alist-get 'tool_use_id tool)))
+    (should (equal "Read" (alist-get 'name tool)))
+    (should (equal "running" (alist-get 'status tool)))))
+
+(ert-deftest cgc-oc-messagepart-tool-completed ()
+  "MessagePart with tool state=completed marks tool as done."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc2" '((slug . "oc-test")) "opencode")
+  (cgc--event "UserPromptSubmit" "oc2" '() "opencode")
+  (cgc--event "MessagePart" "oc2"
+              '((part_type . "tool")
+                (tool . ((call_id . "t2") (tool_name . "Edit") (state . "running"))))
+              "opencode")
+  (cgc--event "MessagePart" "oc2"
+              '((part_type . "tool")
+                (text . "file updated")
+                (tool . ((call_id . "t2") (tool_name . "Edit") (state . "completed"))))
+              "opencode")
+  (let* ((tools (cgc--all-root-tools "oc2"))
+         (tool (car tools)))
+    (should (= 1 (length tools)))
+    (should (equal "done" (alist-get 'status tool)))
+    (should (equal "file updated" (alist-get 'result tool)))))
+
+(ert-deftest cgc-oc-messagepart-tool-completed-without-running ()
+  "MessagePart completed without prior running still creates a tool."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc3" '((slug . "oc-test")) "opencode")
+  (cgc--event "UserPromptSubmit" "oc3" '() "opencode")
+  (cgc--event "MessagePart" "oc3"
+              '((part_type . "tool")
+                (text . "result data")
+                (tool . ((call_id . "t3") (tool_name . "Glob") (state . "completed"))))
+              "opencode")
+  (let* ((tools (cgc--all-root-tools "oc3"))
+         (tool (car tools)))
+    (should (= 1 (length tools)))
+    (should (equal "done" (alist-get 'status tool)))
+    (should (equal "result data" (alist-get 'result tool)))))
+
+(ert-deftest cgc-oc-messagepart-tool-error ()
+  "MessagePart with tool state=error marks tool as error."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc4" '((slug . "oc-test")) "opencode")
+  (cgc--event "UserPromptSubmit" "oc4" '() "opencode")
+  (cgc--event "MessagePart" "oc4"
+              '((part_type . "tool")
+                (tool . ((call_id . "t4") (tool_name . "Bash") (state . "running"))))
+              "opencode")
+  (cgc--event "MessagePart" "oc4"
+              '((part_type . "tool")
+                (text . "permission denied")
+                (tool . ((call_id . "t4") (tool_name . "Bash") (state . "error"))))
+              "opencode")
+  (let* ((tools (cgc--all-root-tools "oc4"))
+         (tool (car tools)))
+    (should (= 1 (length tools)))
+    (should (equal "error" (alist-get 'status tool)))
+    (should (string-match-p "ERROR" (alist-get 'result tool)))))
+
+(ert-deftest cgc-oc-messagepart-tool-dedup ()
+  "Multiple running updates for same call_id don't create duplicate tools."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc5" '((slug . "oc-test")) "opencode")
+  (cgc--event "UserPromptSubmit" "oc5" '() "opencode")
+  (cgc--event "MessagePart" "oc5"
+              '((part_type . "tool")
+                (tool . ((call_id . "t5") (tool_name . "Read") (state . "running"))))
+              "opencode")
+  ;; Second running event for same tool — should not duplicate
+  (cgc--event "MessagePart" "oc5"
+              '((part_type . "tool")
+                (tool . ((call_id . "t5") (tool_name . "Read") (state . "running"))))
+              "opencode")
+  (should (= 1 (length (cgc--all-root-tools "oc5")))))
+
+;;; ─── Part 12: OpenCode MessagePart text ────────────────────────────
+
+(ert-deftest cgc-oc-messagepart-text-accumulates ()
+  "MessagePart with part_type=text accumulates streaming text."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc6" '((slug . "oc-test")) "opencode")
+  (cgc--event "MessagePart" "oc6"
+              '((part_type . "text") (text . "Hello "))
+              "opencode")
+  (cgc--event "MessagePart" "oc6"
+              '((part_type . "text") (text . "world"))
+              "opencode")
+  (let ((s (cgc--get "oc6")))
+    (should (equal "Hello world" (plist-get s :streaming-text)))))
+
+;;; ─── Part 13: OpenCode AssistantMessage ────────────────────────────
+
+(ert-deftest cgc-oc-assistant-message-stores-cost ()
+  "AssistantMessage stores cost on session."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc7" '((slug . "oc-test")) "opencode")
+  (cgc--event "AssistantMessage" "oc7"
+              '((message_id . "am1") (cost . 0.05) (tokens . ((input . 100) (output . 50))))
+              "opencode")
+  (let ((s (cgc--get "oc7")))
+    (should (= 0.05 (plist-get s :cost)))
+    (should (plist-get s :token-usage))))
+
+(ert-deftest cgc-oc-assistant-message-finish-clears-streaming ()
+  "AssistantMessage with finish reason clears streaming text."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc8" '((slug . "oc-test")) "opencode")
+  (cgc--event "MessagePart" "oc8"
+              '((part_type . "text") (text . "some text"))
+              "opencode")
+  (should (plist-get (cgc--get "oc8") :streaming-text))
+  (cgc--event "AssistantMessage" "oc8"
+              '((message_id . "am2") (finish . "end_turn"))
+              "opencode")
+  (should-not (plist-get (cgc--get "oc8") :streaming-text)))
+
+;;; ─── Part 14: OpenCode SessionStatus / SessionIdle ─────────────────
+
+(ert-deftest cgc-oc-session-status-busy-sets-responding ()
+  "SessionStatus with status=busy sets claude-status to responding."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc9" '((slug . "oc-test")) "opencode")
+  (cgc--event "SessionStatus" "oc9"
+              '((status . "busy") (title . "My Session"))
+              "opencode")
+  (let ((s (cgc--get "oc9")))
+    (should (eq 'responding (plist-get s :claude-status)))
+    (should (equal "My Session" (plist-get s :title)))))
+
+(ert-deftest cgc-oc-session-status-idle-sets-idle ()
+  "SessionStatus with status=idle sets claude-status to idle."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc10" '((slug . "oc-test")) "opencode")
+  (cgc--event "SessionStatus" "oc10" '((status . "idle")) "opencode")
+  (should (eq 'idle (plist-get (cgc--get "oc10") :claude-status))))
+
+(ert-deftest cgc-oc-session-idle-sets-idle ()
+  "SessionIdle sets claude-status to idle."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc11" '((slug . "oc-test")) "opencode")
+  (cgc--event "SessionStatus" "oc11" '((status . "busy")) "opencode")
+  (should (eq 'responding (plist-get (cgc--get "oc11") :claude-status)))
+  (cgc--event "SessionIdle" "oc11" '() "opencode")
+  (should (eq 'idle (plist-get (cgc--get "oc11") :claude-status))))
+
+;;; ─── Part 15: OpenCode UserPromptSubmit ─────────────────────────────
+
+(ert-deftest cgc-oc-user-prompt-creates-turn ()
+  "OC UserPromptSubmit (no prompt field) creates a turn with placeholder."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc12" '((slug . "oc-test")) "opencode")
+  (cgc--event "UserPromptSubmit" "oc12"
+              '((message_id . "msg1")) "opencode")
+  (let ((s (cgc--get "oc12")))
+    (should (= 1 (plist-get s :current-turn)))
+    (let ((prompts (cgc--all-prompts "oc12")))
+      (should (= 1 (length prompts)))
+      (should (equal "(user prompt)" (alist-get 'text (car prompts)))))))
+
+;;; ─── Part 16: OpenCode SessionUpdate ────────────────────────────────
+
+(ert-deftest cgc-oc-session-update-stores-title ()
+  "SessionUpdate stores title and slug."
+  (cgc--fresh)
+  (cgc--event "SessionStart" "oc13" '((slug . "oc-test")) "opencode")
+  (cgc--event "SessionUpdate" "oc13"
+              '((title . "New Title") (slug . "new-slug"))
+              "opencode")
+  (let ((s (cgc--get "oc13")))
+    (should (equal "New Title" (plist-get s :title)))
+    (should (equal "new-slug" (plist-get s :slug)))))
+
 (provide 'claude-gravity-contract-test)
 ;;; claude-gravity-contract-test.el ends here

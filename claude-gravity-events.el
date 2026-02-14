@@ -200,13 +200,16 @@ the model mutation API to update session state."
        ;; prompt entry in send-prompt — skip to avoid duplicate
        (if (plist-get session :tmux-prompt-sent)
            (plist-put session :tmux-prompt-sent nil)
-         (when display-text
-           (claude-gravity-model-add-prompt
-            session (list (cons 'text display-text)
-                          (cons 'submitted (current-time))
-                          (cons 'elapsed nil)
-                          (cons 'stop_text nil)
-                          (cons 'stop_thinking nil)))))
+         ;; OC sends UserPromptSubmit without 'prompt — use placeholder
+         (let ((text (or display-text
+                         (when (equal source "opencode") "(user prompt)"))))
+           (when text
+             (claude-gravity-model-add-prompt
+              session (list (cons 'text text)
+                            (cons 'submitted (current-time))
+                            (cons 'elapsed nil)
+                            (cons 'stop_text nil)
+                            (cons 'stop_thinking nil))))))
        (claude-gravity-model-set-claude-status session 'responding))
      ;; Session is responding — remove idle inbox items
      (claude-gravity--inbox-remove-for-session session-id 'idle)
@@ -384,22 +387,35 @@ the model mutation API to update session state."
     ;; OpenCode-specific events
     ("SessionStatus"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
-            (status (alist-get 'status data))
+            (oc-status (alist-get 'status data))
             (title (alist-get 'title data))
             (slug (alist-get 'slug data))
             (branch (alist-get 'branch data)))
        (when session
-         (claude-gravity--session-set-source session "opencode")
-         (plist-put session :instance-port (alist-get 'instance_port data))
-         (plist-put session :instance-dir (alist-get 'instance_dir data)))
-       (when title
-         (plist-put session :title title))
-       (when slug
-         (plist-put session :slug slug))
-       (when branch
-         (plist-put session :branch branch))
-       (claude-gravity-model-update-session-meta
-        session :slug slug :branch branch)))
+         ;; Set source — SessionStatus may be first event for this session
+         ;; (from polling), so pre-pcase source check missed it
+         (when (equal source "opencode")
+           (claude-gravity--session-set-source session "opencode"
+             (alist-get 'instance_port data)
+             (alist-get 'instance_dir data)))
+         ;; Map OC status to claude-gravity status
+         (pcase oc-status
+           ((or "busy" "running")
+            (claude-gravity-model-set-claude-status session 'responding))
+           ((or "idle" "completed")
+            (claude-gravity-model-set-claude-status session 'idle))
+           ("error"
+            (claude-gravity-model-set-claude-status session 'idle)))
+         (when title
+           (plist-put session :title title))
+         (claude-gravity-model-update-session-meta
+          session :slug slug :branch branch))))
+
+    ("SessionIdle"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity-model-set-claude-status session 'idle)
+         (claude-gravity-model-finalize-last-prompt session))))
 
     ("VcsBranchUpdate"
      (let ((session (claude-gravity--get-session session-id)))
@@ -408,30 +424,112 @@ the model mutation API to update session state."
            (when branch
              (plist-put session :branch branch))))))
 
-    ;; OpenCode message events - set source on session
     ("MessagePart"
-     (let ((session (claude-gravity--get-session session-id)))
+     (let ((session (claude-gravity--ensure-session session-id cwd)))
        (when session
-         (claude-gravity--session-set-source session "opencode"
-           (alist-get 'instance_port data)
-           (alist-get 'instance_dir data)))))
+         ;; Set source — MessagePart may arrive before SessionStart
+         (when (equal source "opencode")
+           (claude-gravity--session-set-source session "opencode"
+             (alist-get 'instance_port data)
+             (alist-get 'instance_dir data)))
+         (claude-gravity-model-set-claude-status session 'responding)
+         (let ((part-type (alist-get 'part_type data)))
+           (pcase part-type
+             ("tool"
+              (let* ((tool-data (alist-get 'tool data))
+                     (call-id (alist-get 'call_id tool-data))
+                     (tool-name (alist-get 'tool_name tool-data))
+                     (state (alist-get 'state tool-data))
+                     (existing (when call-id
+                                 (claude-gravity-model-find-tool session call-id))))
+                (pcase state
+                  ((or "pending" "running")
+                   ;; Create tool if not exists
+                   (unless existing
+                     (let ((new-tool
+                            (list (cons 'tool_use_id call-id)
+                                  (cons 'name tool-name)
+                                  (cons 'input nil)
+                                  (cons 'status "running")
+                                  (cons 'result nil)
+                                  (cons 'timestamp (current-time))
+                                  (cons 'turn (or (plist-get session :current-turn) 0))
+                                  (cons 'parent_agent_id nil)
+                                  (cons 'post_text nil)
+                                  (cons 'post_thinking nil))))
+                       (claude-gravity-model-add-tool session new-tool nil nil)
+                       (claude-gravity--track-file session tool-name nil))))
+                  ("completed"
+                   (if existing
+                       (claude-gravity-model-complete-tool
+                        session call-id nil
+                        (alist-get 'text data))
+                     ;; Arrived completed without a prior running event
+                     (let ((new-tool
+                            (list (cons 'tool_use_id call-id)
+                                  (cons 'name tool-name)
+                                  (cons 'input nil)
+                                  (cons 'status "done")
+                                  (cons 'result (alist-get 'text data))
+                                  (cons 'timestamp (current-time))
+                                  (cons 'turn (or (plist-get session :current-turn) 0))
+                                  (cons 'parent_agent_id nil)
+                                  (cons 'post_text nil)
+                                  (cons 'post_thinking nil))))
+                       (claude-gravity-model-add-tool session new-tool nil nil)
+                       (claude-gravity--track-file session tool-name nil))))
+                  ("error"
+                   (if existing
+                       (progn
+                         (claude-gravity-model-complete-tool
+                          session call-id nil
+                          (format "[ERROR] %s" (or (alist-get 'text data) "Unknown")))
+                         (let ((tool (claude-gravity-model-find-tool session call-id)))
+                           (when tool
+                             (setf (alist-get 'status tool) "error"))))
+                     ;; Error without prior running
+                     (let ((new-tool
+                            (list (cons 'tool_use_id call-id)
+                                  (cons 'name tool-name)
+                                  (cons 'input nil)
+                                  (cons 'status "error")
+                                  (cons 'result (format "[ERROR] %s" (or (alist-get 'text data) "Unknown")))
+                                  (cons 'timestamp (current-time))
+                                  (cons 'turn (or (plist-get session :current-turn) 0))
+                                  (cons 'parent_agent_id nil)
+                                  (cons 'post_text nil)
+                                  (cons 'post_thinking nil))))
+                       (claude-gravity-model-add-tool session new-tool nil nil)))))))
+             ("text"
+              ;; Assistant text — store as streaming text for live display
+              (let ((text (alist-get 'text data)))
+                (when (and text (not (string-empty-p text)))
+                  (claude-gravity-model-append-streaming-text session text)))))))))
 
     ;; NOTE: No duplicate "UserPromptSubmit" clause here — OC source is set
     ;; via the pre-pcase source check (lines 70-74) and the original handler.
+    ;; OC UserPromptSubmit has no 'prompt field; the handler creates a prompt
+    ;; with display-text nil, which is fine (shows as empty turn).
 
     ("AssistantMessage"
      (let ((session (claude-gravity--get-session session-id)))
        (when session
-         (claude-gravity--session-set-source session "opencode"
-           (alist-get 'instance_port data)
-           (alist-get 'instance_dir data)))))
+         (claude-gravity-model-set-claude-status session 'responding)
+         ;; Store cost/token data
+         (let ((cost (alist-get 'cost data))
+               (tokens (alist-get 'tokens data)))
+           (when (numberp cost)
+             (plist-put session :cost cost))
+           (when tokens
+             (claude-gravity-model-set-token-usage session tokens)))
+         ;; If finish reason present, the message is complete
+         (when (alist-get 'finish data)
+           ;; Clear streaming text — it's now part of the completed message
+           (claude-gravity-model-clear-streaming-text session)))))
 
     ("SessionUpdate"
      (let ((session (claude-gravity--get-session session-id)))
        (when session
-         (claude-gravity--session-set-source session "opencode"
-           (alist-get 'instance_port data)
-           (alist-get 'instance_dir data))
          (let ((title (alist-get 'title data)))
            (when title
              (plist-put session :title title)))
