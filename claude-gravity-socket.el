@@ -124,6 +124,7 @@ Accumulates partial data per connection until complete lines arrive."
                       (session-id (alist-get 'session_id data))
                       (cwd (alist-get 'cwd data))
                       (pid (alist-get 'pid data))
+                      (source (alist-get 'source data))
                       (payload (alist-get 'data data))
                       (needs-response (alist-get 'needs_response data)))
                   (if needs-response
@@ -141,7 +142,7 @@ Accumulates partial data per connection until complete lines arrive."
                          (t
                           (claude-gravity--inbox-add 'permission session-id payload proc))))
                     (when event
-                      (claude-gravity-handle-event event session-id cwd payload pid)))))
+                      (claude-gravity-handle-event event session-id cwd payload pid source)))))
             (error
              (when claude-gravity--debug-messages-enabled
                (claude-gravity--debug-capture-message line nil err))

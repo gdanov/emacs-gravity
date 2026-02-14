@@ -84,6 +84,9 @@ Ensures :tool-index, :agent-index, and :turns exist. Idempotent."
   "Get or create session for SESSION-ID with CWD.  Returns session plist."
   (or (claude-gravity--migrate-session (gethash session-id claude-gravity--sessions))
       (let ((session (list :session-id session-id
+                           :source "claude-code"
+                           :instance-port nil
+                           :instance-dir nil
                            :cwd (claude-gravity--normalize-cwd (or cwd ""))
                            :project (file-name-nondirectory
                                      (directory-file-name (or cwd "")))
@@ -153,6 +156,17 @@ Stores the patterns list on SESSION's :allow-patterns property."
            (claude-gravity--log 'error "Claude Gravity: failed to read allow patterns: %s" err)
            (plist-put session :allow-patterns nil)))
       (plist-put session :allow-patterns nil))))
+
+
+(defun claude-gravity--session-set-source (session source &optional instance-port instance-dir)
+  "Set SOURCE for SESSION, optionally with INSTANCE-PORT and INSTANCE-DIR.
+SOURCE should be \"claude-code\" or \"opencode\"."
+  (plist-put session :source source)
+  (when instance-port
+    (plist-put session :instance-port instance-port))
+  (when instance-dir
+    (plist-put session :instance-dir instance-dir))
+  session)
 
 
 (defun claude-gravity--session-total-elapsed (session)

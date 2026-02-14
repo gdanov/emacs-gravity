@@ -44,9 +44,10 @@
 ;; entries and the session for display purposes but is NOT used as a
 ;; turn boundary signal.
 
-(defun claude-gravity-handle-event (event session-id cwd data &optional pid)
+(defun claude-gravity-handle-event (event session-id cwd data &optional pid source)
   "Handle EVENT for SESSION-ID (with CWD) carrying DATA.
 Optional PID is the Claude Code process ID.
+Optional SOURCE is the event source: \"claude-code\" or \"opencode\".
 This is the hooks adapter — it parses hook event payloads and calls
 the model mutation API to update session state."
   (unless session-id
@@ -64,7 +65,13 @@ the model mutation API to update session state."
     (when existing
       (claude-gravity-model-update-session-meta
        existing :pid pid :slug (alist-get 'slug data)
-       :branch (alist-get 'branch data))))
+       :branch (alist-get 'branch data))
+      ;; Set source for OpenCode sessions
+      (when (and source (equal source "opencode"))
+        (claude-gravity--log 'debug "Setting source for session %s" session-id)
+        (claude-gravity--session-set-source existing "opencode"
+          (alist-get 'instance_port data)
+          (alist-get 'instance_dir data)))))
   ;; Auto-dismiss stale bidirectional inbox items.
   ;; If we receive a completion/progress event for a session that has pending
   ;; permission/question/plan-review items, the agent has moved on (user
@@ -356,10 +363,72 @@ the model mutation API to update session state."
          (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
            (when tool
              (setf (alist-get 'post_thinking tool) post-think))))
-       (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
-       (claude-gravity--track-task session "PostToolUseFailure" (alist-get 'tool_name data)
-                                   (alist-get 'tool_input data) tool-use-id
-                                   error-msg)))
+        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
+        (claude-gravity--track-task session "PostToolUseFailure" (alist-get 'tool_name data)
+                                    (alist-get 'tool_input data) tool-use-id
+                                    error-msg)))
+
+    ;; OpenCode-specific events
+    ("SessionStatus"
+     (let* ((session (claude-gravity--ensure-session session-id cwd))
+            (status (alist-get 'status data))
+            (title (alist-get 'title data))
+            (slug (alist-get 'slug data))
+            (branch (alist-get 'branch data)))
+       (when session
+         (claude-gravity--session-set-source session "opencode")
+         (plist-put session :instance-port (alist-get 'instance_port data))
+         (plist-put session :instance-dir (alist-get 'instance_dir data)))
+       (when title
+         (plist-put session :title title))
+       (when slug
+         (plist-put session :slug slug))
+       (when branch
+         (plist-put session :branch branch))
+       (claude-gravity-model-update-session-meta
+        session :slug slug :branch branch)))
+
+    ("VcsBranchUpdate"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (let ((branch (alist-get 'branch data)))
+           (when branch
+             (plist-put session :branch branch))))))
+
+    ;; OpenCode message events - set source on session
+    ("MessagePart"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity--session-set-source session "opencode"
+           (alist-get 'instance_port data)
+           (alist-get 'instance_dir data)))))
+
+    ("UserPromptSubmit"
+     (let ((session (claude-gravity--ensure-session session-id cwd)))
+       (when session
+         (claude-gravity--session-set-source session "opencode"
+           (alist-get 'instance_port data)
+           (alist-get 'instance_dir data)))))
+
+    ("AssistantMessage"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity--session-set-source session "opencode"
+           (alist-get 'instance_port data)
+           (alist-get 'instance_dir data)))))
+
+    ("SessionUpdate"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity--session-set-source session "opencode"
+           (alist-get 'instance_port data)
+           (alist-get 'instance_dir data))
+         (let ((title (alist-get 'title data)))
+           (when title
+             (plist-put session :title title)))
+         (let ((slug (alist-get 'slug data)))
+           (when slug
+             (plist-put session :slug slug))))))
 
     ("Notification"
      (let* ((session (claude-gravity--get-session session-id))

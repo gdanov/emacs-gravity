@@ -1034,5 +1034,15 @@ async function main() {
 }
 
 if (require.main === module) {
-  main();
+  const args = process.argv.slice(2);
+  if (args.includes('--mode') && args[args.indexOf('--mode') + 1] === 'opencode') {
+    import('./opencode-bridge').then(() => {
+      log('OpenCode bridge started');
+    }).catch(e => {
+      console.error('Failed to load opencode-bridge:', e);
+      process.exit(1);
+    });
+  } else {
+    main();
+  }
 }

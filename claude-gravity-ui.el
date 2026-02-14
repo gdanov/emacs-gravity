@@ -30,7 +30,15 @@ Returns nil if neither is available."
      ((and cwd (not (string-empty-p cwd)))
       (propertize (format "(%s)" (abbreviate-file-name cwd))
                   'face 'claude-gravity-branch))
-     (t nil))))
+     (t nil)))
+
+
+(defun claude-gravity--source-indicator (session)
+  "Return propertized source indicator for SESSION.
+Shows 'OC' for OpenCode sessions, nil for Claude Code."
+  (let ((source (plist-get session :source)))
+    (when (equal source "opencode")
+      (propertize "[OC]" 'face 'claude-gravity-detail-label)))))
 
 
 ;;; Overview Buffer
@@ -171,22 +179,23 @@ Groups non-idle items by session and shows badge counts."
                                  (propertize (format " [%s]" perm-mode)
                                              'face 'claude-gravity-detail-label)
                                "")))
-                       (let* ((tmux-name (gethash sid claude-gravity--tmux-sessions))
-                              (tmux-badge (if tmux-name
-                                              (propertize (format " [%s]" tmux-name)
-                                                          'face 'claude-gravity-detail-label)
-                                            ""))
-                              (branch-str (or (claude-gravity--branch-or-cwd session) ""))
-                              (inbox-badge (claude-gravity--inbox-badges sid)))
-                         (magit-insert-section (session-entry sid)
-                           (magit-insert-heading
-                             (format "%s%s %s %s %s  %s%s  [%d tools]%s"
-                                     (claude-gravity--indent)
-                                     indicator branch-str label
-                                     tmux-badge
-                                     (or status-label "")
-                                     mode-badge
-                                     n-tools inbox-badge))
+                        (let* ((tmux-name (gethash sid claude-gravity--tmux-sessions))
+                               (tmux-badge (if tmux-name
+                                               (propertize (format " [%s]" tmux-name)
+                                                           'face 'claude-gravity-detail-label)
+                                             ""))
+                               (branch-str (or (claude-gravity--branch-or-cwd session) ""))
+                               (source-str (or (claude-gravity--source-indicator session) ""))
+                               (inbox-badge (claude-gravity--inbox-badges sid)))
+                          (magit-insert-section (session-entry sid)
+                            (magit-insert-heading
+                              (format "%s%s %s %s %s %s  %s%s  [%d tools]%s"
+                                      (claude-gravity--indent)
+                                      indicator branch-str source-str label
+                                      tmux-badge
+                                      (or status-label "")
+                                      mode-badge
+                                      n-tools inbox-badge))
                            ;; Inline inbox items for this session
                            (let ((session-items
                                   (cl-remove-if-not
@@ -385,11 +394,13 @@ else current session."
                 (ctx-pct (plist-get session :context-pct))
                 (model-name (plist-get session :model-name))
                 (branch-str (claude-gravity--branch-or-cwd session))
+                (source-str (claude-gravity--source-indicator session))
                 ;; Build entry parts
                 (parts (delq nil
                              (list dot " "
                                    (propertize status-str 'face status-face) "  "
                                    (when branch-str (concat branch-str " "))
+                                   (when source-str (concat source-str " "))
                                    (propertize (format "%-20s" label) 'face 'claude-gravity-slug)
                                    (propertize (format "  ◆ %d tools" n-tools)
                                                'face 'claude-gravity-detail-label))))
@@ -664,10 +675,11 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
                        (t
                         (propertize (concat "idle" (or idle-str ""))
                                    'face 'claude-gravity-status-idle))))
-         (slug (propertize (claude-gravity--session-label session)
-                           'face 'claude-gravity-slug))
-         (branch-str (claude-gravity--branch-or-cwd session))
-         (tool-count (claude-gravity--tree-total-tool-count session))
+          (slug (propertize (claude-gravity--session-label session)
+                            'face 'claude-gravity-slug))
+          (branch-str (claude-gravity--branch-or-cwd session))
+          (source-str (claude-gravity--source-indicator session))
+          (tool-count (claude-gravity--tree-total-tool-count session))
          (elapsed (claude-gravity--session-total-elapsed session))
          (usage (plist-get session :token-usage))
          (in-tokens (when usage
@@ -686,6 +698,8 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
     (push (concat "  " slug) segments)
     (when branch-str
       (push (concat "  " branch-str) segments))
+    (when source-str
+      (push (concat "  " source-str) segments))
     (when perm-mode
       (push (propertize (format "  [%s]" perm-mode)
                         'face 'claude-gravity-detail-label) segments))
