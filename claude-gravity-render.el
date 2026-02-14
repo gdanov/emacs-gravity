@@ -144,6 +144,18 @@ Cycles are pre-computed — no dedup or grouping needed."
               (claude-gravity--insert-task-item task))))))))
 
 
+(defun claude-gravity--short-model-name (model)
+  "Return short display name for MODEL string, or nil if empty.
+Strips the `claude-' prefix and date suffix for brevity."
+  (when (and model (stringp model) (not (string-empty-p model)))
+    (let ((s (if (string-prefix-p "claude-" model)
+                 (substring model 7)
+               model)))
+      ;; Strip date suffix like -20251001
+      (if (string-match "\\(.*\\)-[0-9]\\{8\\}$" s)
+          (match-string 1 s)
+        s))))
+
 (defun claude-gravity--insert-tool-item-from-tree (item)
   "Insert tool ITEM using tree-based agent lookup.
 If the tool has an 'agent pointer (from bidirectional link), renders as agent branch."
@@ -169,6 +181,24 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
                (tool-face (propertize (or name "?") 'face 'claude-gravity-tool-name))
                (summary (claude-gravity--tool-summary name input))
                (desc (claude-gravity--tool-description input))
+               ;; Model badge: show when different from session default
+               (tool-model (alist-get 'model item))
+               (req-model (alist-get 'requested_model item))
+               (session-model
+                (when claude-gravity--buffer-session-id
+                  (let ((s (gethash claude-gravity--buffer-session-id
+                                    claude-gravity--sessions)))
+                    (when s (plist-get s :model-id)))))
+               (display-model (or req-model
+                                  (and tool-model
+                                       (not (equal tool-model session-model))
+                                       tool-model)))
+               (model-badge
+                (let ((short (claude-gravity--short-model-name display-model)))
+                  (if short
+                      (propertize (format "  %s" short)
+                                  'face 'claude-gravity-detail-label)
+                    "")))
                (agent-suffix
                 (if agent
                     (let* ((atype (alist-get 'type agent))
@@ -181,10 +211,11 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
                            (dur-str (if (and (equal astatus "done") adur)
                                         (format "  %s" (claude-gravity--format-duration adur))
                                       "")))
-                      (format "  %s %s (%s)%s"
+                      (format "  %s %s (%s)%s%s"
                               (propertize "→" 'face 'claude-gravity-detail-label)
                               (propertize (or atype "?") 'face 'claude-gravity-tool-name)
                               (propertize short-id 'face 'claude-gravity-detail-label)
+                              model-badge
                               dur-str))
                   ""))
                (agent-icon (if agent "🤖 " ""))
@@ -192,7 +223,7 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
           (magit-insert-section (tool item t)
             (magit-insert-heading
               (if desc
-                  (format "%s%s%s %s\n%s%s%s"
+                  (format "%s%s%s %s\n%s%s%s%s"
                           (claude-gravity--indent)
                           agent-icon
                           indicator
@@ -200,13 +231,15 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
                           (claude-gravity--indent 2)
                           (propertize (claude-gravity--tool-signature name input)
                                       'face 'claude-gravity-tool-signature)
+                          (if (string-empty-p agent-suffix) model-badge "")
                           agent-suffix)
-                (format "%s%s%s %s  %s%s"
+                (format "%s%s%s %s  %s%s%s"
                         (claude-gravity--indent)
                         agent-icon
                         indicator
                         tool-face
                         (propertize summary 'face 'claude-gravity-detail-label)
+                        (if (string-empty-p agent-suffix) model-badge "")
                         agent-suffix)))
             ;; Show permission-format signature in detail
             (unless desc
@@ -273,10 +306,29 @@ DEPTH tracks nesting level for background tint."
          (dur-str (if (and agent-done-p adur)
                       (format "  %s" (claude-gravity--format-duration adur))
                     ""))
-         (agent-suffix (format "  %s %s (%s)%s"
+         ;; Model badge for agent branch
+         (tool-model (alist-get 'model item))
+         (req-model (alist-get 'requested_model item))
+         (session-model
+          (when claude-gravity--buffer-session-id
+            (let ((s (gethash claude-gravity--buffer-session-id
+                              claude-gravity--sessions)))
+              (when s (plist-get s :model-id)))))
+         (display-model (or req-model
+                            (and tool-model
+                                 (not (equal tool-model session-model))
+                                 tool-model)))
+         (model-badge
+          (let ((short (claude-gravity--short-model-name display-model)))
+            (if short
+                (propertize (format "  %s" short)
+                            'face 'claude-gravity-detail-label)
+              "")))
+         (agent-suffix (format "  %s %s (%s)%s%s"
                                (propertize "→" 'face 'claude-gravity-detail-label)
                                (propertize (or atype "?") 'face 'claude-gravity-tool-name)
                                (propertize short-id 'face 'claude-gravity-detail-label)
+                               model-badge
                                dur-str))
          (agent-cycles (claude-gravity--tlist-items (alist-get 'cycles agent)))
          (collapsed (and agent-done-p (not (null agent-cycles)))))
@@ -554,7 +606,7 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                             (fill-region start (point)))
                           (add-face-text-property start (point) prompt-face))))
                     (if frozen
-                        ;; Frozen turn: heading only — skip expensive children
+                        ;; Frozen turn: collapsed section with children
                         (let* ((stop (alist-get 'stop_text turn-node))
                                (summary (if (and stop (stringp stop)
                                                  (not (string-empty-p stop)))
@@ -563,12 +615,17 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                           ""))
                                (summary-str (if (string-empty-p summary) ""
                                               (concat "  " (propertize summary 'face 'claude-gravity-detail-label)))))
-                          (insert (format "%s%s%s  %s%s\n"
-                                          (claude-gravity--indent)
-                                          (propertize counts 'face 'claude-gravity-detail-label)
-                                          (propertize answer-suffix 'face 'claude-gravity-detail-label)
-                                          (propertize elapsed-str 'face 'claude-gravity-detail-label)
-                                          summary-str)))
+                          (magit-insert-section (turn turn-num t)
+                            (magit-insert-heading
+                              (format "%s%s%s  %s%s"
+                                      (claude-gravity--indent)
+                                      (propertize counts 'face 'claude-gravity-detail-label)
+                                      (propertize answer-suffix 'face 'claude-gravity-detail-label)
+                                      (propertize elapsed-str 'face 'claude-gravity-detail-label)
+                                      summary-str))
+                            (claude-gravity--insert-turn-children-from-tree turn-node)
+                            (claude-gravity--insert-agent-completions turn-agents))
+                          (claude-gravity--insert-stop-text turn-node))
                       ;; Active turn: full render
                       (magit-insert-section (turn turn-num (not is-current))
                         (magit-insert-heading

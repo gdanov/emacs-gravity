@@ -86,7 +86,14 @@
       "Bash(bd create --title=\"Cache markdown fontification + persistent buffer\" --type=task --priority=1 --description=\"Add hash-table cache to --fontify-markdown keyed on raw text. Reuse persistent hidden buffer instead of with-temp-buffer. Evict at 512 entries. File: claude-gravity-text.el:112-125\" && bd create --title=\"Reduce bridge transcript read size 10MB→2MB\" --type=task --priority=1 --description=\"Reduce readTail maxBytes from 10MB to 2MB in extractPrecedingContent, extractFollowingContent, extractTrailingText, extractTokenUsage. Fall back to 5MB if empty. File: emacs-bridge/src/index.ts\" && bd create --title=\"Eliminate PostToolUse retry loop\" --type=task --priority=1 --description=\"Remove 3x150ms retry loop in PostToolUse handler. Post-tool text arrives via next tool's extractPrecedingContent or Stop event. File: emacs-bridge/src/index.ts:886-906\" && bd create --title=\"Reduce Stop retry loop 5x250ms→3x100ms\" --type=task --priority=1 --description=\"Reduce Stop retries from 5x250ms (1250ms max) to 3x100ms (300ms max). snapshotBytes already limits read window. File: emacs-bridge/src/index.ts:931-943\" && bd create --title=\"Async tmux heartbeat via list-sessions\" --type=task --priority=2 --description=\"Replace N x call-process tmux has-session with single start-process tmux list-sessions + sentinel. File: claude-gravity-tmux.el\")",
       "Bash(bd dep add emacs-gravity-t8k emacs-gravity-3na 2>/dev/null; bd update emacs-gravity-t8k --parent=emacs-gravity-3na 2>/dev/null; echo \"---\"; bd show emacs-gravity-3na)",
       "Bash(bd dep rm emacs-gravity-t8k emacs-gravity-3na 2>/dev/null; for id in emacs-gravity-ekc emacs-gravity-udz emacs-gravity-soq emacs-gravity-sku emacs-gravity-5p1 emacs-gravity-inq emacs-gravity-bx3 emacs-gravity-hvz emacs-gravity-be0; do bd update $id --parent=emacs-gravity-3na 2>/dev/null; done)",
-      "Bash(git tag:*)"
+      "Bash(git tag:*)",
+      "WebFetch(domain:gist.github.com)",
+      "Bash(# Check if Task tool_input has a model field in any entry grep ''\"\"Task\"\"'' /Users/gdanov/.claude/projects/-Users-gdanov-work-playground-emacs-gravity/5ebf8902-2c4a-441a-b419-ad391d68ef00.jsonl | grep ''\"\"model\"\"'' | python3 -c \"\" import json, sys for line in sys.stdin: obj = json.loads\\(line\\) msg = obj.get\\(''message'', {}\\) for block in msg.get\\(''content'', []\\): if block.get\\(''name''\\) == ''Task'': inp = block.get\\(''input'', {}\\) if ''model'' in inp: print\\(f''Tool ID: {block[\\\\\"\"id\\\\\"\"]}, model: {inp[\\\\\"\"model\\\\\"\"]}''\\) \"\")",
+      "Bash(# Check SubagentStart/SubagentStop hook data for model fields grep -l ''SubagentStart\\\\|SubagentStop'' /tmp/emacs-bridge.log && grep ''SubagentStart\\\\|SubagentStop'' /tmp/emacs-bridge.log)",
+      "Bash(# The log search isn''t matching SubagentStart well. Let me search directly for that hook event grep ''\"\"hook_event_name\"\":\"\"SubagentStart\"\"'' /tmp/emacs-bridge.log)",
+      "WebFetch(domain:opencode.ai)",
+      "Bash(git config:*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

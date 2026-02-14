@@ -53,6 +53,12 @@ the model mutation API to update session state."
     (setq session-id "legacy")
     (setq cwd (or cwd "")))
   (claude-gravity--log 'debug "Handling event: %s for session: %s" event session-id)
+  ;; Auto-register tmux association from bridge-reported tmux_session
+  (let ((tmux-name (alist-get 'tmux_session data)))
+    (when (and tmux-name session-id
+               (not (gethash session-id claude-gravity--tmux-sessions)))
+      (puthash session-id tmux-name claude-gravity--tmux-sessions)
+      (claude-gravity--log 'info "Auto-registered tmux mapping: %s → %s" session-id tmux-name)))
   ;; Update PID, last-event-time, and slug on every event
   (let ((existing (claude-gravity--get-session session-id)))
     (when existing
@@ -248,6 +254,8 @@ the model mutation API to update session state."
                             (cons 'assistant_text (alist-get 'assistant_text data))
                             (cons 'assistant_thinking (alist-get 'assistant_thinking data))
                             (cons 'parent_agent_id parent-agent-id)
+                            (cons 'model (alist-get 'model data))
+                            (cons 'requested_model (alist-get 'requested_model data))
                             (cons 'post_text nil)
                             (cons 'post_thinking nil))))
        (claude-gravity-model-add-tool

@@ -271,7 +271,7 @@ describe("extractPrecedingContent", () => {
     const f = join(dir, "empty.jsonl");
     writeFileSync(f, "");
     const result = extractPrecedingContent(f, "any_id");
-    expect(result).toEqual({ text: "", thinking: "" });
+    expect(result).toEqual({ text: "", thinking: "", model: "" });
   });
 
   it("skips (no content) placeholder text", () => {
@@ -290,6 +290,39 @@ describe("extractPrecedingContent", () => {
     writeFileSync(f, lines.join("\n") + "\n");
     const result = extractPrecedingContent(f, "tool_x");
     expect(result.text).toBe("");
+  });
+
+  it("extracts model from assistant message containing tool_use", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "model_extract.jsonl");
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-opus-4-6", content: [{ type: "text", text: "Let me check" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-opus-4-6", content: [{ type: "tool_use", id: "tool_m1", name: "Read", input: {} }] },
+      }),
+    ];
+    writeFileSync(f, lines.join("\n") + "\n");
+    const result = extractPrecedingContent(f, "tool_m1");
+    expect(result.model).toBe("claude-opus-4-6");
+    expect(result.text).toBe("Let me check");
+  });
+
+  it("extracts model from nearest assistant when tool_use not found", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-test-"));
+    const f = join(dir, "model_fallback.jsonl");
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "claude-haiku-4-5-20251001", content: [{ type: "text", text: "Thinking..." }] },
+      }),
+    ];
+    writeFileSync(f, lines.join("\n") + "\n");
+    const result = extractPrecedingContent(f, "nonexistent_tool");
+    expect(result.model).toBe("claude-haiku-4-5-20251001");
   });
 
   it("collects multiple text blocks before tool_use", () => {

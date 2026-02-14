@@ -619,6 +619,43 @@ Uses a single `tmux list-sessions' call instead of N `has-session' calls."
           (switch-to-buffer buf))))))
 
 
+(defun claude-gravity--recover-tmux-sessions ()
+  "Rebuild tmux session mappings by matching session PIDs to tmux pane PIDs.
+Scans all running tmux panes for claude-* sessions and matches their
+pane PIDs against known session PIDs.  This recovers lost mappings
+after suspend/resume, server crash, or Emacs restart."
+  (let ((tmux-panes (make-hash-table :test 'equal))) ; pid -> tmux-name
+    ;; Build PID→tmux-name lookup from running tmux sessions
+    (condition-case nil
+        (dolist (line (process-lines "tmux" "list-panes" "-a"
+                                     "-F" "#{session_name} #{pane_pid}"))
+          (when (string-match "^\\(claude-[^ ]+\\) \\([0-9]+\\)$" line)
+            (puthash (string-to-number (match-string 2 line))
+                     (match-string 1 line) tmux-panes)))
+      (error nil)) ; tmux not running or no sessions
+    ;; Match against sessions with known PIDs
+    (let ((recovered 0))
+      (maphash (lambda (sid session)
+                 (let* ((pid (plist-get session :pid))
+                        (tmux-name (and pid (gethash pid tmux-panes))))
+                   (when (and tmux-name
+                              (not (gethash sid claude-gravity--tmux-sessions)))
+                     (puthash sid tmux-name claude-gravity--tmux-sessions)
+                     (cl-incf recovered))))
+               claude-gravity--sessions)
+      (when (> recovered 0)
+        (claude-gravity--log 'info "Recovered %d tmux session mapping(s)" recovered)
+        (claude-gravity--render-overview))
+      recovered)))
+
+
+(defun claude-gravity-recover-tmux ()
+  "Interactively recover lost tmux session mappings."
+  (interactive)
+  (let ((n (claude-gravity--recover-tmux-sessions)))
+    (message "Recovered %d tmux session mapping(s)" n)))
+
+
 (defun claude-gravity-reset-session (&optional session-id)
   "Reset (clear) the managed tmux Claude session for SESSION-ID.
 Sends /clear to the running tmux session.  The resulting SessionEnd/SessionStart

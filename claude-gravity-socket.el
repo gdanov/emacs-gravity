@@ -18,6 +18,7 @@
 (declare-function claude-gravity--inbox-act-plan-review "claude-gravity-actions")
 (declare-function claude-gravity--inbox-act-idle "claude-gravity-actions")
 (declare-function claude-gravity--debug-capture-message "claude-gravity-debug")
+(declare-function claude-gravity--recover-tmux-sessions "claude-gravity-tmux")
 (defvar claude-gravity--debug-messages-enabled)
 
 
@@ -194,7 +195,9 @@ Called after server restart to recover sessions that were falsely marked ended."
   (unless (claude-gravity-server-alive-p)
     (claude-gravity--log 'warn "Health check: server dead, restarting")
     (claude-gravity--ensure-server)
-    (claude-gravity--reconcile-sessions)))
+    (claude-gravity--reconcile-sessions))
+  ;; Always try to recover lost tmux mappings
+  (claude-gravity--recover-tmux-sessions))
 
 
 (defun claude-gravity-server-start ()

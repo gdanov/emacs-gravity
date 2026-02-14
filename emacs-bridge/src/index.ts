@@ -1,6 +1,7 @@
 import { createConnection } from "net";
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join, dirname, basename } from "path";
+import { execSync } from "child_process";
 
 // Log levels
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -187,8 +188,8 @@ export function readHead(filePath: string, maxBytes: number): string {
 // Extract assistant text and thinking that precede a tool_use.
 // The tool_use may not be in the transcript yet (PreToolUse fires before transcript write),
 // so we fall back to reading the most recent assistant text/thinking from the end.
-export function extractPrecedingContent(transcriptPath: string, toolUseId: string): { text: string; thinking: string } {
-  const result = { text: "", thinking: "" };
+export function extractPrecedingContent(transcriptPath: string, toolUseId: string): { text: string; thinking: string; model: string } {
+  const result = { text: "", thinking: "", model: "" };
   try {
     const content = readTail(transcriptPath, 2 * 1024 * 1024);
     const lines = content.split("\n").filter((l) => l.length > 0);
@@ -203,6 +204,8 @@ export function extractPrecedingContent(transcriptPath: string, toolUseId: strin
         if (!Array.isArray(c) || c.length === 0) continue;
         if (c[0].type === "tool_use" && c[0].id === toolUseId) {
           startIdx = i;
+          // Grab model from the assistant message containing this tool_use
+          if (obj.message?.model) result.model = obj.message.model;
           break;
         }
       } catch {
@@ -227,6 +230,8 @@ export function extractPrecedingContent(transcriptPath: string, toolUseId: strin
         const c = obj.message?.content;
         if (!Array.isArray(c) || c.length === 0) continue;
         const blockType = c[0].type;
+        // Capture model from the nearest assistant message if not yet found
+        if (!result.model && obj.message?.model) result.model = obj.message.model;
         if (blockType === "tool_use") continue; // parallel sibling or preceding tool, skip
         if (blockType === "tool_result") break; // hit a tool result — stop
         if (blockType === "text") {
@@ -703,6 +708,17 @@ async function main() {
       (inputData as any).temp_id = tempId;
     }
 
+    // Detect tmux session name from $TMUX env var
+    if (process.env.TMUX) {
+      try {
+        const tmuxName = execSync('tmux display-message -p "#{session_name}"',
+          { encoding: 'utf-8', timeout: 1000 }).trim();
+        if (tmuxName) {
+          (inputData as any).tmux_session = tmuxName;
+        }
+      } catch {}
+    }
+
     // Dump raw input if dump mode enabled
     const dumpDir = process.env.CLAUDE_GRAVITY_DUMP_DIR;
     let dumpSeq: number | undefined;
@@ -874,7 +890,7 @@ async function main() {
         : transcriptPath;
       if (effectiveTranscript && toolUseId) {
         try {
-          const { text, thinking } = extractPrecedingContent(effectiveTranscript, toolUseId);
+          const { text, thinking, model } = extractPrecedingContent(effectiveTranscript, toolUseId);
           if (text) {
             (inputData as any).assistant_text = text;
             log(`Extracted assistant text (${text.length} chars) for ${toolUseId}`);
@@ -883,9 +899,18 @@ async function main() {
             (inputData as any).assistant_thinking = thinking;
             log(`Extracted thinking (${thinking.length} chars) for ${toolUseId}`);
           }
+          if (model) {
+            (inputData as any).model = model;
+          }
         } catch (e) {
           log(`Failed to extract preceding content: ${e}`, 'error');
         }
+      }
+      // For Task tools, extract the explicitly requested model from tool_input
+      const toolName = (inputData as any).tool_name;
+      const toolInput = (inputData as any).tool_input;
+      if (toolName === "Task" && toolInput?.model) {
+        (inputData as any).requested_model = toolInput.model;
       }
     }
 
