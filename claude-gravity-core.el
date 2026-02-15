@@ -199,6 +199,19 @@ Checks equality and paragraph-boundary prefix match."
   (length (car tl)))
 
 
+(defun claude-gravity--short-model-name (model)
+  "Return short display name for MODEL string, or nil if empty.
+Strips the `claude-' prefix and date suffix for brevity."
+  (when (and model (stringp model) (not (string-empty-p model)))
+    (let ((s (if (string-prefix-p "claude-" model)
+                 (substring model 7)
+               model)))
+      ;; Strip date suffix like -20251001
+      (if (string-match "\\(.*\\)-[0-9]\\{8\\}$" s)
+          (match-string 1 s)
+        s))))
+
+
 (defun claude-gravity--json-read-file (path)
   "Read JSON file at PATH using the fast C parser.
 Returns alist for objects, list for arrays."

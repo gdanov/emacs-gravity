@@ -2,6 +2,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'claude-gravity-core)
 (require 'claude-gravity-faces)
 
@@ -9,8 +10,11 @@
 
 (defvar claude-gravity--debug-messages nil
   "Ring buffer of captured bridge messages.
-Each entry is an alist with keys: timestamp, event, session-id,
+Each entry is an alist with keys: msg-id, timestamp, event, session-id,
 cwd, pid, needs-response, data, hook-input, raw, parse-error.")
+
+(defvar claude-gravity--debug-msg-counter 0
+  "Monotonically increasing counter for debug message IDs.")
 
 (defvar claude-gravity--debug-messages-max 200
   "Maximum messages to retain (oldest dropped).")
@@ -32,7 +36,9 @@ PARSE-ERROR is the error object (or nil)."
            (needs-resp (when parsed-data (alist-get 'needs_response parsed-data)))
            (payload (when parsed-data (alist-get 'data parsed-data)))
            (hook-input (when parsed-data (alist-get 'hook_input parsed-data)))
-           (entry `((timestamp . ,(current-time))
+           (msg-id (cl-incf claude-gravity--debug-msg-counter))
+           (entry `((msg-id . ,msg-id)
+                    (timestamp . ,(current-time))
                     (event . ,event)
                     (session-id . ,session-id)
                     (cwd . ,cwd)
@@ -151,16 +157,15 @@ PARSE-ERROR is the error object (or nil)."
   (let ((inhibit-read-only t)
         (pos (point))
         ;; Messages are stored newest-first (push), display newest-first
-        (messages claude-gravity--debug-messages)
-        (idx 0))
+        (messages claude-gravity--debug-messages))
     (erase-buffer)
     (claude-gravity--debug-insert-header (length messages))
     (dolist (msg messages)
       (when (claude-gravity--debug-passes-filter msg)
-        (claude-gravity--debug-insert-message msg idx)
-        (when (gethash idx claude-gravity--debug-expanded)
-          (claude-gravity--debug-insert-expanded msg)))
-      (setq idx (1+ idx)))
+        (let ((mid (alist-get 'msg-id msg)))
+          (claude-gravity--debug-insert-message msg mid)
+          (when (gethash mid claude-gravity--debug-expanded)
+            (claude-gravity--debug-insert-expanded msg)))))
     (claude-gravity--debug-insert-footer)
     (goto-char (min pos (point-max)))))
 
@@ -187,8 +192,8 @@ PARSE-ERROR is the error object (or nil)."
   (insert "\n" (propertize (make-string 80 ?\u2501) 'face 'claude-gravity-divider) "\n")
   (insert "  RET=expand  c=copy-raw  C=copy-parsed  f=filter  s=session  /=search  x=clear  g=refresh  q=quit\n"))
 
-(defun claude-gravity--debug-insert-message (msg idx)
-  "Insert one-line summary for MSG at index IDX."
+(defun claude-gravity--debug-insert-message (msg mid)
+  "Insert one-line summary for MSG with message ID MID."
   (let* ((timestamp (alist-get 'timestamp msg))
          (event (alist-get 'event msg))
          (session-id (alist-get 'session-id msg))
@@ -200,7 +205,7 @@ PARSE-ERROR is the error object (or nil)."
          (sid-str (when session-id
                     (substring session-id 0 (min 7 (length session-id)))))
          (summary (claude-gravity--debug-message-summary event data))
-         (expanded (gethash idx claude-gravity--debug-expanded)))
+         (expanded (gethash mid claude-gravity--debug-expanded)))
     (let ((start (point)))
       (insert
        (if parse-error
@@ -220,7 +225,7 @@ PARSE-ERROR is the error object (or nil)."
          (propertize "[+] " 'face 'claude-gravity-detail-label))
        summary
        "\n")
-      (put-text-property start (point) 'claude-debug-idx idx))
+      (put-text-property start (point) 'claude-debug-mid mid))
     (when parse-error
       (insert (propertize (format "  Parse error: %s\n" parse-error) 'face 'error)))))
 
@@ -375,14 +380,15 @@ Objects and arrays are expanded with syntax highlighting."
   (interactive)
   (claude-gravity--debug-render))
 
-(defun claude-gravity--debug-idx-at-point ()
-  "Return the message index at point, or nil."
-  (get-text-property (line-beginning-position) 'claude-debug-idx))
+(defun claude-gravity--debug-mid-at-point ()
+  "Return the message ID at point, or nil."
+  (get-text-property (line-beginning-position) 'claude-debug-mid))
 
 (defun claude-gravity--debug-msg-at-point ()
   "Return the message alist at point, or nil."
-  (when-let ((idx (claude-gravity--debug-idx-at-point)))
-    (nth idx claude-gravity--debug-messages)))
+  (when-let ((mid (claude-gravity--debug-mid-at-point)))
+    (cl-find mid claude-gravity--debug-messages
+             :key (lambda (m) (alist-get 'msg-id m)))))
 
 (defun claude-gravity-debug-copy-raw ()
   "Copy raw JSON of message at point to kill ring."
@@ -409,10 +415,10 @@ Objects and arrays are expanded with syntax highlighting."
 (defun claude-gravity-debug-toggle-expand ()
   "Expand/collapse message at point."
   (interactive)
-  (when-let ((idx (claude-gravity--debug-idx-at-point)))
-    (if (gethash idx claude-gravity--debug-expanded)
-        (remhash idx claude-gravity--debug-expanded)
-      (puthash idx t claude-gravity--debug-expanded))
+  (when-let ((mid (claude-gravity--debug-mid-at-point)))
+    (if (gethash mid claude-gravity--debug-expanded)
+        (remhash mid claude-gravity--debug-expanded)
+      (puthash mid t claude-gravity--debug-expanded))
     (claude-gravity--debug-render)))
 
 (defun claude-gravity-debug-filter-event ()
@@ -514,16 +520,15 @@ Shows raw hook inputs and enrichment delta.
   "Render the bridge debug buffer."
   (let ((inhibit-read-only t)
         (pos (point))
-        (messages claude-gravity--debug-messages)
-        (idx 0))
+        (messages claude-gravity--debug-messages))
     (erase-buffer)
     (claude-gravity--debug-bridge-insert-header (length messages))
     (dolist (msg messages)
       (when (claude-gravity--debug-passes-filter msg)
-        (claude-gravity--debug-insert-message msg idx)
-        (when (gethash idx claude-gravity--debug-bridge-expanded)
-          (claude-gravity--debug-bridge-insert-expanded msg)))
-      (setq idx (1+ idx)))
+        (let ((mid (alist-get 'msg-id msg)))
+          (claude-gravity--debug-insert-message msg mid)
+          (when (gethash mid claude-gravity--debug-bridge-expanded)
+            (claude-gravity--debug-bridge-insert-expanded msg)))))
     (claude-gravity--debug-bridge-insert-footer)
     (goto-char (min pos (point-max)))))
 
@@ -602,10 +607,10 @@ Returns an alist of added/changed fields, or nil if identical."
 (defun claude-gravity-debug-bridge-toggle-expand ()
   "Expand/collapse message at point in bridge debug buffer."
   (interactive)
-  (when-let ((idx (claude-gravity--debug-idx-at-point)))
-    (if (gethash idx claude-gravity--debug-bridge-expanded)
-        (remhash idx claude-gravity--debug-bridge-expanded)
-      (puthash idx t claude-gravity--debug-bridge-expanded))
+  (when-let ((mid (claude-gravity--debug-mid-at-point)))
+    (if (gethash mid claude-gravity--debug-bridge-expanded)
+        (remhash mid claude-gravity--debug-bridge-expanded)
+      (puthash mid t claude-gravity--debug-bridge-expanded))
     (claude-gravity--debug-bridge-render)))
 
 (defun claude-gravity-debug-bridge-copy-hook-input ()

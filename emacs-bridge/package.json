@@ -8,6 +8,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.42",
     "@types/node": "^20.0.0",
     "bonjour-service": "^1.3.0"
   },

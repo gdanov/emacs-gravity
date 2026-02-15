@@ -9,14 +9,18 @@
 ; Forward declarations for functions/vars in modules loaded later
 (defvar claude-gravity--tmux-sessions)
 (defvar claude-gravity--tmux-pending)
+(defvar claude-gravity--daemon-pending)
+(defvar claude-gravity--daemon-sessions)
 (declare-function claude-gravity--handle-tool-permission "claude-gravity-socket")
 (declare-function claude-gravity--handle-ask-user-question "claude-gravity-socket")
 (declare-function claude-gravity--handle-plan-review "claude-gravity-socket")
 (declare-function claude-gravity--update-notification-indicator "claude-gravity-socket")
 (declare-function claude-gravity--clear-notification-indicator "claude-gravity-socket")
 (declare-function claude-gravity--tmux-ensure-heartbeat "claude-gravity-tmux")
+(declare-function claude-gravity--tmux-alive-p "claude-gravity-tmux")
 (declare-function claude-gravity--plan-revision-diff "claude-gravity-diff")
 (declare-function claude-gravity--plan-review-apply-margin-indicators "claude-gravity-diff")
+(declare-function claude-gravity--daemon-rekey-session "claude-gravity-daemon")
 
 
 ;;; Event handling
@@ -43,6 +47,30 @@
 ;; permission_mode (from Claude Code hook payloads) is stored on tool
 ;; entries and the session for display purposes but is NOT used as a
 ;; turn boundary signal.
+
+(defun claude-gravity--extract-model-from-transcript (session transcript-path)
+  "Extract model name from TRANSCRIPT-PATH and set on SESSION.
+Reads the first few lines of the JSONL transcript to find the model field."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents transcript-path nil 0 8192)
+        (goto-char (point-min))
+        (catch 'found
+          (while (not (eobp))
+            (let ((line (buffer-substring-no-properties
+                         (line-beginning-position) (line-end-position))))
+              (when (> (length line) 0)
+                (condition-case nil
+                    (let* ((obj (json-parse-string line :object-type 'alist))
+                           (msg (alist-get 'message obj))
+                           (model (when msg (alist-get 'model msg))))
+                      (when (and model (stringp model) (not (string-empty-p model)))
+                        (plist-put session :model-name
+                                   (or (claude-gravity--short-model-name model) model))
+                        (throw 'found t)))
+                  (error nil))))
+            (forward-line 1))))
+    (error nil)))
 
 (defun claude-gravity-handle-event (event session-id cwd data &optional pid source)
   "Handle EVENT for SESSION-ID (with CWD) carrying DATA.
@@ -114,6 +142,12 @@ the model mutation API to update session state."
              ;; because the session was still keyed under temp-id at that point.
              (claude-gravity-model-update-session-meta
               temp-session :pid pid :slug (alist-get 'slug data))))))
+     ;; Re-key daemon pending session (same pattern as tmux above)
+     (let ((temp-id (alist-get 'temp_id data)))
+       (when (and temp-id
+                  (boundp 'claude-gravity--daemon-pending)
+                  (gethash temp-id claude-gravity--daemon-pending))
+         (claude-gravity--daemon-rekey-session temp-id session-id data pid)))
      (unless (equal (alist-get 'source data) "startup")
        (claude-gravity--ensure-session session-id cwd))
      ;; Apply slug/branch/source from data AFTER session exists.
@@ -196,10 +230,13 @@ the model mutation API to update session state."
                                 (if (and cmd-args (not (string-empty-p cmd-args)))
                                     (format "/%s %s" cmd-name cmd-args)
                                   (format "/%s" cmd-name))))))
-       ;; Dedup: if tmux-prompt-sent flag is set, we already created the
-       ;; prompt entry in send-prompt — skip to avoid duplicate
-       (if (plist-get session :tmux-prompt-sent)
-           (plist-put session :tmux-prompt-sent nil)
+       ;; Dedup: if tmux/daemon-prompt-sent flag is set, we already created
+       ;; the prompt entry in send-prompt — skip to avoid duplicate
+       (if (or (plist-get session :tmux-prompt-sent)
+               (plist-get session :daemon-prompt-sent))
+           (progn
+             (plist-put session :tmux-prompt-sent nil)
+             (plist-put session :daemon-prompt-sent nil))
          ;; OC sends UserPromptSubmit without 'prompt — use placeholder
          (let ((text (or display-text
                          (when (equal source "opencode") "(user prompt)"))))
@@ -287,6 +324,18 @@ the model mutation API to update session state."
        (claude-gravity-model-set-permission-mode
         session (alist-get 'permission_mode data))
        (claude-gravity-model-set-claude-status session 'responding)
+       ;; Set model name from bridge enrichment or transcript fallback
+       (unless parent-agent-id
+         (let ((model-id (alist-get 'model data)))
+           (when (and model-id (stringp model-id) (not (string-empty-p model-id)))
+             (plist-put session :model-name
+                        (or (claude-gravity--short-model-name model-id)
+                            model-id)))
+           ;; Fallback: extract model from transcript if bridge didn't provide it
+           (unless (plist-get session :model-name)
+             (let ((tp (alist-get 'transcript_path data)))
+               (when (and tp (file-readable-p tp))
+                 (claude-gravity--extract-model-from-transcript session tp))))))
        (claude-gravity--track-file session (alist-get 'tool_name data) (alist-get 'tool_input data))
        (claude-gravity--track-task session "PreToolUse" (alist-get 'tool_name data)
                                    (alist-get 'tool_input data) (alist-get 'tool_use_id data))
@@ -554,7 +603,56 @@ the model mutation API to update session state."
            (claude-gravity--reset-session session))
          ;; Update mode-line indicator
          (claude-gravity--update-notification-indicator ntype label))
-       (claude-gravity--log 'debug "Claude [%s]: %s" label msg))))
+       (claude-gravity--log 'debug "Claude [%s]: %s" label msg)))
+
+    ;; ── Daemon-specific events ──────────────────────────────────────────
+
+    ("StreamDelta"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (let ((text (alist-get 'text data))
+               (thinking (alist-get 'thinking data)))
+           (when text
+             (claude-gravity-model-append-streaming-text session text))
+           (when thinking
+             (claude-gravity-model-append-streaming-text session thinking)))
+         (claude-gravity-model-set-claude-status session 'responding))))
+
+    ("AssistantComplete"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity-model-clear-streaming-text session))))
+
+    ("DaemonResult"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity-model-clear-streaming-text session)
+         (claude-gravity-model-set-claude-status session 'idle)
+         ;; Store result text as stop_text on the last turn
+         (let ((result-text (alist-get 'result data)))
+           (claude-gravity-model-finalize-last-prompt
+            session result-text nil))
+         ;; Store usage/cost
+         (let ((usage (alist-get 'usage data)))
+           (when usage
+             (claude-gravity-model-set-token-usage session usage)))
+         (let ((cost (alist-get 'total_cost_usd data)))
+           (when (numberp cost)
+             (plist-put session :cost cost))))))
+
+    ("ToolProgress"
+     ;; Lightweight — log but don't trigger full render
+     (claude-gravity--log 'debug "ToolProgress: %s %s %.1fs"
+                          (alist-get 'tool_name data)
+                          (alist-get 'tool_use_id data)
+                          (or (alist-get 'elapsed_time_seconds data) 0)))
+
+    ("DaemonError"
+     (let ((session (claude-gravity--get-session session-id)))
+       (when session
+         (claude-gravity-model-set-claude-status session 'idle)))
+     (claude-gravity--log 'error "Daemon error [%s]: %s"
+                          session-id (alist-get 'error data))))
 
   (claude-gravity--schedule-refresh)
   (when session-id

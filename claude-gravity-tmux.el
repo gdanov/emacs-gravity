@@ -398,21 +398,25 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
     (goto-char (point-max))))
 
 
+(declare-function claude-gravity-daemon-compose-send "claude-gravity-daemon")
+
 (defun claude-gravity-compose-send ()
   "Send the composed prompt and close the compose buffer."
   (interactive)
-  (let* ((sep claude-gravity--compose-separator)
-         (text (string-trim
-                (buffer-substring-no-properties
-                 (if sep (marker-position sep) (point-min))
-                 (point-max)))))
-    (if (string-empty-p text)
-        (message "Nothing to send")
-      (let* ((sid claude-gravity--compose-session-id)
-             (resolved (claude-gravity--resolve-tmux-session sid)))
-        (claude-gravity--send-prompt-core text (car resolved) (cdr resolved))
-        (claude-gravity--compose-cleanup)
-        (message "Prompt sent")))))
+  (if (eq claude-gravity--compose-backend 'daemon)
+      (claude-gravity-daemon-compose-send)
+    (let* ((sep claude-gravity--compose-separator)
+           (text (string-trim
+                  (buffer-substring-no-properties
+                   (if sep (marker-position sep) (point-min))
+                   (point-max)))))
+      (if (string-empty-p text)
+          (message "Nothing to send")
+        (let* ((sid claude-gravity--compose-session-id)
+               (resolved (claude-gravity--resolve-tmux-session sid)))
+          (claude-gravity--send-prompt-core text (car resolved) (cdr resolved))
+          (claude-gravity--compose-cleanup)
+          (message "Prompt sent"))))))
 
 
 (defun claude-gravity-compose-cancel ()

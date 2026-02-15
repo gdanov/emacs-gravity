@@ -20,6 +20,7 @@ exports[`Event enrichment snapshots > PreToolUse: Bash with thinking 1`] = `
 {
   "assistant_thinking": "The user is pointing me to a specific GitHub issue that suggests hooks DO fire for AskUserQuestion. Let me fetch that issue to understand what's actually happening.",
   "cwd": "/test/project",
+  "model": "claude-opus-4-5-20251101",
   "session_id": "test-session-001",
   "slug": "dazzling-brewing-otter",
   "tool_input": {
@@ -38,6 +39,7 @@ exports[`Event enrichment snapshots > PreToolUse: Task agent start with thinking
 
 Let me research this by looking at the hook system documentation and the AskUserQuestion tool behavior.",
   "cwd": "/test/project",
+  "model": "claude-opus-4-5-20251101",
   "session_id": "test-session-001",
   "slug": "dazzling-brewing-otter",
   "tool_input": {

@@ -43,6 +43,8 @@ cd emacs-bridge && npx tsc --noEmit
 
 ### Emacs Lisp
 
+**CRITICAL: All CLI Emacs invocations MUST use `-nw`** (e.g., `/Applications/Emacs.app/Contents/MacOS/Emacs -nw --batch ...`). Without `-nw`, macOS tries to open a GUI window which hangs or fails in non-interactive contexts.
+
 For the Emacs Lisp code, use the `emacs` MCP to re-evaluate code after making changes:
 
 ```elisp

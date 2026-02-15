@@ -144,18 +144,6 @@ Cycles are pre-computed — no dedup or grouping needed."
               (claude-gravity--insert-task-item task))))))))
 
 
-(defun claude-gravity--short-model-name (model)
-  "Return short display name for MODEL string, or nil if empty.
-Strips the `claude-' prefix and date suffix for brevity."
-  (when (and model (stringp model) (not (string-empty-p model)))
-    (let ((s (if (string-prefix-p "claude-" model)
-                 (substring model 7)
-               model)))
-      ;; Strip date suffix like -20251001
-      (if (string-match "\\(.*\\)-[0-9]\\{8\\}$" s)
-          (match-string 1 s)
-        s))))
-
 (defun claude-gravity--insert-tool-item-from-tree (item)
   "Insert tool ITEM using tree-based agent lookup.
 If the tool has an 'agent pointer (from bidirectional link), renders as agent branch."

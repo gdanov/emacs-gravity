@@ -24,6 +24,7 @@
 (require 'claude-gravity-socket)
 (require 'claude-gravity-actions)
 (require 'claude-gravity-tmux)
+(require 'claude-gravity-daemon)
 (require 'claude-gravity-debug)
 
 (provide 'claude-gravity)

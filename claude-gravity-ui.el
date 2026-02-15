@@ -12,6 +12,19 @@
 (declare-function claude-gravity--write-allow-pattern-for-tool "claude-gravity-socket")
 (declare-function claude-gravity--send-permission-response "claude-gravity-socket")
 (declare-function claude-gravity--current-session-tmux-p "claude-gravity-tmux")
+(declare-function claude-gravity--current-session-daemon-p "claude-gravity-daemon")
+(declare-function claude-gravity-daemon-start-session "claude-gravity-daemon")
+(declare-function claude-gravity-daemon-resume-session "claude-gravity-daemon")
+(declare-function claude-gravity-daemon-send-prompt "claude-gravity-daemon")
+(declare-function claude-gravity-daemon-stop-session "claude-gravity-daemon")
+(declare-function claude-gravity-daemon-interrupt "claude-gravity-daemon")
+(declare-function claude-gravity-daemon-set-model "claude-gravity-daemon")
+(declare-function claude-gravity-daemon-compose-prompt "claude-gravity-daemon")
+(declare-function claude-gravity--current-session-managed-p "claude-gravity-daemon")
+(declare-function claude-gravity-unified-compose "claude-gravity-daemon")
+(declare-function claude-gravity-unified-stop "claude-gravity-daemon")
+(declare-function claude-gravity-unified-interrupt "claude-gravity-daemon")
+(declare-function claude-gravity-unified-resume "claude-gravity-daemon")
 (declare-function claude-gravity-debug-show "claude-gravity-debug")
 (defvar claude-gravity--tmux-sessions)
 
@@ -30,15 +43,18 @@ Returns nil if neither is available."
      ((and cwd (not (string-empty-p cwd)))
       (propertize (format "(%s)" (abbreviate-file-name cwd))
                   'face 'claude-gravity-branch))
-     (t nil)))
+     (t nil))))
 
 
 (defun claude-gravity--source-indicator (session)
   "Return propertized source indicator for SESSION.
-Shows 'OC' for OpenCode sessions, nil for Claude Code."
+Shows ☁ for Claude Code sessions, [OC] for OpenCode."
   (let ((source (plist-get session :source)))
-    (when (equal source "opencode")
-      (propertize "[OC]" 'face 'claude-gravity-detail-label)))))
+    (cond
+     ((equal source "opencode")
+      (propertize "[OC]" 'face 'claude-gravity-detail-label))
+     ((equal source "claude-code")
+      (propertize "☁" 'face 'claude-gravity-detail-label)))))
 
 
 ;;; Overview Buffer
@@ -898,21 +914,24 @@ Returns a list from most specific to most general, with nils removed."
     ("V" "Open transcript" claude-gravity-open-agent-transcript)
     ("M" "Debug messages" claude-gravity-debug-show)]
    ["Sessions"
+    ("N" "Start (Cloud)" claude-gravity-daemon-start-session)
     ("S" "Start (tmux)" claude-gravity-start-session)
-    ("s" "Compose prompt" claude-gravity-compose-prompt
-     :inapt-if-not claude-gravity--current-session-tmux-p)
+    ("s" "Compose prompt" claude-gravity-unified-compose
+     :inapt-if-not claude-gravity--current-session-managed-p)
+    ("r" "Resume session" claude-gravity-unified-resume)
+    ("K" "Stop session" claude-gravity-unified-stop
+     :inapt-if-not claude-gravity--current-session-managed-p)
+    ("E" "Interrupt" claude-gravity-unified-interrupt
+     :inapt-if-not claude-gravity--current-session-managed-p)
+    ("m" "Set model" claude-gravity-daemon-set-model
+     :inapt-if-not claude-gravity--current-session-daemon-p)
+    ""
+    "Tmux-only"
     ("/" "Slash command" claude-gravity-slash-command
      :inapt-if-not claude-gravity--current-session-tmux-p)
-    ("r" "Resume session" claude-gravity-resume-session)
     ("$" "Terminal" claude-gravity-terminal-session
      :inapt-if-not claude-gravity--current-session-tmux-p)
-    ("<backtab>" "Cycle perm mode" claude-gravity-toggle-permission-mode
-     :inapt-if-not claude-gravity--current-session-tmux-p)
     ("C" "Reset/clear" claude-gravity-reset-session
-     :inapt-if-not claude-gravity--current-session-tmux-p)
-    ("K" "Stop session" claude-gravity-stop-session
-     :inapt-if-not claude-gravity--current-session-tmux-p)
-    ("E" "Send Escape" claude-gravity-send-escape
      :inapt-if-not claude-gravity--current-session-tmux-p)]
    ["Manage"
     ("D" "Remove ended" claude-gravity-cleanup-sessions)
@@ -1121,24 +1140,20 @@ summary.  Otherwise expands the last turn and its last cycle."
 
 
 ;; Keybindings for session commands
-(define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-compose-prompt)
-
+;; Unified keys dispatch to the correct backend (daemon or tmux)
+(define-key claude-gravity-mode-map (kbd "N") 'claude-gravity-daemon-start-session)  ; Cloud
+(define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)          ; tmux
+(define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-unified-compose)
+(define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-unified-resume)
+(define-key claude-gravity-mode-map (kbd "K") 'claude-gravity-unified-stop)
+(define-key claude-gravity-mode-map (kbd "E") 'claude-gravity-unified-interrupt)
+(define-key claude-gravity-mode-map (kbd "m") 'claude-gravity-daemon-set-model)
+;; Tmux-only
 (define-key claude-gravity-mode-map (kbd "/") 'claude-gravity-slash-command)
-
-(define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)
-
-(define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-resume-session)
-
 (define-key claude-gravity-mode-map (kbd "C") 'claude-gravity-reset-session)
-
 (define-key claude-gravity-mode-map (kbd "$") 'claude-gravity-terminal-session)
-
 (define-key claude-gravity-mode-map (kbd "<backtab>") 'claude-gravity-toggle-permission-mode)
-
-(define-key claude-gravity-mode-map (kbd "E") 'claude-gravity-send-escape)
-
-(define-key claude-gravity-mode-map (kbd "K") 'claude-gravity-stop-session)
-
+;; Other
 (define-key claude-gravity-mode-map (kbd "M") 'claude-gravity-debug-show)
 
 (provide 'claude-gravity-ui)
