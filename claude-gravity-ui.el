@@ -49,13 +49,14 @@ Returns nil if neither is available."
 
 (defun claude-gravity--source-indicator (session)
   "Return propertized source indicator for SESSION.
-Shows ☁ for Claude Code sessions, [OC] for OpenCode."
-  (let ((source (plist-get session :source)))
+Shows 🖥 for tmux sessions, [OC] for OpenCode, nothing for plain Claude Code."
+  (let ((source (plist-get session :source))
+        (sid (plist-get session :session-id)))
     (cond
      ((equal source "opencode")
       (propertize "[OC]" 'face 'claude-gravity-detail-label))
-     ((equal source "claude-code")
-      (propertize "☁" 'face 'claude-gravity-detail-label)))))
+     ((gethash sid claude-gravity--tmux-sessions)
+      (propertize "🖥" 'face 'claude-gravity-detail-label)))))
 
 
 ;;; Overview Buffer

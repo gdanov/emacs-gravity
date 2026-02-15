@@ -161,7 +161,9 @@ the model mutation API to update session state."
          (when (and source (equal source "opencode"))
            (claude-gravity--session-set-source session "opencode"
              (alist-get 'instance_port data)
-             (alist-get 'instance_dir data))))))
+             (alist-get 'instance_dir data)))
+         ;; Auto-focus the new session buffer (deferred out of process filter)
+         (run-at-time 0 nil #'claude-gravity-open-session session-id))))
 
     ("SessionEnd"
      (let ((session (claude-gravity--get-session session-id)))
