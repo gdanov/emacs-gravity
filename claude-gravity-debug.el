@@ -162,10 +162,14 @@ PARSE-ERROR is the error object (or nil)."
     (claude-gravity--debug-insert-header (length messages))
     (dolist (msg messages)
       (when (claude-gravity--debug-passes-filter msg)
-        (let ((mid (alist-get 'msg-id msg)))
+        (let ((mid (alist-get 'msg-id msg))
+              (start (point)))
           (claude-gravity--debug-insert-message msg mid)
           (when (gethash mid claude-gravity--debug-expanded)
-            (claude-gravity--debug-insert-expanded msg)))))
+            (claude-gravity--debug-insert-expanded msg))
+          ;; Extend mid property to cover expanded content too,
+          ;; so toggle-expand works when point is on payload lines
+          (put-text-property start (point) 'claude-debug-mid mid))))
     (claude-gravity--debug-insert-footer)
     (goto-char (min pos (point-max)))))
 
@@ -494,9 +498,6 @@ Shows raw hook inputs and enrichment delta.
   (setq truncate-lines t)
   (setq buffer-read-only t))
 
-(defvar-local claude-gravity--debug-bridge-expanded (make-hash-table :test 'equal)
-  "Hash table of message indices that are expanded in bridge debug buffer.")
-
 ;;; Bridge debug entry point
 
 (defun claude-gravity-debug-bridge-show ()
@@ -509,7 +510,7 @@ Shows raw hook inputs and enrichment delta.
     (with-current-buffer buf
       (unless (eq major-mode 'claude-gravity-debug-bridge-mode)
         (claude-gravity-debug-bridge-mode)
-        (setq claude-gravity--debug-bridge-expanded (make-hash-table :test 'equal)))
+        (setq claude-gravity--debug-expanded (make-hash-table :test 'equal)))
       (claude-gravity--debug-bridge-render))
     (display-buffer-in-side-window buf '((side . right) (window-width . 100)))
     (select-window (get-buffer-window buf))))
@@ -525,10 +526,12 @@ Shows raw hook inputs and enrichment delta.
     (claude-gravity--debug-bridge-insert-header (length messages))
     (dolist (msg messages)
       (when (claude-gravity--debug-passes-filter msg)
-        (let ((mid (alist-get 'msg-id msg)))
+        (let ((mid (alist-get 'msg-id msg))
+              (start (point)))
           (claude-gravity--debug-insert-message msg mid)
-          (when (gethash mid claude-gravity--debug-bridge-expanded)
-            (claude-gravity--debug-bridge-insert-expanded msg)))))
+          (when (gethash mid claude-gravity--debug-expanded)
+            (claude-gravity--debug-bridge-insert-expanded msg))
+          (put-text-property start (point) 'claude-debug-mid mid))))
     (claude-gravity--debug-bridge-insert-footer)
     (goto-char (min pos (point-max)))))
 
@@ -557,25 +560,31 @@ Shows raw hook inputs and enrichment delta.
   (insert "  RET=expand  c=copy-hook-input  C=copy-enriched  f=filter  s=session  /=search  x=clear  g=refresh  q=quit\n"))
 
 (defun claude-gravity--debug-bridge-insert-expanded (msg)
-  "Insert expanded bridge view of MSG showing hook input and enrichment delta."
+  "Insert expanded bridge view of MSG showing hook input and enrichment delta.
+When hook-input is unavailable (e.g. daemon sessions), falls back to
+showing the full payload."
   (let ((hook-input (alist-get 'hook-input msg))
         (data (alist-get 'data msg)))
-    ;; Section 1: Raw hook input
-    (insert (propertize "  Hook Input (raw from Claude Code):\n"
-                        'face '(:foreground "#88aacc" :weight bold)))
     (if hook-input
-        (claude-gravity--debug-insert-json hook-input "    " 0)
-      (insert (propertize "    (not available — bridge may need rebuild)\n"
-                          'face 'font-lock-comment-face)))
-    (insert "\n")
-    ;; Section 2: Enrichment delta (keys in data but not in hook-input)
-    (insert (propertize "  Enriched (bridge added):\n"
-                        'face '(:foreground "#ccaa88" :weight bold)))
-    (let ((delta (claude-gravity--debug-compute-delta hook-input data)))
-      (if delta
-          (claude-gravity--debug-insert-json delta "    " 0)
-        (insert (propertize "    (no enrichment — identical to hook input)\n"
-                            'face 'font-lock-comment-face))))
+        (progn
+          ;; Section 1: Raw hook input
+          (insert (propertize "  Hook Input (raw from Claude Code):\n"
+                              'face '(:foreground "#88aacc" :weight bold)))
+          (claude-gravity--debug-insert-json hook-input "    " 0)
+          (insert "\n")
+          ;; Section 2: Enrichment delta (keys in data but not in hook-input)
+          (insert (propertize "  Enriched (bridge added):\n"
+                              'face '(:foreground "#ccaa88" :weight bold)))
+          (let ((delta (claude-gravity--debug-compute-delta hook-input data)))
+            (if delta
+                (claude-gravity--debug-insert-json delta "    " 0)
+              (insert (propertize "    (no enrichment — identical to hook input)\n"
+                                  'face 'font-lock-comment-face)))))
+      ;; No hook-input: show full payload
+      (insert (propertize "  Payload:\n" 'face 'claude-gravity-detail-label))
+      (if data
+          (claude-gravity--debug-insert-json data "    " 0)
+        (insert (propertize "    (no data)\n" 'face 'font-lock-comment-face))))
     (insert "\n\n")))
 
 (defun claude-gravity--debug-compute-delta (hook-input data)
@@ -608,9 +617,9 @@ Returns an alist of added/changed fields, or nil if identical."
   "Expand/collapse message at point in bridge debug buffer."
   (interactive)
   (when-let ((mid (claude-gravity--debug-mid-at-point)))
-    (if (gethash mid claude-gravity--debug-bridge-expanded)
-        (remhash mid claude-gravity--debug-bridge-expanded)
-      (puthash mid t claude-gravity--debug-bridge-expanded))
+    (if (gethash mid claude-gravity--debug-expanded)
+        (remhash mid claude-gravity--debug-expanded)
+      (puthash mid t claude-gravity--debug-expanded))
     (claude-gravity--debug-bridge-render)))
 
 (defun claude-gravity-debug-bridge-copy-hook-input ()
