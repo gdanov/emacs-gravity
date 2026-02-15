@@ -921,6 +921,7 @@ Returns a list from most specific to most general, with nils removed."
     ("s" "Compose prompt" claude-gravity-unified-compose
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("r" "Resume session" claude-gravity-unified-resume)
+    ("w" "Resume (picker)" claude-gravity-resume-in-tmux)
     ("K" "Stop session" claude-gravity-unified-stop
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("E" "Interrupt" claude-gravity-unified-interrupt
@@ -1154,6 +1155,7 @@ summary.  Otherwise expands the last turn and its last cycle."
 (define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)          ; tmux
 (define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-unified-compose)
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-unified-resume)
+(define-key claude-gravity-mode-map (kbd "w") 'claude-gravity-resume-in-tmux)
 (define-key claude-gravity-mode-map (kbd "K") 'claude-gravity-unified-stop)
 (define-key claude-gravity-mode-map (kbd "E") 'claude-gravity-unified-interrupt)
 (define-key claude-gravity-mode-map (kbd "m") 'claude-gravity-set-model)

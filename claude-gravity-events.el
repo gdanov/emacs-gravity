@@ -11,6 +11,11 @@
 (defvar claude-gravity--tmux-pending)
 (defvar claude-gravity--daemon-pending)
 (defvar claude-gravity--daemon-sessions)
+(defvar claude-gravity--resume-picker-buffer)
+(defvar claude-gravity--resume-picker-tmux)
+(defvar claude-gravity--resume-picker-init-seen nil
+  "Non-nil after the init SessionStart from the resume picker has been seen.")
+(declare-function claude-gravity--bury-resume-picker "claude-gravity-tmux")
 (declare-function claude-gravity--handle-tool-permission "claude-gravity-socket")
 (declare-function claude-gravity--handle-ask-user-question "claude-gravity-socket")
 (declare-function claude-gravity--handle-plan-review "claude-gravity-socket")
@@ -121,6 +126,12 @@ the model mutation API to update session state."
             (tmux-name (and temp-id (gethash temp-id claude-gravity--tmux-pending))))
        (when tmux-name
          (remhash temp-id claude-gravity--tmux-pending)
+         ;; Resume picker: the init SessionStart (source=startup) consumes
+         ;; the pending entry, but the real SessionStart (source=resume)
+         ;; needs it too.  Re-register so the second re-key works.
+         (when (and claude-gravity--resume-picker-buffer
+                    (equal (alist-get 'source data) "startup"))
+           (puthash temp-id tmux-name claude-gravity--tmux-pending))
          (let ((temp-session (gethash temp-id claude-gravity--sessions)))
            (when temp-session
              ;; Re-key session from temp-id to real session-id
@@ -163,8 +174,22 @@ the model mutation API to update session state."
            (claude-gravity--session-set-source session "opencode"
              (alist-get 'instance_port data)
              (alist-get 'instance_dir data)))
-         ;; Auto-focus the new session buffer (deferred out of process filter)
-         (run-at-time 0 nil #'claude-gravity-open-session session-id))))
+         ;; Auto-focus the new session buffer (deferred out of process filter).
+         ;; Resume picker flow fires two SessionStarts:
+         ;;   1. source="startup" — init before picker UI, suppress
+         ;;   2. source="resume"  — user picked a session, bury picker + open
+         (cond
+          ((and claude-gravity--resume-picker-buffer
+                (equal (alist-get 'source data) "startup"))
+           ;; Init SessionStart — suppress auto-focus, picker is showing
+           nil)
+          (claude-gravity--resume-picker-buffer
+           ;; Real resumed session — bury picker and open gravity buffer
+           (run-at-time 0 nil #'claude-gravity--bury-resume-picker)
+           (run-at-time 0.1 nil #'claude-gravity-open-session session-id))
+          (t
+           ;; Normal SessionStart — open session buffer
+           (run-at-time 0 nil #'claude-gravity-open-session session-id))))))
 
     ("SessionEnd"
      (let ((session (claude-gravity--get-session session-id)))

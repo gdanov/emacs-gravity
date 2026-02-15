@@ -47,6 +47,42 @@
   (= 0 (call-process "tmux" nil nil nil "has-session" "-t" tmux-name)))
 
 
+(defun claude-gravity--attach-tmux-terminal (buf-name tmux-name)
+  "Create a terminal buffer BUF-NAME attached to tmux session TMUX-NAME.
+Uses the backend from `claude-gravity-terminal-backend' (vterm, eat, or term).
+Returns the buffer.  Does NOT display the buffer — caller should switch/pop."
+  (pcase claude-gravity-terminal-backend
+    ('vterm
+     (unless (fboundp 'vterm-mode)
+       (error "vterm not available; install emacs-libvterm or set `claude-gravity-terminal-backend' to `eat' or `term'"))
+     ;; vterm-mode reads vterm-shell to start the process.
+     ;; We let-bind it and create the buffer + mode manually
+     ;; to avoid vterm's own pop-to-buffer logic.
+     (let* ((vterm-shell (format "tmux attach-session -t %s"
+                                 (shell-quote-argument tmux-name)))
+            (buf (get-buffer-create buf-name)))
+       (with-current-buffer buf
+         (unless (derived-mode-p 'vterm-mode)
+           (vterm-mode)))
+       buf))
+    ('eat
+     (unless (fboundp 'eat-make)
+       (error "eat not available; install eat package or set `claude-gravity-terminal-backend' to `vterm' or `term'"))
+     (let ((buf (eat-make buf-name "tmux" nil "attach-session" "-t" tmux-name)))
+       (with-current-buffer buf
+         (when (fboundp 'eat-char-mode)
+           (eat-char-mode)))
+       buf))
+    (_
+     (let ((buf (make-term (if (string-prefix-p "*" buf-name)
+                               (substring buf-name 1 -1)
+                             buf-name)
+                           "tmux" nil "attach-session" "-t" tmux-name)))
+       (with-current-buffer buf
+         (term-char-mode))
+       buf))))
+
+
 (defun claude-gravity--tmux-send-keys (tmux-name text)
   "Send TEXT to tmux session TMUX-NAME, then press Enter.
 For multi-line text, uses tmux load-buffer/paste-buffer to avoid
@@ -645,11 +681,93 @@ Uses a single `tmux list-sessions' call instead of N `has-session' calls."
                 (process-live-p (get-buffer-process existing)))
           (switch-to-buffer existing)
         (when existing (kill-buffer existing))
-        (let ((buf (make-term (substring buf-name 1 -1)
-                              "tmux" nil "attach-session" "-t" tmux-name)))
-          (with-current-buffer buf
-            (term-char-mode))
-          (switch-to-buffer buf))))))
+        (switch-to-buffer
+         (claude-gravity--attach-tmux-terminal buf-name tmux-name))))))
+
+
+(defvar claude-gravity--resume-picker-buffer nil
+  "Buffer showing the interactive `claude --resume` picker.
+Buried when the user picks a session (second SessionStart).")
+
+(defvar claude-gravity--resume-picker-tmux nil
+  "Tmux session name for the active resume picker.")
+
+(defvar claude-gravity--resume-picker-init-seen nil
+  "Non-nil after the init SessionStart from the resume picker.")
+
+
+(defun claude-gravity-resume-in-tmux (&optional cwd)
+  "Resume a Claude session via the interactive session picker.
+Starts `claude --resume` (no session ID) in a tmux session with all
+managed-session params, then attaches via `term-mode' so the user
+can use arrow keys to select a session.
+
+The terminal buffer stays alive after session selection — it becomes
+the terminal view of the running session (like `$').  The gravity
+session buffer opens alongside it automatically via SessionStart."
+  (interactive
+   (list (read-directory-name "Project directory: " default-directory)))
+  (claude-gravity--tmux-check)
+  (claude-gravity--ensure-server)
+  (setq cwd (claude-gravity--normalize-cwd (or cwd default-directory)))
+  (let* ((temp-id (format "tmux-%s" (format-time-string "%s%3N")))
+         (tmux-name (format "claude-resume-%s" temp-id))
+         (plugin-root (file-name-directory
+                       (or load-file-name
+                           (locate-library "claude-gravity")
+                           (error "Cannot locate claude-gravity.el"))))
+         (sl-parts (claude-gravity--statusline-parts plugin-root))
+         (cmd-parts `("env"
+                      ,(format "CLAUDE_GRAVITY_TEMP_ID=%s" temp-id)
+                      ,@(car sl-parts)
+                      "claude" "--resume"
+                      ,@(claude-gravity--plugin-dirs plugin-root))))
+    (when (cdr sl-parts)
+      (setq cmd-parts (append cmd-parts (cdr sl-parts))))
+    (let ((result (apply #'call-process "tmux" nil nil nil
+                         "new-session" "-d" "-s" tmux-name
+                         "-c" cwd
+                         cmd-parts)))
+      (unless (= result 0)
+        (error "Failed to create tmux session %s" tmux-name))
+      ;; Register pending re-key so SessionStart hooks can find this.
+      ;; NOTE: `claude --resume` fires SessionStart immediately during init
+      ;; (before picker).  That first SessionStart creates a session that
+      ;; gets replaced when the user picks.  We still need the pending
+      ;; entry so the re-key mechanism can track the tmux mapping.
+      (puthash temp-id tmux-name claude-gravity--tmux-pending)
+      (claude-gravity--tmux-ensure-heartbeat)
+      ;; Attach via terminal emulator so user can interact with the picker.
+      ;; The buffer stays alive — it becomes the terminal view of
+      ;; the resumed session after selection.
+      (let* ((buf-name "*Claude Resume Picker*")
+             (existing (get-buffer buf-name)))
+        (when existing (kill-buffer existing))
+        (let ((buf (claude-gravity--attach-tmux-terminal buf-name tmux-name)))
+          (setq claude-gravity--resume-picker-buffer buf
+                claude-gravity--resume-picker-tmux tmux-name
+                claude-gravity--resume-picker-init-seen nil)
+          (switch-to-buffer buf)))
+      (claude-gravity--log 'debug "Resume picker started in tmux %s" tmux-name)
+      temp-id)))
+
+
+(defun claude-gravity--bury-resume-picker ()
+  "Bury the resume picker terminal buffer if it exists.
+Called from SessionStart handler after the init SessionStart that fires
+before the picker.  Only buries — does not kill, since the buffer
+becomes the terminal view of the running session."
+  (when (and claude-gravity--resume-picker-buffer
+             (buffer-live-p claude-gravity--resume-picker-buffer))
+    (let ((buf claude-gravity--resume-picker-buffer))
+      (setq claude-gravity--resume-picker-buffer nil
+            claude-gravity--resume-picker-tmux nil
+            claude-gravity--resume-picker-init-seen nil)
+      (let ((win (get-buffer-window buf t)))
+        (when win
+          (if (one-window-p nil (window-frame win))
+              (bury-buffer buf)
+            (delete-window win)))))))
 
 
 (defun claude-gravity--recover-tmux-sessions ()

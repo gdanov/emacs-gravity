@@ -36,6 +36,18 @@ Manual refresh with \\`g' always fires immediately."
   :group 'claude-gravity)
 
 
+(defcustom claude-gravity-terminal-backend 'vterm
+  "Terminal emulator for tmux session attachment.
+Used by the resume picker and the terminal view (`$').
+`vterm' -- best TUI rendering (requires emacs-libvterm).
+`eat'   -- good TUI rendering (requires eat package).
+`term'  -- built-in term.el (basic VT100, may distort Ink TUIs)."
+  :type '(choice (const :tag "vterm (recommended)" vterm)
+                 (const :tag "eat" eat)
+                 (const :tag "term (built-in)" term))
+  :group 'claude-gravity)
+
+
 (defcustom claude-gravity-diff-max-lines 30
   "Maximum number of lines to show in inline Edit diffs.
 Diffs longer than this are truncated with an ellipsis indicator."
