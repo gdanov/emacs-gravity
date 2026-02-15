@@ -139,9 +139,7 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
                            (error "Cannot locate claude-gravity.el for --plugin-dir"))))
          (sl-parts (claude-gravity--statusline-parts plugin-root))
          (cmd-parts `("env"
-											"DUMMY=true"
                       ,(format "CLAUDE_GRAVITY_TEMP_ID=%s" temp-id)
-											;;"TERM=dumb"
                       ,@(car sl-parts)
                       "claude" ,@(claude-gravity--plugin-dirs plugin-root))))
     (when model
@@ -202,7 +200,7 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
                            (locate-library "claude-gravity")
                            (error "Cannot locate claude-gravity.el for --plugin-dir"))))
          (sl-parts (claude-gravity--statusline-parts plugin-root))
-         (cmd-parts `("env" "TERM=dumb"
+         (cmd-parts `("env"
                       ,(format "CLAUDE_GRAVITY_TEMP_ID=%s" temp-id)
                       ,@(car sl-parts)
                       "claude" "--resume" ,session-id
@@ -399,6 +397,8 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
 
 
 (declare-function claude-gravity-daemon-compose-send "claude-gravity-daemon")
+(declare-function claude-gravity--current-session-daemon-p "claude-gravity-daemon")
+(declare-function claude-gravity-daemon-set-permission-mode "claude-gravity-daemon")
 
 (defun claude-gravity-compose-send ()
   "Send the composed prompt and close the compose buffer."
@@ -710,6 +710,26 @@ cycle will re-key the session automatically."
       (error "Tmux session %s is not running" tmux-name))
     (claude-gravity--tmux-send-keys tmux-name "/clear")
     (claude-gravity--log 'debug "Sent /clear to Claude [%s]" sid)))
+
+(defun claude-gravity-toggle-permission-mode ()
+  "Cycle permission mode for the managed session at point.
+Cycle order: default -> auto-edit -> plan -> default."
+  (interactive)
+  (let* ((sid (or claude-gravity--buffer-session-id
+               (let ((section (magit-current-section)))
+                 (when (and section (eq (oref section type) 'session-entry))
+                   (oref section value)))))
+         (session (and sid (claude-gravity--get-session sid)))
+         (current (or (and session (plist-get session :permission-mode)) "default"))
+         (cycle '("default" "auto-edit" "plan"))
+         (cur-idx (or (seq-position cycle current #'string=) 0))
+         (next-mode (nth (mod (1+ cur-idx) 3) cycle)))
+    (cond
+     ((claude-gravity--current-session-tmux-p)
+      (claude-gravity-tmux-set-permission-mode next-mode sid))
+     ((claude-gravity--current-session-daemon-p)
+      (claude-gravity-daemon-set-permission-mode next-mode sid))
+     (t (user-error "No managed session at point")))))
 
 (provide 'claude-gravity-tmux)
 ;;; claude-gravity-tmux.el ends here

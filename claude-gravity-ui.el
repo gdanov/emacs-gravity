@@ -12,6 +12,7 @@
 (declare-function claude-gravity--write-allow-pattern-for-tool "claude-gravity-socket")
 (declare-function claude-gravity--send-permission-response "claude-gravity-socket")
 (declare-function claude-gravity--current-session-tmux-p "claude-gravity-tmux")
+(declare-function claude-gravity-toggle-permission-mode "claude-gravity-tmux")
 (declare-function claude-gravity--current-session-daemon-p "claude-gravity-daemon")
 (declare-function claude-gravity-daemon-start-session "claude-gravity-daemon")
 (declare-function claude-gravity-daemon-resume-session "claude-gravity-daemon")
@@ -914,7 +915,6 @@ Returns a list from most specific to most general, with nils removed."
     ("V" "Open transcript" claude-gravity-open-agent-transcript)
     ("M" "Debug messages" claude-gravity-debug-show)]
    ["Sessions"
-    ("L" "Login (Cloud)" claude-gravity-daemon-login)
     ("N" "Start (Cloud)" claude-gravity-daemon-start-session)
     ("S" "Start (tmux)" claude-gravity-start-session)
     ("s" "Compose prompt" claude-gravity-unified-compose
@@ -1150,7 +1150,8 @@ summary.  Otherwise expands the last turn and its last cycle."
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-unified-resume)
 (define-key claude-gravity-mode-map (kbd "K") 'claude-gravity-unified-stop)
 (define-key claude-gravity-mode-map (kbd "E") 'claude-gravity-unified-interrupt)
-(define-key claude-gravity-mode-map (kbd "m") 'claude-gravity-daemon-set-model)
+(define-key claude-gravity-mode-map (kbd "m") 'claude-gravity-set-model)
+(define-key claude-gravity-mode-map (kbd "p") 'claude-gravity-set-permission-mode)
 ;; Tmux-only
 (define-key claude-gravity-mode-map (kbd "/") 'claude-gravity-slash-command)
 (define-key claude-gravity-mode-map (kbd "C") 'claude-gravity-reset-session)
