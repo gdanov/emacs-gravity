@@ -1,13 +1,44 @@
+// ON HOLD (2026-02): Agent SDK requires pay-per-use API key.
+// Using Max/Pro subscription is against Anthropic TOS. See ARCHITECTURE.md.
+//
 // Main daemon entry point.
 // Long-running Node.js process that manages SDK sessions.
 // Listens on a command socket for Emacs commands, forwards events to Emacs via the gravity socket.
 
 import { createServer, createConnection, Server, Socket } from "net";
-import { unlinkSync, existsSync } from "fs";
+import { unlinkSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
+import { homedir } from "os";
 import { log, setLogLevel, setLogFile } from "./log";
 import { DaemonSession, DaemonSessionOptions, SendEventFn, SendAndWaitFn } from "./daemon-session";
 import { createDaemonHooks, createCanUseTool, clearAgents } from "./daemon-hooks";
+
+// ============================================================================
+// Authentication — API key resolution
+// ============================================================================
+// Priority: 1) ANTHROPIC_API_KEY env var (set by Emacs override)
+//           2) Config file: ~/.claude/gravity-config.json { "anthropic_api_key": "..." }
+//           3) Not set → sessions will fail with auth error
+
+function loadApiKey(): string | undefined {
+  // 1. Environment variable (Emacs override or shell profile)
+  if (process.env.ANTHROPIC_API_KEY) {
+    return process.env.ANTHROPIC_API_KEY;
+  }
+  // 2. Config file
+  const configPath = join(homedir(), ".claude", "gravity-config.json");
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, "utf-8"));
+      if (config.anthropic_api_key) {
+        return config.anthropic_api_key;
+      }
+    } catch (e: any) {
+      log(`[daemon] Failed to read config ${configPath}: ${e.message}`, "error");
+    }
+  }
+  return undefined;
+}
 
 // ============================================================================
 // Socket path resolution
@@ -356,6 +387,18 @@ function main(): void {
   log(`[daemon] PID: ${process.pid}`, 'info');
   log(`[daemon] Gravity socket: ${getGravitySocketPath()}`, 'info');
   log(`[daemon] Command socket: ${getCommandSocketPath()}`, 'info');
+
+  // Resolve API key and inject into process.env so daemon-session picks it up
+  const hadEnvKey = !!process.env.ANTHROPIC_API_KEY;
+  const apiKey = loadApiKey();
+  if (apiKey) {
+    process.env.ANTHROPIC_API_KEY = apiKey;
+    const source = hadEnvKey ? "env/emacs" : "config file";
+    log(`[daemon] ANTHROPIC_API_KEY: set (${apiKey.length} chars, source: ${source})`, 'info');
+  } else {
+    log("[daemon] WARNING: ANTHROPIC_API_KEY not set — SDK sessions will fail to authenticate", 'error');
+    log("[daemon] Set ANTHROPIC_API_KEY env var or create ~/.claude/gravity-config.json with {\"anthropic_api_key\": \"sk-ant-...\"}", 'error');
+  }
 
   startCommandServer();
 }

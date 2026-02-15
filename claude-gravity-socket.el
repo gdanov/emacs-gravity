@@ -302,6 +302,8 @@ Each entry is an alist with keys: line, text, overlay, context.")
 
 (define-key claude-gravity-plan-review-mode-map (kbd "C-c C-g") #'claude-gravity-plan-review-toggle-margins)
 
+(define-key claude-gravity-plan-review-mode-map (kbd "m") #'maximize-window)
+
 
 (transient-define-prefix claude-gravity-plan-review-menu ()
   "Plan review commands."
@@ -311,7 +313,8 @@ Each entry is an alist with keys: line, text, overlay, context.")
   ["Annotate"
    ("C-c ;" "Inline comment" claude-gravity-plan-review-comment)
    ("C-c C-d" "Show diff" claude-gravity-plan-review-diff)
-   ("C-c C-g" "Toggle revision gutter" claude-gravity-plan-review-toggle-margins)])
+   ("C-c C-g" "Toggle revision gutter" claude-gravity-plan-review-toggle-margins)
+   ("m" "Maximize window" maximize-window)])
 
 
 (define-minor-mode claude-gravity-plan-review-mode
@@ -359,12 +362,14 @@ TID the tool_use_id for updating prompts."
                            (match-string 1 answer)
                          answer)))
     ;; Build deny response with the answer
+    ;; Include top-level 'answer' for OpenCode bridge extraction
     (let ((response `((hookSpecificOutput
                        . ((hookEventName . "PreToolUse")
                           (permissionDecision . "deny")
                           (permissionDecisionReason
                            . ,(format "User answered from Emacs: %s\nQuestion: %s\nAnswer: %s"
-                                      answer-label (or q-text "") answer-label)))))))
+                                      answer-label (or q-text "") answer-label))))
+                      (answer . ,answer-label))))
       (claude-gravity--send-bidirectional-response proc response))
     ;; Update the prompt entry with the answer
     (let ((session (claude-gravity--get-session session-id)))

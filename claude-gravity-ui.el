@@ -914,6 +914,7 @@ Returns a list from most specific to most general, with nils removed."
     ("V" "Open transcript" claude-gravity-open-agent-transcript)
     ("M" "Debug messages" claude-gravity-debug-show)]
    ["Sessions"
+    ("L" "Login (Cloud)" claude-gravity-daemon-login)
     ("N" "Start (Cloud)" claude-gravity-daemon-start-session)
     ("S" "Start (tmux)" claude-gravity-start-session)
     ("s" "Compose prompt" claude-gravity-unified-compose

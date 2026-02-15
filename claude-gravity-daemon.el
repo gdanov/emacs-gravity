@@ -1,4 +1,6 @@
 ;;; claude-gravity-daemon.el --- SDK Daemon session management for Claude Gravity  -*- lexical-binding: t; -*-
+;; ON HOLD (2026-02): Agent SDK requires pay-per-use API key.
+;; Using Max/Pro subscription is against Anthropic TOS. See ARCHITECTURE.md.
 
 ;;; Code:
 
@@ -55,6 +57,25 @@
 
 
 ;;; ============================================================================
+;;; Authentication
+;;; ============================================================================
+;;; The Agent SDK requires an API key (ANTHROPIC_API_KEY), NOT OAuth/keychain.
+;;; Key lookup order:
+;;;   1. Emacs override: `claude-gravity-daemon-api-key' defcustom
+;;;   2. Bridge config:  ~/.claude/gravity-config.json  {"anthropic_api_key": "..."}
+;;;   3. Environment:    ANTHROPIC_API_KEY env var
+;;; See https://platform.claude.com/docs/en/agent-sdk/overview
+
+(defcustom claude-gravity-daemon-api-key nil
+  "Anthropic API key for daemon SDK sessions (overrides config file).
+If nil, the daemon reads from ~/.claude/gravity-config.json or
+ANTHROPIC_API_KEY env var.  Get a key from https://platform.claude.com/."
+  :type '(choice (const :tag "Use config file / env var" nil)
+                 (string :tag "API key"))
+  :group 'claude-gravity)
+
+
+;;; ============================================================================
 ;;; Daemon lifecycle
 ;;; ============================================================================
 
@@ -76,23 +97,32 @@ SDK hook events and streaming text to Emacs via the gravity socket."
              (process-live-p claude-gravity--daemon-process))
     (user-error "Daemon is already running"))
   (claude-gravity--ensure-server)
-  (let ((daemon-js (claude-gravity--daemon-js-path)))
+  (let ((daemon-js (claude-gravity--daemon-js-path))
+        (api-key (or claude-gravity-daemon-api-key
+                     (getenv "ANTHROPIC_API_KEY"))))
     (unless (file-exists-p daemon-js)
       (error "Daemon not built: %s not found.  Run `cd emacs-bridge && npm run build'" daemon-js))
-    (setq claude-gravity--daemon-ready nil
-          claude-gravity--daemon-socket-path nil
-          claude-gravity--daemon-process
-          (make-process
-           :name "gravity-daemon"
-           :command (list "node" daemon-js)
-           :buffer (get-buffer-create " *gravity-daemon*")
-           :filter #'claude-gravity--daemon-process-filter
-           :sentinel #'claude-gravity--daemon-process-sentinel
-           :coding 'utf-8
-           :noquery t
-           :connection-type 'pipe))
-    (claude-gravity--log 'info "Daemon starting (PID %s)"
-                         (process-id claude-gravity--daemon-process))))
+    ;; If Emacs has the key (defcustom or env), pass it to the daemon process.
+    ;; Otherwise the daemon reads from ~/.claude/gravity-config.json.
+    (let ((process-environment
+           (if api-key
+               (cons (format "ANTHROPIC_API_KEY=%s" api-key)
+                     process-environment)
+             process-environment)))
+      (setq claude-gravity--daemon-ready nil
+            claude-gravity--daemon-socket-path nil
+            claude-gravity--daemon-process
+            (make-process
+             :name "gravity-daemon"
+             :command (list "node" daemon-js)
+             :buffer (get-buffer-create " *gravity-daemon*")
+             :filter #'claude-gravity--daemon-process-filter
+             :sentinel #'claude-gravity--daemon-process-sentinel
+             :coding 'utf-8
+             :noquery t
+             :connection-type 'pipe))
+      (claude-gravity--log 'info "Daemon starting (PID %s)"
+                           (process-id claude-gravity--daemon-process)))))
 
 
 (defun claude-gravity--daemon-process-filter (proc string)

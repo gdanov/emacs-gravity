@@ -549,11 +549,17 @@ the model mutation API to update session state."
                                   (cons 'post_text nil)
                                   (cons 'post_thinking nil))))
                        (claude-gravity-model-add-tool session new-tool nil nil)))))))
-             ("text"
-              ;; Assistant text — store as streaming text for live display
-              (let ((text (alist-get 'text data)))
-                (when (and text (not (string-empty-p text)))
-                  (claude-gravity-model-append-streaming-text session text)))))))))
+("text"
+               (let ((text (alist-get 'text data))
+                     (msg-role (alist-get 'message_role data)))
+                 (when (and text (not (string-empty-p text)))
+                   (if (equal msg-role "user")
+                       (claude-gravity-model-update-prompt-text session text)
+                     (claude-gravity-model-append-streaming-text session text)))))
+              ("reasoning"
+               (let ((text (alist-get 'text data)))
+                 (when (and text (not (string-empty-p text)))
+                   (claude-gravity-model-append-streaming-text session text)))))))))
 
     ;; NOTE: No duplicate "UserPromptSubmit" clause here — OC source is set
     ;; via the pre-pcase source check (lines 70-74) and the original handler.
@@ -564,6 +570,12 @@ the model mutation API to update session state."
      (let ((session (claude-gravity--get-session session-id)))
        (when session
          (claude-gravity-model-set-claude-status session 'responding)
+         ;; Extract model name from model_id
+         (let ((model-id (alist-get 'model_id data)))
+           (when (and model-id (stringp model-id) (not (string-empty-p model-id)))
+             (plist-put session :model-id model-id)
+             (plist-put session :model-name
+                        (or (claude-gravity--short-model-name model-id) model-id))))
          ;; Store cost/token data
          (let ((cost (alist-get 'cost data))
                (tokens (alist-get 'tokens data)))

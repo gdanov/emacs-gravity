@@ -608,6 +608,19 @@ Optionally store STOP-TEXT and STOP-THINKING."
                                            (alist-get 'submitted p)))))))))
 
 
+(defun claude-gravity-model-update-prompt-text (session text)
+  "Update the current turn's prompt text in SESSION with TEXT.
+Used by OpenCode bridge to fill in user prompt text after UserPromptSubmit."
+  (let ((turn-node (claude-gravity--current-turn-node session)))
+    (when turn-node
+      (let ((prompt (alist-get 'prompt turn-node)))
+        (when prompt
+          (if (alist-get 'text prompt)
+              (setf (alist-get 'text prompt)
+                    (concat (alist-get 'text prompt) text))
+            (setf (alist-get 'text prompt) text)))))))
+
+
 (defun claude-gravity-model-add-tool (session tool agent-id candidate-ids)
   "Add TOOL to SESSION's turn tree, routing based on AGENT-ID.
 AGENT-ID can be a string (definitive agent), \"ambiguous\", or nil (root).

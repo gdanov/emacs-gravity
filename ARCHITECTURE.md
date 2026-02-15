@@ -204,6 +204,11 @@ Agent transcripts are stored in "sidechain" format (separate files):
 - Hooks adapter: existing hook system forwards events to model API
 - Both adapters write to same model, allowing dual operation
 
+**Daemon Bridge (ON HOLD — 2026-02):** Agent SDK daemon (`daemon.ts`, `daemon-session.ts`)
+- Long-running Node.js process managing SDK sessions via `@anthropic-ai/claude-agent-sdk`
+- **BLOCKED**: The Agent SDK requires a pay-per-use API key. Using Claude Max/Pro subscription with the SDK violates Anthropic's TOS and risks account ban. See [#6536](https://github.com/anthropics/claude-code/issues/6536), [#5891](https://github.com/anthropics/claude-code/issues/5891).
+- Code exists but is not usable without separate API billing. Revisit if Anthropic changes policy.
+
 **Phase 3 (Backlog):** Hooks-free mode
 - Remove dependency on Claude Code hooks
 - Run Claude Code entirely via managed process (eat-terminal)

@@ -574,5 +574,6 @@ C-c C-c  Approve plan (auto-denies if feedback detected)
 C-c C-k  Deny plan with feedback
 C-c C-d  Show diff vs original
 c        Add inline comment on current line
+m        Maximize window
 ```
 

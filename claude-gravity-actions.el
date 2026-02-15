@@ -391,12 +391,14 @@ Does not approve/deny — just writes the pattern to settings.local.json."
          (tid (alist-get 'tool_use_id data))
          (session-id (alist-get 'session-id item)))
     ;; Send deny response with the answer
+    ;; Include top-level 'answer' for OpenCode bridge extraction
     (let ((response `((hookSpecificOutput
                        . ((hookEventName . "PreToolUse")
                           (permissionDecision . "deny")
                           (permissionDecisionReason
                            . ,(format "User answered from Emacs: %s\nQuestion: %s\nAnswer: %s"
-                                      answer-label (or q-text "") answer-label)))))))
+                                      answer-label (or q-text "") answer-label))))
+                      (answer . ,answer-label))))
       (claude-gravity--send-bidirectional-response proc response))
     ;; Update prompt entry with answer
     (let ((session (claude-gravity--get-session session-id)))

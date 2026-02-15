@@ -2,6 +2,12 @@
 
 > **See also:** @/Users/gdanov/work/playground/emacs-gravity/ARCHITECTURE.md for system architecture overview and module structure.
 
+## WARNING: Agent SDK Authentication (2026-02)
+
+**The Claude Agent SDK requires a pay-per-use API key (`ANTHROPIC_API_KEY`) from console.anthropic.com. Using a Claude Max/Pro subscription with the Agent SDK is against Anthropic's Terms of Service and may result in account ban.** See [GitHub issue #6536](https://github.com/anthropics/claude-code/issues/6536) and [Anthropic's statement on #5891](https://github.com/anthropics/claude-code/issues/5891). The daemon bridge (`daemon.ts`, `daemon-session.ts`) is **ON HOLD** until a viable auth path exists.
+
+The CLI approach (`claude -p`) uses subscription auth and remains viable.
+
 ## TL;DR
 
 Emacs can fully control a Claude Code session by spawning `claude -p --input-format stream-json --output-format stream-json` as a subprocess. Multi-turn prompts via JSON on stdin, structured responses on stdout, all hooks fire normally so gravity UI works. Can `--resume <session-id>` to take over an existing terminal session.

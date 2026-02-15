@@ -1,7 +1,10 @@
+// ON HOLD (2026-02): Agent SDK requires pay-per-use API key.
+// Using Max/Pro subscription is against Anthropic TOS. See ARCHITECTURE.md.
+//
 // Per-session SDK wrapper for the daemon.
 // Manages the prompt queue, SDK query lifecycle, and message forwarding.
 
-import type { Query, SDKMessage, SDKUserMessage, SDKSystemMessage, SDKResultMessage, SDKPartialAssistantMessage, SDKAssistantMessage, Options, PermissionResult, HookEvent, HookCallbackMatcher } from "@anthropic-ai/claude-agent-sdk";
+import type { Query, SDKMessage, SDKUserMessage, SDKSystemMessage, SDKResultMessage, SDKPartialAssistantMessage, SDKAssistantMessage, SDKAuthStatusMessage, Options, PermissionResult, HookEvent, HookCallbackMatcher } from "@anthropic-ai/claude-agent-sdk";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { log } from "./log";
 
@@ -118,6 +121,18 @@ export class DaemonSession {
     this.running = true;
     log(`[daemon-session] Starting session ${this.tempId} in ${this.cwd}`, 'info');
 
+    // Build a clean env for the SDK subprocess:
+    // - Remove CLAUDECODE to avoid "cannot launch inside another CC" error
+    // - ANTHROPIC_API_KEY must be set (SDK requires API key auth, pay-per-use)
+    //   NOTE: Using Max/Pro subscription with the SDK is against Anthropic TOS.
+    //   See https://github.com/anthropics/claude-code/issues/5891
+    const cleanEnv: Record<string, string | undefined> = { ...process.env };
+    delete cleanEnv.CLAUDECODE;
+
+    if (!cleanEnv.ANTHROPIC_API_KEY) {
+      log("[daemon-session] WARNING: ANTHROPIC_API_KEY not set — SDK sessions will fail to authenticate", "error");
+    }
+
     const queryOpts: Options = {
       cwd: this.cwd,
       abortController: this.abortController,
@@ -125,8 +140,8 @@ export class DaemonSession {
       systemPrompt: { type: "preset", preset: "claude_code" },
       tools: { type: "preset", preset: "claude_code" },
       includePartialMessages: true,
-      // Do NOT load the emacs-bridge plugin — we handle hooks natively
-    };
+      env: cleanEnv,
+    } as any;
 
     if (opts.model) queryOpts.model = opts.model;
     if (opts.permissionMode) queryOpts.permissionMode = opts.permissionMode as any;
@@ -237,6 +252,9 @@ export class DaemonSession {
           session_id: this.sessionId,
         });
         break;
+      case "auth_status":
+        await this.handleAuthStatus(msg as SDKAuthStatusMessage);
+        break;
       default:
         log(`[daemon-session] Unhandled message type: ${msg.type}`, 'debug');
     }
@@ -291,6 +309,11 @@ export class DaemonSession {
 
   private async handleResult(msg: SDKResultMessage): Promise<void> {
     const isSuccess = msg.subtype === "success";
+    if (!isSuccess) {
+      log(`[daemon-session] Result ERROR for ${this.sessionId}: subtype=${msg.subtype} is_error=${msg.is_error} errors=${JSON.stringify((msg as any).errors)}`, 'error');
+    } else {
+      log(`[daemon-session] Result OK for ${this.sessionId}: turns=${msg.num_turns} cost=$${msg.total_cost_usd}`, 'info');
+    }
     await this.sendEvent("DaemonResult", this.sessionId, this.cwd, null, {
       session_id: this.sessionId,
       subtype: msg.subtype,
@@ -301,6 +324,16 @@ export class DaemonSession {
       usage: msg.usage,
       result: isSuccess ? (msg as any).result : undefined,
       errors: !isSuccess ? (msg as any).errors : undefined,
+    });
+  }
+
+  private async handleAuthStatus(msg: SDKAuthStatusMessage): Promise<void> {
+    log(`[daemon-session] auth_status: authenticating=${msg.isAuthenticating} error=${msg.error || "none"}`, 'info');
+    await this.sendEvent("DaemonAuthStatus", this.sessionId, this.cwd, null, {
+      session_id: this.sessionId,
+      is_authenticating: msg.isAuthenticating,
+      output: msg.output,
+      error: msg.error,
     });
   }
 }

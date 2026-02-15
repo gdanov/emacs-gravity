@@ -1,3 +1,6 @@
+// ON HOLD (2026-02): Agent SDK requires pay-per-use API key.
+// Using Max/Pro subscription is against Anthropic TOS. See ARCHITECTURE.md.
+//
 // Hook callback factory for daemon sessions.
 // Creates SDK hook callbacks that forward events to Emacs via the gravity socket.
 // Uses enrichment.ts for transcript data extraction.

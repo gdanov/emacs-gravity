@@ -38,11 +38,11 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pa
 
     client.on("connect", () => {
       log("Connected to socket");
-      const msg: any = { 
-        event: eventName, 
-        session_id: sessionId, 
-        cwd: cwd, 
-        source: "opencode", 
+      const msg: any = {
+        event: eventName,
+        session_id: sessionId,
+        cwd: cwd,
+        source: "opencode",
         data: {
           ...payload,
           instance_port: instancePort,
@@ -66,6 +66,162 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pa
   });
 }
 
+async function sendBidirectional(eventName: string, sessionId: string, cwd: string, payload: any, instancePort?: number, instanceDir?: string): Promise<any> {
+  const socketPath = getSocketPath();
+  log(`Sending bidirectional event: ${eventName} session: ${sessionId} to ${socketPath}`);
+
+  return new Promise<any>((resolve) => {
+    const client = createConnection(socketPath);
+    let responseBuffer = '';
+    let resolved = false;
+
+    const finish = (result: any) => {
+      if (!resolved) {
+        resolved = true;
+        resolve(result);
+        client.end();
+      }
+    };
+
+    client.on("connect", () => {
+      log("Connected to socket (bidirectional)");
+      const msg: any = {
+        event: eventName,
+        session_id: sessionId,
+        cwd: cwd,
+        source: "opencode",
+        needs_response: true,
+        data: {
+          ...payload,
+          instance_port: instancePort,
+          instance_dir: instanceDir,
+        }
+      };
+      log(`Full message (bidirectional): ${JSON.stringify(msg)}`, 'info');
+      client.write(JSON.stringify(msg) + "\n");
+      // Keep socket open — wait for response from Emacs
+    });
+
+    client.on("data", (chunk) => {
+      responseBuffer += chunk.toString();
+      const newlineIdx = responseBuffer.indexOf('\n');
+      if (newlineIdx >= 0) {
+        const line = responseBuffer.substring(0, newlineIdx);
+        try {
+          const response = JSON.parse(line);
+          log(`Received bidirectional response: ${JSON.stringify(response)}`, 'info');
+          finish(response);
+        } catch (e) {
+          log(`Failed to parse bidirectional response: ${e}`, 'error');
+          finish(null);
+        }
+      }
+    });
+
+    client.on("error", (err) => {
+      log(`Socket error (bidirectional): ${err.message}`, 'error');
+      finish(null);
+    });
+
+    client.on("close", () => {
+      finish(null);
+    });
+
+    // Timeout: 96 hours (match Claude Code's PermissionRequest timeout)
+    setTimeout(() => {
+      log(`Bidirectional timeout for ${eventName}`, 'warn');
+      finish(null);
+    }, 96 * 60 * 60 * 1000);
+  });
+}
+
+/**
+ * Translate Emacs permission response (Claude Code format) to OpenCode format,
+ * then POST to OpenCode's permission reply API.
+ */
+export async function respondToPermission(port: number, directory: string, permissionId: string, emacsResponse: any): Promise<void> {
+  const decision = emacsResponse?.hookSpecificOutput?.decision;
+  if (!decision) {
+    log('No decision in Emacs response for permission', 'warn');
+    return;
+  }
+
+  const behavior = decision.behavior; // "allow" or "deny"
+  const updatedPerms = decision.updatedPermissions;
+
+  // Map to OpenCode format: "once" (allow), "always" (allow+remember), "reject" (deny)
+  let ocResponse: string;
+  if (behavior === 'allow') {
+    ocResponse = updatedPerms ? 'always' : 'once';
+  } else {
+    ocResponse = 'reject';
+  }
+
+  try {
+    const url = `http://localhost:${port}/permission/${encodeURIComponent(permissionId)}/reply?directory=${encodeURIComponent(directory)}`;
+    log(`Posting permission reply: ${ocResponse} to ${url}`, 'info');
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ocResponse),
+    });
+    if (!response.ok) {
+      log(`Permission reply failed: ${response.status} ${response.statusText}`, 'error');
+    } else {
+      log(`Permission ${permissionId} → ${ocResponse}`, 'info');
+    }
+  } catch (e) {
+    log(`Failed to post permission reply: ${e}`, 'error');
+  }
+}
+
+/**
+ * Translate Emacs question response to OpenCode format,
+ * then POST to OpenCode's question reply/reject API.
+ */
+export async function respondToQuestion(port: number, directory: string, questionId: string, emacsResponse: any): Promise<void> {
+  // Check if it's a reject (no answer provided)
+  const answer = emacsResponse?.answer;
+  const hookOutput = emacsResponse?.hookSpecificOutput;
+
+  if (!answer && hookOutput) {
+    // No structured answer — might be a reject
+    try {
+      const url = `http://localhost:${port}/question/${encodeURIComponent(questionId)}/reject?directory=${encodeURIComponent(directory)}`;
+      log(`Posting question reject to ${url}`, 'info');
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!response.ok) {
+        log(`Question reject failed: ${response.status} ${response.statusText}`, 'error');
+      }
+    } catch (e) {
+      log(`Failed to post question reject: ${e}`, 'error');
+    }
+    return;
+  }
+
+  if (answer) {
+    try {
+      const url = `http://localhost:${port}/question/${encodeURIComponent(questionId)}/reply?directory=${encodeURIComponent(directory)}`;
+      log(`Posting question reply: ${answer} to ${url}`, 'info');
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answers: [answer] }),
+      });
+      if (!response.ok) {
+        log(`Question reply failed: ${response.status} ${response.statusText}`, 'error');
+      } else {
+        log(`Question ${questionId} → ${answer}`, 'info');
+      }
+    } catch (e) {
+      log(`Failed to post question reply: ${e}`, 'error');
+    }
+  }
+}
+
 interface OpenCodeInstance {
   port: number;
   directory: string;
@@ -76,6 +232,7 @@ interface OpenCodeInstance {
 const instances = new Map<number, OpenCodeInstance>();
 let bonjour: Bonjour | null = null;
 let browser: Browser | null = null;
+const messageRoles = new Map<string, string>();
 
 async function fetchJson(url: string): Promise<any> {
   const response = await fetch(url);
@@ -117,11 +274,13 @@ async function getVcsInfo(port: number, directory: string): Promise<{ branch?: s
 
 export function mapOpenCodeEventToGravity(event: any, instancePort: number, instanceDir: string): { event: string; sessionId: string; cwd: string; data: any } | null {
   const type = event.type;
+  if (!type) return null;
   const props = event.properties || {};
 
   switch (type) {
     case 'session.created': {
       const session = props.info;
+      if (!session) return null;
       return {
         event: 'SessionStart',
         sessionId: session.id,
@@ -177,13 +336,17 @@ export function mapOpenCodeEventToGravity(event: any, instancePort: number, inst
       if (!message) return null;
 
       const sessionId = message.sessionID;
+      const messageId = message.id;
+      if (message.role) {
+        messageRoles.set(messageId, message.role);
+      }
       if (message.role === 'user') {
         return {
           event: 'UserPromptSubmit',
           sessionId,
           cwd: instanceDir,
           data: {
-            message_id: message.id,
+            message_id: messageId,
             agent: message.agent,
             model: message.model,
             tools: message.tools,
@@ -196,7 +359,7 @@ export function mapOpenCodeEventToGravity(event: any, instancePort: number, inst
           sessionId,
           cwd: instanceDir,
           data: {
-            message_id: message.id,
+            message_id: messageId,
             parent_id: message.parentID,
             model_id: message.modelID,
             provider_id: message.providerID,
@@ -215,12 +378,15 @@ export function mapOpenCodeEventToGravity(event: any, instancePort: number, inst
       if (!part) return null;
 
       const sessionId = part.sessionID;
+      const messageId = part.messageID;
+      const messageRole = messageRoles.get(messageId);
       return {
         event: 'MessagePart',
         sessionId,
         cwd: instanceDir,
         data: {
-          message_id: part.messageID,
+          message_id: messageId,
+          message_role: messageRole,
           part_id: part.id,
           part_type: part.type,
           text: part.text,
@@ -241,6 +407,9 @@ export function mapOpenCodeEventToGravity(event: any, instancePort: number, inst
         cwd: instanceDir,
         data: {
           permission_id: props.id,
+          // Flattened fields for Emacs dispatch compatibility (expects tool_name/tool_input at root)
+          tool_name: props.tool?.name,
+          tool_input: props.tool?.input,
           permission: props.permission,
           patterns: props.patterns,
           metadata: props.metadata,
@@ -257,6 +426,9 @@ export function mapOpenCodeEventToGravity(event: any, instancePort: number, inst
         cwd: instanceDir,
         data: {
           question_id: props.id,
+          // Flattened fields for Emacs dispatch compatibility
+          tool_name: 'AskUserQuestion',
+          tool_input: { questions: props.questions },
           questions: props.questions,
           tool: props.tool,
         },
@@ -347,8 +519,26 @@ async function subscribeToEvents(instance: OpenCodeInstance) {
 
           const mapped = mapOpenCodeEventToGravity(event, port, directory);
           if (mapped) {
-            log(`Sending event: ${mapped.event} for session: ${mapped.sessionId}`, 'info');
-            await sendToEmacs(mapped.event, mapped.sessionId, mapped.cwd, mapped.data, port, directory);
+            if (mapped.event === 'PermissionRequest' || mapped.event === 'AskUserQuestion') {
+              // Bidirectional: send to Emacs, wait for response, post back to OpenCode
+              log(`Sending bidirectional event: ${mapped.event} for session: ${mapped.sessionId}`, 'info');
+              const emacsResponse = await sendBidirectional(
+                mapped.event, mapped.sessionId, mapped.cwd, mapped.data, port, directory
+              );
+              if (emacsResponse) {
+                if (mapped.event === 'PermissionRequest') {
+                  await respondToPermission(port, directory, mapped.data.permission_id, emacsResponse);
+                } else {
+                  await respondToQuestion(port, directory, mapped.data.question_id, emacsResponse);
+                }
+              } else {
+                log(`No response from Emacs for ${mapped.event}`, 'warn');
+              }
+            } else {
+              // Fire-and-forget
+              log(`Sending event: ${mapped.event} for session: ${mapped.sessionId}`, 'info');
+              await sendToEmacs(mapped.event, mapped.sessionId, mapped.cwd, mapped.data, port, directory);
+            }
           } else {
             log(`No mapping for event: ${event.type}`, 'debug');
           }
