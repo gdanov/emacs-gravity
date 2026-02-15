@@ -3,3 +3,4 @@ emacs-bridge/node_modules
 emacs-bridge-agents.json
 .claude/
 */.claude/
+/.opencode/
