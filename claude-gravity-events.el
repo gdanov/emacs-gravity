@@ -14,7 +14,6 @@
 (declare-function claude-gravity--handle-tool-permission "claude-gravity-socket")
 (declare-function claude-gravity--handle-ask-user-question "claude-gravity-socket")
 (declare-function claude-gravity--handle-plan-review "claude-gravity-socket")
-(declare-function claude-gravity--update-notification-indicator "claude-gravity-socket")
 (declare-function claude-gravity--clear-notification-indicator "claude-gravity-socket")
 (declare-function claude-gravity--tmux-ensure-heartbeat "claude-gravity-tmux")
 (declare-function claude-gravity--tmux-alive-p "claude-gravity-tmux")
@@ -606,23 +605,10 @@ the model mutation API to update session state."
              (plist-put session :slug slug))))))
 
     ("Notification"
-     (let* ((session (claude-gravity--get-session session-id))
-            (msg (or (alist-get 'message data) ""))
-            (ntype (alist-get 'notification_type data))
-            (label (if session
-                       (claude-gravity--session-label session)
-                     (claude-gravity--session-short-id session-id))))
-       (when session
-         (claude-gravity-model-add-notification
-          session (list (cons 'message msg)
-                        (cons 'type ntype)
-                        (cons 'timestamp (current-time))))
-         ;; Handle reset/clear
-         (when (string-match-p "\\(?:reset\\|clear\\)" msg)
-           (claude-gravity--reset-session session))
-         ;; Update mode-line indicator
-         (claude-gravity--update-notification-indicator ntype label))
-       (claude-gravity--log 'debug "Claude [%s]: %s" label msg)))
+     ;; Ignored — no visible UI effect, avoids wasted re-render.
+     (claude-gravity--log 'debug "Notification [%s]: %s"
+                          (claude-gravity--session-short-id session-id)
+                          (or (alist-get 'message data) "")))
 
     ;; ── Daemon-specific events ──────────────────────────────────────────
 

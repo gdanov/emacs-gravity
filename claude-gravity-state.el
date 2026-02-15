@@ -698,11 +698,6 @@ PROPS is a plist with optional keys:
           (setf (alist-get 'stop_thinking agent) sth))))))
 
 
-(defun claude-gravity-model-add-notification (session notif)
-  "Append NOTIF alist to SESSION's :notifications list."
-  (plist-put session :notifications
-             (nconc (plist-get session :notifications) (list notif))))
-
 
 (defun claude-gravity--session-has-tool-p (session tool-use-id)
   "Return non-nil if TOOL-USE-ID exists anywhere in SESSION's tools."
