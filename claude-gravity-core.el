@@ -27,7 +27,7 @@ nil -- no override; use the global statusline from settings.json."
   :group 'claude-gravity)
 
 
-(defcustom claude-gravity-refresh-interval 1.0
+(defcustom claude-gravity-refresh-interval 0.3
   "Idle-time debounce interval (seconds) for UI refreshes.
 Lower values give snappier updates but cost more CPU when multiple
 sessions are active.  A value of 1.0 gives roughly 1 fps.

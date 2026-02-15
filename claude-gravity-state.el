@@ -56,16 +56,20 @@ Returns the new item."
     (push item claude-gravity--inbox)
     (claude-gravity--inbox-notify item)
     (claude-gravity--schedule-refresh)
+    (claude-gravity--schedule-session-refresh session-id)
     item))
 
 
 (defun claude-gravity--inbox-remove (id)
-  "Remove inbox item with ID.  Schedules overview refresh."
-  (setq claude-gravity--inbox
-        (cl-remove-if (lambda (item) (eq (alist-get 'id item) id))
-                      claude-gravity--inbox))
-  (claude-gravity--update-inbox-indicator)
-  (claude-gravity--schedule-refresh))
+  "Remove inbox item with ID.  Schedules overview and session refresh."
+  (let ((item (claude-gravity--inbox-find id)))
+    (setq claude-gravity--inbox
+          (cl-remove-if (lambda (it) (eq (alist-get 'id it) id))
+                        claude-gravity--inbox))
+    (claude-gravity--update-inbox-indicator)
+    (claude-gravity--schedule-refresh)
+    (when-let ((sid (and item (alist-get 'session-id item))))
+      (claude-gravity--schedule-session-refresh sid))))
 
 
 (defun claude-gravity--inbox-remove-for-session (session-id &optional type)
@@ -77,7 +81,8 @@ Returns the new item."
                                  (eq (alist-get 'type item) type))))
                       claude-gravity--inbox))
   (claude-gravity--update-inbox-indicator)
-  (claude-gravity--schedule-refresh))
+  (claude-gravity--schedule-refresh)
+  (claude-gravity--schedule-session-refresh session-id))
 
 
 (defun claude-gravity--inbox-find (id)
