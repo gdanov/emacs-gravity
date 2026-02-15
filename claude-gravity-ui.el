@@ -986,10 +986,15 @@ Returns a list from most specific to most general, with nils removed."
 
 
 (defun claude-gravity--process-alive-p (pid)
-  "Return non-nil if process PID is alive."
-  (condition-case nil
-      (progn (signal-process pid 0) t)
-    (error nil)))
+  "Return non-nil if process PID is alive.
+Uses `ps' on macOS where `signal-process' returns t for zombie PIDs."
+  (if (eq system-type 'darwin)
+      (string-match-p (format "^ *%d " pid)
+                      (shell-command-to-string
+                       (format "ps -p %d -o pid,state= 2>/dev/null" pid)))
+    (condition-case nil
+        (progn (signal-process pid 0) t)
+      (error nil))))
 
 
 (defun claude-gravity-detect-dead-sessions ()

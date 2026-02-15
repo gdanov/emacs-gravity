@@ -195,8 +195,9 @@ Called after server restart to recover sessions that were falsely marked ended."
   "Periodic check: restart server if dead, reconcile session liveness."
   (unless (claude-gravity-server-alive-p)
     (claude-gravity--log 'warn "Health check: server dead, restarting")
-    (claude-gravity--ensure-server)
-    (claude-gravity--reconcile-sessions))
+    (claude-gravity--ensure-server))
+  ;; Always reconcile: recover ended sessions whose PID is still alive
+  (claude-gravity--reconcile-sessions)
   ;; Always try to recover lost tmux mappings
   (claude-gravity--recover-tmux-sessions))
 

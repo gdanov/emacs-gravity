@@ -91,6 +91,11 @@ the model mutation API to update session state."
   ;; Update PID, last-event-time, and slug on every event
   (let ((existing (claude-gravity--get-session session-id)))
     (when existing
+      ;; Self-heal: if session is ended but we're receiving events, it's alive
+      (when (and (eq (plist-get existing :status) 'ended)
+                 (not (equal event "SessionEnd")))
+        (plist-put existing :status 'active)
+        (claude-gravity--log 'info "Session %s self-healed to active on %s" session-id event))
       (claude-gravity-model-update-session-meta
        existing :pid pid :slug (alist-get 'slug data)
        :branch (alist-get 'branch data))
