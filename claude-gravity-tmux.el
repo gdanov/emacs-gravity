@@ -487,19 +487,48 @@ in a read-only buffer."
               (display-buffer (current-buffer)))))))))
 
 
-(defun claude-gravity-toggle-permission-mode ()
-  "Cycle Claude Code permission mode (default → acceptEdits → plan).
-Sends Shift-Tab to the managed tmux session."
-  (interactive)
-  (let* ((sid (or claude-gravity--buffer-session-id
-                  (let ((section (magit-current-section)))
-                    (when (and section (eq (oref section type) 'session-entry))
-                      (oref section value)))))
-         (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions))))
-    (unless tmux-name
-      (user-error "No tmux session at point"))
-    (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "BTab")
-    (claude-gravity--log 'debug "Sent Shift-Tab (cycle permission mode) to %s" tmux-name)))
+(defun claude-gravity-tmux-set-model (model &optional session-id)
+  "Set MODEL for tmux session SESSION-ID via /model slash command.
+MODEL is a short name like \"sonnet\", \"opus\", or \"haiku\"."
+  (interactive
+   (list (completing-read "Model: " '("sonnet" "opus" "haiku") nil t)))
+  (let* ((resolved (claude-gravity--resolve-tmux-session session-id))
+         (sid (car resolved))
+         (tmux-name (cdr resolved))
+         (session (claude-gravity--get-session sid)))
+    (claude-gravity--tmux-send-keys tmux-name (format "/model %s" model))
+    ;; Optimistic update — corrected by next hook event if wrong
+    (when session
+      (plist-put session :model-name model)
+      (claude-gravity--schedule-refresh))
+    (claude-gravity--log 'debug "Set model %s for tmux [%s]" model sid)
+    (message "Model → %s" model)))
+
+(defun claude-gravity-tmux-set-permission-mode (mode &optional session-id)
+  "Set permission MODE for tmux session SESSION-ID by cycling Shift-Tab.
+Calculates presses needed based on tracked current mode.
+Cycle order: default → auto-edit → plan → default.
+MODE is one of \"default\", \"auto-edit\", or \"plan\"."
+  (interactive
+   (list (completing-read "Permission mode: " '("default" "auto-edit" "plan") nil t)))
+  (let* ((resolved (claude-gravity--resolve-tmux-session session-id))
+         (sid (car resolved))
+         (tmux-name (cdr resolved))
+         (session (claude-gravity--get-session sid))
+         (current (or (and session (plist-get session :permission-mode)) "default"))
+         (cycle '("default" "auto-edit" "plan"))
+         (cur-idx (or (seq-position cycle current #'string=) 0))
+         (tgt-idx (seq-position cycle mode #'string=))
+         (presses (mod (- tgt-idx cur-idx) 3)))
+    (when (> presses 0)
+      (dotimes (_ presses)
+        (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "BTab")
+        (sleep-for 0.3)))
+    (when session
+      (claude-gravity-model-set-permission-mode session mode)
+      (claude-gravity--schedule-refresh))
+    (claude-gravity--log 'debug "Set permission mode %s for tmux [%s] (%d presses)" mode sid presses)
+    (message "Permission mode → %s" mode)))
 
 
 (defun claude-gravity-send-escape ()

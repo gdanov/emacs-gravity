@@ -923,8 +923,10 @@ Returns a list from most specific to most general, with nils removed."
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("E" "Interrupt" claude-gravity-unified-interrupt
      :inapt-if-not claude-gravity--current-session-managed-p)
-    ("m" "Set model" claude-gravity-daemon-set-model
-     :inapt-if-not claude-gravity--current-session-daemon-p)
+    ("m" "Set model" claude-gravity-set-model
+     :inapt-if-not claude-gravity--current-session-managed-p)
+    ("p" "Set permission mode" claude-gravity-set-permission-mode
+     :inapt-if-not claude-gravity--current-session-managed-p)
     ""
     "Tmux-only"
     ("/" "Slash command" claude-gravity-slash-command

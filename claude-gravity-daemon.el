@@ -530,6 +530,8 @@ Returns non-nil if a daemon session was re-keyed."
 (declare-function claude-gravity-send-escape "claude-gravity-tmux")
 (declare-function claude-gravity-resume-session "claude-gravity-tmux")
 (declare-function claude-gravity--current-session-tmux-p "claude-gravity-tmux")
+(declare-function claude-gravity-tmux-set-model "claude-gravity-tmux")
+(declare-function claude-gravity-tmux-set-permission-mode "claude-gravity-tmux")
 
 (defun claude-gravity--current-session-managed-p ()
   "Return non-nil if the session at point is managed (daemon or tmux)."
@@ -589,6 +591,28 @@ SESSION-ID is the session to resume."
       (claude-gravity-daemon-resume-session session-id cwd model)
     (claude-gravity-resume-session session-id cwd model)))
 
+
+(defun claude-gravity-set-model (model)
+  "Set MODEL for the current managed session.
+Dispatches to the appropriate backend (daemon or tmux)."
+  (interactive
+   (let* ((choices '("1. opus" "2. sonnet" "3. haiku"))
+          (choice (completing-read "Model: " choices nil t))
+          (name (replace-regexp-in-string "^[0-9]+\\. " "" choice)))
+     (list name)))
+  (cond
+   ((claude-gravity--current-session-daemon-p) (claude-gravity-daemon-set-model model))
+   ((claude-gravity--current-session-tmux-p)   (claude-gravity-tmux-set-model model))
+   (t (user-error "No managed session at point"))))
+
+(defun claude-gravity-set-permission-mode (mode)
+  "Set permission MODE for the current managed session.
+Dispatches to the appropriate backend (daemon or tmux)."
+  (interactive (list (completing-read "Permission mode: " '("default" "auto-edit" "plan") nil t)))
+  (cond
+   ((claude-gravity--current-session-daemon-p) (claude-gravity-daemon-set-permission-mode mode))
+   ((claude-gravity--current-session-tmux-p)   (claude-gravity-tmux-set-permission-mode mode))
+   (t (user-error "No managed session at point"))))
 
 (provide 'claude-gravity-daemon)
 ;;; claude-gravity-daemon.el ends here
