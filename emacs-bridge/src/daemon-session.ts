@@ -284,25 +284,9 @@ export class DaemonSession {
     });
   }
 
-  private async handleStreamEvent(msg: SDKPartialAssistantMessage): Promise<void> {
-    const event = msg.event;
-    if (!event) return;
-
-    // content_block_delta with text_delta — streaming text
-    if (event.type === "content_block_delta" && "delta" in event) {
-      const delta = event.delta as any;
-      if (delta.type === "text_delta" && delta.text) {
-        await this.sendEvent("StreamDelta", this.sessionId, this.cwd, null, {
-          text: delta.text,
-          session_id: this.sessionId,
-        });
-      } else if (delta.type === "thinking_delta" && delta.thinking) {
-        await this.sendEvent("StreamDelta", this.sessionId, this.cwd, null, {
-          thinking: delta.thinking,
-          session_id: this.sessionId,
-        });
-      }
-    }
+  private async handleStreamEvent(_msg: SDKPartialAssistantMessage): Promise<void> {
+    // StreamDelta events disabled — streaming text not needed for now.
+    // Hook-based text extraction (PostToolUse/Stop) provides the content we display.
   }
 
   private async handleResult(msg: SDKResultMessage): Promise<void> {
