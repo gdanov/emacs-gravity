@@ -105,14 +105,11 @@ the model mutation API to update session state."
           (alist-get 'instance_port data)
           (alist-get 'instance_dir data)))))
   ;; Auto-dismiss stale bidirectional inbox items.
-  ;; If we receive a completion/progress event for a session that has pending
-  ;; permission/question/plan-review items, the agent has moved on (user
-  ;; handled it outside Emacs, or it timed out).  Dismiss them.
-  ;; Excludes: SessionStart (new session), PreToolUse (fires concurrently
-  ;; with PermissionRequest for the same tool), Notification (informational).
-  (when (member event '("PostToolUse" "PostToolUseFailure" "Stop"
-                         "SubagentStart" "SubagentStop" "UserPromptSubmit"
-                         "SessionEnd"))
+  ;; If a turn boundary event fires while bidirectional items are pending,
+  ;; the user handled them outside Emacs (e.g., in Claude's tmux terminal).
+  ;; Only dismiss on turn/session boundaries — mid-turn events like
+  ;; PostToolUse or SubagentStop don't mean other tools' permissions are stale.
+  (when (member event '("UserPromptSubmit" "Stop" "SessionEnd"))
     (claude-gravity--dismiss-stale-inbox-items session-id))
   (pcase event
     ("SessionStart"

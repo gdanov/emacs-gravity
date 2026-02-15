@@ -151,10 +151,11 @@ CONTEXT-LINES defaults to 3."
   "Open a permission action buffer for inbox ITEM."
   (let* ((data (alist-get 'data item))
          (label (alist-get 'label item))
+         (item-id (alist-get 'id item))
          (tool-name (alist-get 'tool_name data))
          (tool-input (alist-get 'tool_input data))
          (signature (claude-gravity--tool-signature tool-name tool-input))
-         (buf (get-buffer-create "*Claude Action: Permission*")))
+         (buf (get-buffer-create (format "*Claude Action: Permission #%d*" item-id))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -185,6 +186,7 @@ CONTEXT-LINES defaults to 3."
       (goto-char (point-min))
       (claude-gravity-permission-action-mode 1)
       (setq-local claude-gravity--action-inbox-item item))
+    (puthash item-id buf claude-gravity--inbox-action-buffers)
     (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))
     (select-window (get-buffer-window buf))))
 
@@ -193,6 +195,7 @@ CONTEXT-LINES defaults to 3."
   "Clean up after a permission action: remove inbox item, kill buffer."
   (let ((item claude-gravity--action-inbox-item))
     (when item
+      (remhash (alist-get 'id item) claude-gravity--inbox-action-buffers)
       (claude-gravity--inbox-remove (alist-get 'id item))))
   (let ((buf (current-buffer)))
     (quit-window)
@@ -349,7 +352,8 @@ Does not approve/deny — just writes the pattern to settings.local.json."
                              for opt-label = (alist-get 'label opt)
                              for desc = (alist-get 'description opt)
                              collect (cons opt-label desc))))
-         (buf (get-buffer-create "*Claude Action: Question*")))
+         (item-id (alist-get 'id item))
+         (buf (get-buffer-create (format "*Claude Action: Question #%d*" item-id))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -375,6 +379,7 @@ Does not approve/deny — just writes the pattern to settings.local.json."
       (claude-gravity-question-action-mode 1)
       (setq-local claude-gravity--action-inbox-item item)
       (setq-local claude-gravity--question-choices choices))
+    (puthash item-id buf claude-gravity--inbox-action-buffers)
     (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))
     (select-window (get-buffer-window buf))))
 
@@ -405,6 +410,7 @@ Does not approve/deny — just writes the pattern to settings.local.json."
       (when (and session tid)
         (claude-gravity-model-update-prompt-answer session tid answer-label)))
     ;; Clean up
+    (remhash (alist-get 'id item) claude-gravity--inbox-action-buffers)
     (claude-gravity--inbox-remove (alist-get 'id item))
     (let ((buf (current-buffer)))
       (quit-window)

@@ -28,6 +28,11 @@ timestamp, summary, data, socket-proc.")
   "Monotonic counter for inbox item IDs.")
 
 
+(defvar claude-gravity--inbox-action-buffers (make-hash-table :test 'eql)
+  "Map from inbox item ID to its open action buffer, if any.
+Used by dismiss logic to find and kill the correct action buffer.")
+
+
 (defun claude-gravity--inbox-add (type session-id data proc)
   "Add an inbox item of TYPE for SESSION-ID with DATA and socket PROC.
 TYPE is a symbol: permission, question, plan-review, or idle.
@@ -83,8 +88,9 @@ Returns the new item."
 
 (defun claude-gravity--dismiss-stale-inbox-items (session-id)
   "Dismiss stale bidirectional inbox items for SESSION-ID.
-A subsequent event means the agent has moved on — any pending
-permission, question, or plan-review items are no longer actionable.
+Called on turn/session boundaries (Stop, UserPromptSubmit, SessionEnd).
+When the turn has finished, any remaining pending permission/question/
+plan-review items were handled outside Emacs and are now orphaned.
 Closes the bridge socket proc and kills associated action buffers."
   (let ((stale (cl-remove-if-not
                 (lambda (item)
@@ -94,38 +100,40 @@ Closes the bridge socket proc and kills associated action buffers."
                 claude-gravity--inbox)))
     (when stale
       (dolist (item stale)
-        (let ((proc (alist-get 'socket-proc item))
-              (item-type (alist-get 'type item)))
-          ;; Close the bridge socket (it's waiting for a response)
-          (when (and proc (process-live-p proc))
-            (delete-process proc))
-          ;; Kill associated action buffers
-          (pcase item-type
-            ('permission
-             (let ((buf (get-buffer "*Claude Action: Permission*")))
-               (when (and buf (buffer-live-p buf))
-                 (kill-buffer buf))))
-            ('question
-             (let ((buf (get-buffer "*Claude Action: Question*")))
-               (when (and buf (buffer-live-p buf))
-                 (kill-buffer buf))))
-            ('plan-review
-             ;; Plan review buffers are named per session label
-             (let ((label (alist-get 'label item)))
-               (when label
-                 (let ((buf (get-buffer (format "*Claude Plan Review: %s*" label))))
-                   (when (and buf (buffer-live-p buf))
-                     ;; Remove kill-buffer hook to avoid double-send of deny
-                     (with-current-buffer buf
-                       (remove-hook 'kill-buffer-hook
-                                    #'claude-gravity--plan-review-on-kill t))
-                     (kill-buffer buf))))))))
+        (claude-gravity--dismiss-single-inbox-item item)
         (claude-gravity--log 'debug "Auto-dismissed stale %s for session %s"
                              (alist-get 'type item) session-id))
       ;; Remove all stale items from inbox
       (claude-gravity--inbox-remove-for-session session-id 'permission)
       (claude-gravity--inbox-remove-for-session session-id 'question)
       (claude-gravity--inbox-remove-for-session session-id 'plan-review))))
+
+
+(defun claude-gravity--dismiss-single-inbox-item (item)
+  "Dismiss a single inbox ITEM: close socket proc and kill action buffer."
+  (let ((proc (alist-get 'socket-proc item))
+        (item-id (alist-get 'id item))
+        (item-type (alist-get 'type item)))
+    ;; Close the bridge socket (it's waiting for a response)
+    (when (and proc (process-live-p proc))
+      (delete-process proc))
+    ;; Kill associated action buffer via hash table lookup
+    (pcase item-type
+      ((or 'permission 'question)
+       (let ((buf (gethash item-id claude-gravity--inbox-action-buffers)))
+         (when (and buf (buffer-live-p buf))
+           (kill-buffer buf))
+         (remhash item-id claude-gravity--inbox-action-buffers)))
+      ('plan-review
+       (let ((label (alist-get 'label item)))
+         (when label
+           (let ((buf (get-buffer (format "*Claude Plan Review: %s*" label))))
+             (when (and buf (buffer-live-p buf))
+               ;; Remove kill-buffer hook to avoid double-send of deny
+               (with-current-buffer buf
+                 (remove-hook 'kill-buffer-hook
+                              #'claude-gravity--plan-review-on-kill t))
+               (kill-buffer buf)))))))))
 
 
 (defun claude-gravity--inbox-summary (type data)
