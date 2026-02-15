@@ -166,11 +166,19 @@ Respects `claude-gravity--server-stopping' to avoid restarting after intentional
 
 
 (defun claude-gravity--server-sentinel (_proc event)
-  "Auto-restart server on unexpected death (not user-initiated stop).
+  "Handle process state changes for server and client connections.
 EVENT is the process status change string."
-  (claude-gravity--log 'warn "Server process event: %s" (string-trim event))
-  (unless claude-gravity--server-stopping
-    (run-at-time 1 nil #'claude-gravity--ensure-server)))
+  (let ((trimmed (string-trim event)))
+    (cond
+     ;; Client connection/disconnection — normal traffic, debug only
+     ((or (string-prefix-p "open from" trimmed)
+          (string= "connection broken by remote peer" trimmed))
+      (claude-gravity--log 'debug "Server process event: %s" trimmed))
+     ;; Unexpected server/child event — log and attempt restart
+     (t
+      (claude-gravity--log 'warn "Server process event: %s" trimmed)
+      (unless claude-gravity--server-stopping
+        (run-at-time 1 nil #'claude-gravity--ensure-server))))))
 
 
 (defun claude-gravity--reconcile-sessions ()
@@ -277,6 +285,13 @@ Each entry is an alist with keys: line, text, overlay, context.")
 
 (defvar-local claude-gravity--plan-review-inbox-id nil
   "Inbox item ID associated with this plan review buffer, if any.")
+
+
+(defvar-local claude-gravity--plan-review-session-permissions nil
+  "Permission rules to send with plan approval via updatedPermissions.
+Derived from ExitPlanMode's allowedPrompts — each unique tool name
+becomes a `toolAlwaysAllow' entry so subsequent PermissionRequests
+for those tools are auto-approved within the session.")
 
 
 (defvar-local claude-gravity--plan-review-margin-overlays nil
@@ -497,6 +512,18 @@ SESSION-ID identifies the Claude Code session."
       (setq-local claude-gravity--plan-review-proc proc)
       (setq-local claude-gravity--plan-review-original plan-content)
       (setq-local claude-gravity--plan-review-session-id session-id)
+      ;; Build session-scoped permissions from allowedPrompts tool names.
+      ;; Each unique tool becomes a toolAlwaysAllow entry so subsequent
+      ;; PermissionRequests for those tools are auto-approved.
+      (when (and allowed-prompts (> (length allowed-prompts) 0))
+        (let ((tools (delete-dups
+                      (mapcar (lambda (p) (alist-get 'tool p))
+                              (append allowed-prompts nil)))))
+          (setq-local claude-gravity--plan-review-session-permissions
+                      (vconcat
+                       (mapcar (lambda (tool)
+                                 `((type . "toolAlwaysAllow") (tool . ,tool)))
+                               tools)))))
       ;; Compute and apply revision diff margin indicators asynchronously.
       ;; Use :last-reviewed-plan (set on every review open, not just approval)
       ;; so deny-revise-resubmit flow also shows diffs.
@@ -721,14 +748,23 @@ incorporate the feedback (the allow channel cannot carry feedback)."
           (claude-gravity--plan-review-cleanup-and-close)
           (claude-gravity--enable-session-follow-mode session-id)
           (claude-gravity--log 'debug "Feedback detected — denied for revision"))
-      ;; No feedback — clean approve
-      (let ((response `((hookSpecificOutput
-                         . ((hookEventName . "PermissionRequest")
-                            (decision . ((behavior . "allow"))))))))
+      ;; No feedback — clean approve with session-scoped permissions
+      (let* ((perms claude-gravity--plan-review-session-permissions)
+             (decision (if (and perms (> (length perms) 0))
+                           `((behavior . "allow")
+                             (updatedPermissions . ,perms))
+                         `((behavior . "allow"))))
+             (response `((hookSpecificOutput
+                          . ((hookEventName . "PermissionRequest")
+                             (decision . ,decision))))))
         (claude-gravity--plan-review-send-response response))
       (claude-gravity--plan-review-cleanup-and-close)
       (claude-gravity--enable-session-follow-mode session-id)
-      (claude-gravity--log 'debug "Plan approved"))))
+      (claude-gravity--log 'debug "Plan approved%s"
+                           (if claude-gravity--plan-review-session-permissions
+                               (format " + %d session permissions"
+                                       (length claude-gravity--plan-review-session-permissions))
+                             "")))))
 
 
 (defun claude-gravity-plan-review-deny ()
