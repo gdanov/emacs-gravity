@@ -189,7 +189,7 @@ CAP is an alist with keys: name, description, scope, file-path, type."
 Used for standalone skills/agents/commands sections."
   (when caps
     (let ((indent (claude-gravity--indent)))
-      (magit-insert-section (category t)
+      (magit-insert-section (category nil t)
         (magit-insert-heading
           (format "%s%s (%d)"
                   indent
@@ -221,7 +221,7 @@ Used for standalone skills/agents/commands sections."
         ;; Skills subsection
         (when skills
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (skills t)
+            (magit-insert-section (skills nil t)
               (magit-insert-heading
                 (format "%sSkills (%d)"
                         subindent
@@ -231,7 +231,7 @@ Used for standalone skills/agents/commands sections."
         ;; Agents subsection
         (when agents
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (agents t)
+            (magit-insert-section (agents nil t)
               (magit-insert-heading
                 (format "%sAgents (%d)"
                         subindent
@@ -241,7 +241,7 @@ Used for standalone skills/agents/commands sections."
         ;; Commands subsection
         (when commands
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (commands t)
+            (magit-insert-section (commands nil t)
               (magit-insert-heading
                 (format "%sCommands (%d)"
                         subindent
@@ -251,7 +251,7 @@ Used for standalone skills/agents/commands sections."
         ;; MCP servers subsection
         (when mcp
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (mcp-section t)
+            (magit-insert-section (mcp-section nil t)
               (magit-insert-heading
                 (format "%sMCP Tools (%d)"
                         subindent
@@ -286,7 +286,7 @@ Shows plugins grouped in Plugins section, standalone categories as siblings."
             ;; Plugins section (same visual style as standalone categories)
             (when plugins
               (let ((indent (claude-gravity--indent)))
-                (magit-insert-section (category t)
+                (magit-insert-section (category nil t)
                   (magit-insert-heading
                     (format "%s%s (%d)"
                             indent
