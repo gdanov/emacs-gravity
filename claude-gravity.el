@@ -15,6 +15,7 @@
 (require 'claude-gravity-core)
 (require 'claude-gravity-faces)
 (require 'claude-gravity-session)
+(require 'claude-gravity-discovery)
 (require 'claude-gravity-state)
 (require 'claude-gravity-events)
 (require 'claude-gravity-text)

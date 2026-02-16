@@ -5,6 +5,7 @@
 (require 'claude-gravity-core)
 (require 'claude-gravity-faces)
 (require 'claude-gravity-session)
+(require 'claude-gravity-discovery)
 (require 'claude-gravity-state)
 (require 'claude-gravity-render)
 
@@ -130,6 +131,70 @@ Groups non-idle items by session and shows badge counts."
         (insert "\n")))))
 
 
+;;; Capabilities Section (Skills, Agents, Commands)
+
+(defun claude-gravity--insert-capability-entry (cap indent-extra)
+  "Insert a single capability CAP with INDENT-EXTRA spaces.
+CAP is an alist with keys: name, description, scope, file-path, type."
+  (let* ((type (alist-get 'type cap))
+         (name (alist-get 'name cap))
+         (scope (alist-get 'scope cap))
+         (desc (alist-get 'description cap))
+         (prefix (pcase type
+                   ('skill "S ")
+                   ('agent "A ")
+                   ('command "/ ")
+                   (_ "  ")))
+         (name-face (pcase type
+                      ('skill 'claude-gravity-tool-name)
+                      ('agent 'claude-gravity-tool-name)
+                      ('command 'claude-gravity-tool-signature)
+                      (_ 'default))))
+    (magit-insert-section (capability-entry cap t)
+      (magit-insert-heading
+        (format "%s%s%s  %s"
+                (make-string indent-extra ?\s)
+                (propertize prefix 'face 'claude-gravity-detail-label)
+                (propertize name 'face name-face)
+                (propertize (format "(%s)" scope)
+                            'face 'claude-gravity-detail-label)))
+      ;; Expanded content: description and file path
+      (when (and desc (not (string-empty-p desc)))
+        (insert (make-string (+ indent-extra 4) ?\s)
+                (propertize (truncate-string-to-width desc 80 nil nil t)
+                            'face 'claude-gravity-detail-label)
+                "\n"))
+      (insert (make-string (+ indent-extra 4) ?\s)
+              (propertize (format "File: %s" (alist-get 'file-path cap))
+                          'face 'claude-gravity-detail-label)
+              "\n"))))
+
+
+(defun claude-gravity--insert-project-capabilities (project-dir)
+  "Insert collapsible capabilities section for PROJECT-DIR.
+Shows skills, agents, and commands with scope labels."
+  (let ((caps (claude-gravity--discover-project-capabilities project-dir)))
+    (let ((skills (alist-get 'skills caps))
+          (agents (alist-get 'agents caps))
+          (commands (alist-get 'commands caps)))
+      (when (or skills agents commands)
+        (let* ((total (+ (length skills) (length agents) (length commands)))
+               (indent (claude-gravity--indent)))
+          (magit-insert-section (project-capabilities project-dir t)
+            (magit-insert-heading
+              (format "%s%s"
+                      indent
+                      (propertize (format "Skills & Agents (%d)" total)
+                                  'face 'claude-gravity-section-heading)))
+            (let ((inner-indent (+ (length indent) 2)))
+              (dolist (s skills)
+                (claude-gravity--insert-capability-entry s inner-indent))
+              (dolist (a agents)
+                (claude-gravity--insert-capability-entry a inner-indent))
+              (dolist (c commands)
+                (claude-gravity--insert-capability-entry c inner-indent)))))))))
+
+
 (defun claude-gravity--render-overview ()
   "Render the overview buffer with all sessions grouped by project."
   (let ((buf (get-buffer claude-gravity-buffer-name)))
@@ -167,6 +232,10 @@ Groups non-idle items by session and shows badge counts."
                  (magit-insert-section (project proj-name t)
                    (magit-insert-heading
                      (format "%s (%d)" proj-name (length sessions)))
+                   ;; Project capabilities (skills, agents, commands)
+                   (let ((proj-cwd (plist-get (car sessions) :cwd)))
+                     (when proj-cwd
+                       (claude-gravity--insert-project-capabilities proj-cwd)))
                    (dolist (session (sort sessions
                                          (lambda (a b)
                                            (time-less-p (plist-get b :start-time)
@@ -602,6 +671,8 @@ Only shows permission, question, and plan-review items (not idle)."
 
 (define-key claude-gravity-mode-map (kbd "f") 'claude-gravity-follow-mode)
 
+(define-key claude-gravity-mode-map (kbd "e") 'claude-gravity-edit-entry)
+
 (define-key claude-gravity-mode-map (kbd "b") 'claude-gravity-switch-session)
 
 (define-key claude-gravity-mode-map (kbd "k") 'claude-gravity-inbox-dismiss)
@@ -791,6 +862,20 @@ On an agent, parse transcript.  Otherwise toggle."
      (t (magit-section-toggle section)))))
 
 
+(defun claude-gravity-edit-entry ()
+  "Open definition file for skill/agent/command at point."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (when section
+      (if (eq (oref section type) 'capability-entry)
+          (let* ((cap (oref section value))
+                 (file-path (alist-get 'file-path cap)))
+            (if (and file-path (file-exists-p file-path))
+                (find-file file-path)
+              (message "No file path for this entry")))
+        (message "No editable entry at point")))))
+
+
 (defun claude-gravity-refresh ()
   "Refresh the current buffer."
   (interactive)
@@ -957,6 +1042,7 @@ Returns a list from most specific to most general, with nils removed."
     ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]]
   ["Navigation"
    ("b" "Switch session" claude-gravity-switch-session)
+   ("e" "Edit entry" claude-gravity-edit-entry)
    ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)
    ("TAB" "Toggle section" magit-section-toggle)
    ("k" "Dismiss inbox item" claude-gravity-inbox-dismiss)])
