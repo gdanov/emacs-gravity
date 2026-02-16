@@ -25,6 +25,8 @@
 (declare-function claude-gravity--plan-revision-diff "claude-gravity-diff")
 (declare-function claude-gravity--plan-review-apply-margin-indicators "claude-gravity-diff")
 (declare-function claude-gravity--daemon-rekey-session "claude-gravity-daemon")
+(declare-function claude-gravity--send-prompt-core "claude-gravity-tmux")
+(declare-function claude-gravity--soft-rekey-session "claude-gravity-session")
 
 
 ;;; Event handling
@@ -133,27 +135,47 @@ the model mutation API to update session state."
                     (equal (alist-get 'source data) "startup"))
            (puthash temp-id tmux-name claude-gravity--tmux-pending))
          (let ((temp-session (gethash temp-id claude-gravity--sessions)))
-           (when temp-session
-             ;; Re-key session from temp-id to real session-id
-             (remhash temp-id claude-gravity--sessions)
-             (plist-put temp-session :session-id session-id)
-             (plist-put temp-session :temp-id temp-id)
-             (puthash session-id temp-session claude-gravity--sessions)
-             ;; Register tmux mapping under real session-id
-             (puthash session-id tmux-name claude-gravity--tmux-sessions)
-             ;; Rename buffer
-             (let ((old-buf (plist-get temp-session :buffer)))
-               (when (and old-buf (buffer-live-p old-buf))
-                 (let ((new-name (claude-gravity--session-buffer-name temp-session)))
-                   (with-current-buffer old-buf
-                     (rename-buffer new-name t)
-                     (setq claude-gravity--buffer-session-id session-id)))))
-             ;; Reset conversational state (essential for /clear re-keying)
-             (claude-gravity--reset-session temp-session)
-             ;; Apply slug now — the pre-pcase update at lines 57-60 missed it
-             ;; because the session was still keyed under temp-id at that point.
-             (claude-gravity-model-update-session-meta
-              temp-session :pid pid :slug (alist-get 'slug data))))))
+           (if temp-session
+               (progn
+                 ;; Re-key session from temp-id to real session-id
+                 (remhash temp-id claude-gravity--sessions)
+                 (plist-put temp-session :session-id session-id)
+                 (plist-put temp-session :temp-id temp-id)
+                 (puthash session-id temp-session claude-gravity--sessions)
+                 ;; Register tmux mapping under real session-id
+                 (puthash session-id tmux-name claude-gravity--tmux-sessions)
+                 ;; Rename buffer
+                 (let ((old-buf (plist-get temp-session :buffer)))
+                   (when (and old-buf (buffer-live-p old-buf))
+                     (let ((new-name (claude-gravity--session-buffer-name temp-session)))
+                       (with-current-buffer old-buf
+                         (rename-buffer new-name t)
+                         (setq claude-gravity--buffer-session-id session-id)))))
+                 ;; Clear-and-proceed: preserve turns/tools/agents, just re-key identity.
+                 ;; Normal /clear: full state reset.
+                 (if (plist-get temp-session :awaiting-clear)
+                     (let ((plan-path (plist-get temp-session :clear-plan-path)))
+                       (claude-gravity--soft-rekey-session temp-session session-id)
+                       ;; Auto-send implementation prompt via tmux
+                       (when (and tmux-name plan-path)
+                         (run-at-time 2 nil
+                           (lambda ()
+                             (when (claude-gravity--tmux-alive-p tmux-name)
+                               (claude-gravity--send-prompt-core
+                                (format "Implement the plan in @%s" plan-path)
+                                session-id tmux-name))))))
+                   (claude-gravity--reset-session temp-session))
+                 ;; Apply slug now — the pre-pcase update missed it
+                 ;; because the session was still keyed under temp-id.
+                 (claude-gravity-model-update-session-meta
+                  temp-session :pid pid :slug (alist-get 'slug data)))
+             ;; resume-in-tmux fallback: tmux-pending entry found but no
+             ;; session stored under temp-id.  Set :temp-id on the real
+             ;; session so SessionEnd can re-key it on /clear.
+             (let ((real-session (or (claude-gravity--get-session session-id)
+                                     (claude-gravity--ensure-session session-id cwd))))
+               (plist-put real-session :temp-id temp-id)
+               (puthash session-id tmux-name claude-gravity--tmux-sessions))))))
      ;; Re-key daemon pending session (same pattern as tmux above)
      (let ((temp-id (alist-get 'temp_id data)))
        (when (and temp-id
@@ -194,7 +216,10 @@ the model mutation API to update session state."
     ("SessionEnd"
      (let ((session (claude-gravity--get-session session-id)))
        (when session
-         (claude-gravity-model-session-end session)
+         ;; Clear-and-proceed: suppress session-end marking so the session
+         ;; stays active.  The /clear re-key path below still fires.
+         (unless (plist-get session :awaiting-clear)
+           (claude-gravity-model-session-end session))
          ;; If tmux process is still alive, this is a /clear — preserve mapping
          ;; for SessionStart re-keying.  Otherwise clean up.
          (let ((tmux-name (gethash session-id claude-gravity--tmux-sessions)))
@@ -299,7 +324,25 @@ the model mutation API to update session state."
                            (truncate-string-to-width
                             (replace-regexp-in-string "\n" " " stop-text) 80))))
            (claude-gravity--inbox-add 'idle session-id
-                                      `((turn . ,turn) (snippet . ,snippet)) nil)))))
+                                      `((turn . ,turn) (snippet . ,snippet)) nil))
+         ;; Clear-and-proceed: Claude finished its turn, now send /clear
+         (when (plist-get session :awaiting-clear)
+           (let ((tmux-name (gethash session-id claude-gravity--tmux-sessions)))
+             (when (and tmux-name (claude-gravity--tmux-alive-p tmux-name))
+               (claude-gravity--log 'info "Clear-and-proceed: sending /clear to %s" tmux-name)
+               ;; Escape aborts any lingering autocomplete, then /clear
+               (run-at-time 0.5 nil
+                 (lambda ()
+                   (call-process "tmux" nil nil nil
+                                 "send-keys" "-t" tmux-name "Escape")
+                   (run-at-time 1 nil
+                     (lambda ()
+                       (call-process "tmux" nil nil nil
+                                     "send-keys" "-t" tmux-name "-l" "/clear")
+                       (run-at-time 2 nil
+                         (lambda ()
+                           (call-process "tmux" nil nil nil
+                                         "send-keys" "-t" tmux-name "Enter")))))))))))))
 
     ("SubagentStart"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -422,7 +465,11 @@ the model mutation API to update session state."
              (claude-gravity-model-set-plan
               session (list :content plan-content
                             :file-path file-path
-                            :allowed-prompts (append allowed-prompts nil)))))
+                            :allowed-prompts (append allowed-prompts nil))))
+           ;; Clear-and-proceed: plan file path is only available now
+           ;; (PostToolUse response), not at PermissionRequest time.
+           (when (and file-path (plist-get session :awaiting-clear))
+             (plist-put session :clear-plan-path file-path)))
          ;; Advance turn — plan approval is a phase boundary
          (claude-gravity-model-add-prompt
           session (list (cons 'text "[Plan approved]")

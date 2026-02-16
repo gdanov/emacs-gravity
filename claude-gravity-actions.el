@@ -161,6 +161,13 @@ CONTEXT-LINES defaults to 3."
         (erase-buffer)
         (insert (propertize (format "Permission Request — %s\n" label)
                             'face 'claude-gravity-header-title))
+        ;; Actions at top — immediately visible even with large tool bodies
+        (insert (propertize "  a" 'face 'claude-gravity-tool-name) " Allow  "
+                (propertize "  A" 'face 'claude-gravity-tool-name) " Allow always  "
+                (propertize "  S" 'face 'claude-gravity-tool-name) " Session allow  "
+                (propertize "  d" 'face 'claude-gravity-tool-name) " Deny  "
+                (propertize "  p" 'face 'claude-gravity-tool-name) " Add pattern  "
+                (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n")
         (insert (make-string 60 ?─) "\n\n")
         (insert (propertize "Tool: " 'face 'claude-gravity-detail-label)
                 (propertize signature 'face 'claude-gravity-tool-name) "\n\n")
@@ -174,14 +181,7 @@ CONTEXT-LINES defaults to 3."
            (t
             (insert (propertize "Input:\n" 'face 'claude-gravity-detail-label))
             (let ((json-encoding-pretty-print t))
-              (insert (json-encode tool-input) "\n\n")))))
-        (insert (make-string 60 ?─) "\n")
-        (insert (propertize "  a" 'face 'claude-gravity-tool-name) " Allow  "
-                (propertize "  A" 'face 'claude-gravity-tool-name) " Allow always  "
-                (propertize "  S" 'face 'claude-gravity-tool-name) " Session allow  "
-                (propertize "  d" 'face 'claude-gravity-tool-name) " Deny  "
-                (propertize "  p" 'face 'claude-gravity-tool-name) " Add pattern  "
-                (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n"))
+              (insert (json-encode tool-input) "\n\n"))))))
       (setq buffer-read-only t)
       (goto-char (point-min))
       (claude-gravity-permission-action-mode 1)

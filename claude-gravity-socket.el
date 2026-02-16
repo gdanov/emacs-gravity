@@ -19,6 +19,8 @@
 (declare-function claude-gravity--inbox-act-idle "claude-gravity-actions")
 (declare-function claude-gravity--debug-capture-message "claude-gravity-debug")
 (declare-function claude-gravity--recover-tmux-sessions "claude-gravity-tmux")
+(declare-function claude-gravity--tmux-alive-p "claude-gravity-tmux")
+(defvar claude-gravity--tmux-sessions)
 (defvar claude-gravity--debug-messages-enabled)
 
 
@@ -318,6 +320,8 @@ for those tools are auto-approved within the session.")
 
 (define-key claude-gravity-plan-review-mode-map (kbd "C-c C-g") #'claude-gravity-plan-review-toggle-margins)
 
+(define-key claude-gravity-plan-review-mode-map (kbd "C-c C-l") #'claude-gravity-plan-review-approve-and-clear)
+
 (define-key claude-gravity-plan-review-mode-map (kbd "m") #'maximize-window)
 
 
@@ -325,6 +329,7 @@ for those tools are auto-approved within the session.")
   "Plan review commands."
   ["Review"
    ("C-c C-c" "Approve plan" claude-gravity-plan-review-approve)
+   ("C-c C-l" "Approve + clear & proceed" claude-gravity-plan-review-approve-and-clear)
    ("C-c C-k" "Deny with feedback" claude-gravity-plan-review-deny)]
   ["Annotate"
    ("C-c ;" "Inline comment" claude-gravity-plan-review-comment)
@@ -765,6 +770,98 @@ incorporate the feedback (the allow channel cannot carry feedback)."
                                (format " + %d session permissions"
                                        (length claude-gravity--plan-review-session-permissions))
                              "")))))
+
+
+(defun claude-gravity-plan-review-approve-and-clear ()
+  "Approve the plan, then clear context and re-prompt with plan reference.
+Sends allow (with permissions), persists allowedPrompts to settings.local.json
+so they survive the session boundary, sets :awaiting-clear on the session,
+then waits for the Stop event to trigger /clear via tmux.
+
+After /clear re-keys the session (preserving all turns/tools), auto-sends
+an implementation prompt referencing the plan file."
+  (interactive)
+  (let* ((session-id claude-gravity--plan-review-session-id)
+         (session (claude-gravity--get-session session-id))
+         (perms claude-gravity--plan-review-session-permissions))
+    (unless session
+      (user-error "No session found for %s" session-id))
+    (unless (gethash session-id claude-gravity--tmux-sessions)
+      (user-error "Clear-and-proceed requires a tmux session"))
+    ;; 1. Send allow response (with session-scoped permissions)
+    (let* ((decision (if (and perms (> (length perms) 0))
+                         `((behavior . "allow")
+                           (updatedPermissions . ,perms))
+                       `((behavior . "allow"))))
+           (response `((hookSpecificOutput
+                        . ((hookEventName . "PermissionRequest")
+                           (decision . ,decision))))))
+      (claude-gravity--plan-review-send-response response))
+    ;; 2. Persist allowedPrompts to settings.local.json (survives /clear)
+    (let ((cwd (plist-get session :cwd)))
+      (when cwd
+        (claude-gravity--persist-allowed-prompts
+         claude-gravity--plan-review-original session-id cwd)))
+    ;; 3. Store plan file path and set awaiting-clear flag
+    (let ((plan (plist-get session :plan)))
+      (plist-put session :clear-plan-path
+                 (when plan (plist-get plan :file-path))))
+    (plist-put session :awaiting-clear t)
+    ;; 4. Timeout safety: cancel after 2 minutes if /clear never completes
+    (plist-put session :clear-timeout
+               (run-at-time 120 nil
+                 (lambda ()
+                   (when (plist-get session :awaiting-clear)
+                     (plist-put session :awaiting-clear nil)
+                     (plist-put session :clear-timeout nil)
+                     (claude-gravity--log 'warn
+                       "Clear-and-proceed timed out for %s" session-id)))))
+    ;; 5. Cleanup
+    (claude-gravity--plan-review-cleanup-and-close)
+    (claude-gravity--enable-session-follow-mode session-id)
+    (claude-gravity--log 'info
+      "Plan approved + clear-and-proceed armed for %s" session-id)))
+
+
+(defun claude-gravity--persist-allowed-prompts (plan-content session-id cwd)
+  "Persist plan's allowedPrompts as allow patterns in settings.local.json.
+PLAN-CONTENT is unused (for signature consistency).
+SESSION-ID and CWD locate the project.  Reads allowedPrompts from
+the session's :plan plist."
+  (ignore plan-content)
+  (let* ((session (claude-gravity--get-session session-id))
+         (plan (when session (plist-get session :plan)))
+         (prompts (when plan (plist-get plan :allowed-prompts)))
+         (settings-path (expand-file-name ".claude/settings.local.json" cwd)))
+    (when prompts
+      (let* ((data (if (file-exists-p settings-path)
+                       (claude-gravity--json-read-file settings-path)
+                     (list (cons 'permissions (list (cons 'allow nil))))))
+             (perms (or (alist-get 'permissions data)
+                        (list (cons 'allow nil))))
+             (allow (or (alist-get 'allow perms) nil))
+             (added 0))
+        (dolist (p prompts)
+          (let* ((tool (alist-get 'tool p))
+                 (prompt (alist-get 'prompt p))
+                 (pattern (if prompt
+                              (format "%s(%s)" (or tool "Bash") prompt)
+                            (or tool "Bash"))))
+            (unless (member pattern allow)
+              (setq allow (append allow (list pattern)))
+              (cl-incf added))))
+        (when (> added 0)
+          (setf (alist-get 'allow perms) allow)
+          (setf (alist-get 'permissions data) perms)
+          (let ((dir (file-name-directory settings-path)))
+            (unless (file-exists-p dir) (make-directory dir t)))
+          (with-temp-file settings-path
+            (let ((json-encoding-pretty-print t))
+              (insert (json-encode data))))
+          (when session
+            (claude-gravity--load-allow-patterns session))
+          (claude-gravity--log 'info "Persisted %d allow patterns for clear-and-proceed"
+                               added))))))
 
 
 (defun claude-gravity-plan-review-deny ()

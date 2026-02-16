@@ -5,8 +5,8 @@
 (require 'claude-gravity-core)
 
 ; Forward declarations for functions defined in other modules
-(declare-function claude-gravity--load-allow-patterns "claude-gravity-session")
 (declare-function claude-gravity--make-turn-node "claude-gravity-state")
+(declare-function claude-gravity--current-turn-node "claude-gravity-state")
 
 
 ;;; Session Registry
@@ -138,6 +138,45 @@ Called when a session is restarted (e.g. via /reset or /clear)."
   (plist-put session :status 'active)
   (claude-gravity--load-allow-patterns session)
   (claude-gravity--log 'debug "Claude Gravity: session %s reset" (plist-get session :session-id))
+  session)
+
+
+(defun claude-gravity--soft-rekey-session (session new-id)
+  "Re-key SESSION to NEW-ID without resetting conversation state.
+Used by clear-and-proceed: buffer, turns, tools, agents all survive.
+Only updates identity and housekeeping fields; inserts a visual
+divider turn so the user sees where the context boundary fell."
+  (plist-put session :session-id new-id)
+  (plist-put session :status 'active)
+  (plist-put session :claude-status 'idle)
+  (plist-put session :header-line-cache nil)
+  (plist-put session :last-event-time (current-time))
+  ;; Freeze the current turn and insert a phase-boundary divider
+  (let ((prev-turn (claude-gravity--current-turn-node session)))
+    (when prev-turn
+      (setf (alist-get 'frozen prev-turn) t)))
+  (let* ((plan-path (plist-get session :clear-plan-path))
+         (next-idx (1+ (or (plist-get session :current-turn) 0)))
+         (turn (claude-gravity--make-turn-node next-idx))
+         (prompt (list (cons 'text (format "Context cleared — implementing plan%s"
+                                           (if plan-path
+                                               (format "\n   @%s" plan-path)
+                                             "")))
+                       (cons 'type 'phase-boundary)
+                       (cons 'submitted (current-time))
+                       (cons 'elapsed nil)
+                       (cons 'stop_text nil)
+                       (cons 'stop_thinking nil))))
+    (setf (alist-get 'prompt turn) prompt)
+    (claude-gravity--tlist-append (plist-get session :turns) turn)
+    (plist-put session :current-turn next-idx))
+  ;; Clear the awaiting-clear flag and timeout timer
+  (let ((timer (plist-get session :clear-timeout)))
+    (when (timerp timer) (cancel-timer timer)))
+  (plist-put session :awaiting-clear nil)
+  (plist-put session :clear-timeout nil)
+  (claude-gravity--log 'debug "Soft re-key: session %s → %s (state preserved)"
+                       (plist-get session :temp-id) new-id)
   session)
 
 
