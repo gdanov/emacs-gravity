@@ -133,13 +133,14 @@ Groups non-idle items by session and shows badge counts."
 
 ;;; Capabilities Section (Skills, Agents, Commands)
 
-(defun claude-gravity--insert-capability-entry (cap indent-extra)
-  "Insert a single capability CAP with INDENT-EXTRA spaces.
+(defun claude-gravity--insert-capability-entry (cap)
+  "Insert a single capability CAP as a magit-section.
 CAP is an alist with keys: name, description, scope, file-path, type."
   (let* ((type (alist-get 'type cap))
          (name (alist-get 'name cap))
          (scope (alist-get 'scope cap))
          (desc (alist-get 'description cap))
+         (indent (claude-gravity--indent))
          (prefix (pcase type
                    ('skill "S ")
                    ('agent "A ")
@@ -153,21 +154,22 @@ CAP is an alist with keys: name, description, scope, file-path, type."
     (magit-insert-section (capability-entry cap t)
       (magit-insert-heading
         (format "%s%s%s  %s"
-                (make-string indent-extra ?\s)
+                indent
                 (propertize prefix 'face 'claude-gravity-detail-label)
                 (propertize name 'face name-face)
                 (propertize (format "(%s)" scope)
                             'face 'claude-gravity-detail-label)))
       ;; Expanded content: description and file path
-      (when (and desc (not (string-empty-p desc)))
-        (insert (make-string (+ indent-extra 4) ?\s)
-                (propertize (truncate-string-to-width desc 80 nil nil t)
+      (let ((body-indent (concat indent "    ")))
+        (when (and desc (not (string-empty-p desc)))
+          (insert body-indent
+                  (propertize (truncate-string-to-width desc 80 nil nil t)
+                              'face 'claude-gravity-detail-label)
+                  "\n"))
+        (insert body-indent
+                (propertize (format "File: %s" (alist-get 'file-path cap))
                             'face 'claude-gravity-detail-label)
-                "\n"))
-      (insert (make-string (+ indent-extra 4) ?\s)
-              (propertize (format "File: %s" (alist-get 'file-path cap))
-                          'face 'claude-gravity-detail-label)
-              "\n"))))
+                "\n")))))
 
 
 (defun claude-gravity--insert-project-capabilities (project-dir)
@@ -178,21 +180,19 @@ Shows skills, agents, and commands with scope labels."
           (agents (alist-get 'agents caps))
           (commands (alist-get 'commands caps)))
       (when (or skills agents commands)
-        (let* ((total (+ (length skills) (length agents) (length commands)))
-               (indent (claude-gravity--indent)))
+        (let ((total (+ (length skills) (length agents) (length commands))))
           (magit-insert-section (project-capabilities project-dir t)
             (magit-insert-heading
               (format "%s%s"
-                      indent
+                      (claude-gravity--indent)
                       (propertize (format "Skills & Agents (%d)" total)
                                   'face 'claude-gravity-section-heading)))
-            (let ((inner-indent (+ (length indent) 2)))
-              (dolist (s skills)
-                (claude-gravity--insert-capability-entry s inner-indent))
-              (dolist (a agents)
-                (claude-gravity--insert-capability-entry a inner-indent))
-              (dolist (c commands)
-                (claude-gravity--insert-capability-entry c inner-indent)))))))))
+            (dolist (s skills)
+              (claude-gravity--insert-capability-entry s))
+            (dolist (a agents)
+              (claude-gravity--insert-capability-entry a))
+            (dolist (c commands)
+              (claude-gravity--insert-capability-entry c))))))))
 
 
 (defun claude-gravity--render-overview ()
@@ -232,10 +232,6 @@ Shows skills, agents, and commands with scope labels."
                  (magit-insert-section (project proj-name t)
                    (magit-insert-heading
                      (format "%s (%d)" proj-name (length sessions)))
-                   ;; Project capabilities (skills, agents, commands)
-                   (let ((proj-cwd (plist-get (car sessions) :cwd)))
-                     (when proj-cwd
-                       (claude-gravity--insert-project-capabilities proj-cwd)))
                    (dolist (session (sort sessions
                                          (lambda (a b)
                                            (time-less-p (plist-get b :start-time)
@@ -295,7 +291,11 @@ Shows skills, agents, and commands with scope labels."
                                      (equal (alist-get 'session-id item) sid))
                                    claude-gravity--inbox)))
                              (dolist (item session-items)
-                               (claude-gravity--insert-inbox-item item)))))))))
+                               (claude-gravity--insert-inbox-item item)))))))
+                   ;; Project capabilities (skills, agents, commands) — after sessions
+                   (let ((proj-cwd (plist-get (car sessions) :cwd)))
+                     (when proj-cwd
+                       (claude-gravity--insert-project-capabilities proj-cwd)))))
                projects)))
           (goto-char (min pos (point-max)))
           (claude-gravity--apply-visibility))))))
