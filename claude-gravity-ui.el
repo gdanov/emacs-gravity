@@ -189,7 +189,7 @@ CAP is an alist with keys: name, description, scope, file-path, type."
 Used for standalone skills/agents/commands sections."
   (when caps
     (let ((indent (claude-gravity--indent)))
-      (magit-insert-section (capability-category title caps t)
+      (magit-insert-section (category t)
         (magit-insert-heading
           (format "%s%s (%d)"
                   indent
@@ -210,7 +210,7 @@ Used for standalone skills/agents/commands sections."
          (total (alist-get 'total plugin))
          (indent (claude-gravity--indent)))
     (when (> total 0)
-      (magit-insert-section (plugin-entry plugin t)
+      (magit-insert-section (plugin-entry t)
         ;; Plugin header with counts
         (magit-insert-heading
           (format "%s%s  %s — %d items"
@@ -221,7 +221,7 @@ Used for standalone skills/agents/commands sections."
         ;; Skills subsection
         (when skills
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (plugin-skills-section plugin skills t)
+            (magit-insert-section (skills t)
               (magit-insert-heading
                 (format "%sSkills (%d)"
                         subindent
@@ -231,7 +231,7 @@ Used for standalone skills/agents/commands sections."
         ;; Agents subsection
         (when agents
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (plugin-agents-section plugin agents t)
+            (magit-insert-section (agents t)
               (magit-insert-heading
                 (format "%sAgents (%d)"
                         subindent
@@ -241,7 +241,7 @@ Used for standalone skills/agents/commands sections."
         ;; Commands subsection
         (when commands
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (plugin-commands-section plugin commands t)
+            (magit-insert-section (commands t)
               (magit-insert-heading
                 (format "%sCommands (%d)"
                         subindent
@@ -251,7 +251,7 @@ Used for standalone skills/agents/commands sections."
         ;; MCP servers subsection
         (when mcp
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (plugin-mcp-section plugin mcp t)
+            (magit-insert-section (mcp-section t)
               (magit-insert-heading
                 (format "%sMCP Tools (%d)"
                         subindent
@@ -272,7 +272,7 @@ Shows plugins with nested capabilities, then standalone categories."
       (when (or plugins standalone-skills standalone-agents standalone-commands standalone-mcp)
         (let ((indent (claude-gravity--indent))
               (total (claude-gravity--capabilities-total-count grouped)))
-          (magit-insert-section (project-capabilities project-dir t)
+          (magit-insert-section (capabilities project-dir t)
             (magit-insert-heading
               (format "%s%s"
                       indent
@@ -280,7 +280,7 @@ Shows plugins with nested capabilities, then standalone categories."
                                   'face 'claude-gravity-section-heading)))
             ;; Plugins section
             (when plugins
-              (magit-insert-section (capabilities-plugins-section plugins t)
+              (magit-insert-section (capabilities-plugins t)
                 (magit-insert-heading
                   (format "%s  ▼ Plugins (%d)"
                           indent
