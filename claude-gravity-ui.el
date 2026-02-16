@@ -169,20 +169,34 @@ CAP is an alist with keys: name, description, scope, file-path, type."
                 (propertize name 'face name-face)
                 (propertize scope-label 'face 'claude-gravity-detail-label)))
       (insert "\n")
-      ;; Expanded content: description and file path (if present)
+      ;; Expanded content: full frontmatter fields (untruncated)
       (let ((body-indent (concat indent "    "))
-            (file-path (alist-get 'file-path cap)))
+            (file-path (alist-get 'file-path cap))
+            (frontmatter (alist-get 'frontmatter cap))
+            (shown-fields '(name description)))
+        ;; Show full description without truncation
         (when (and desc (not (string-empty-p desc)))
           (insert body-indent
-                  (propertize (truncate-string-to-width desc 80 nil nil t)
-                              'face 'claude-gravity-detail-label)
+                  (propertize "Description: " 'face 'claude-gravity-detail-label)
+                  (propertize desc 'face 'default)
                   "\n"))
-        ;; Only show file path if it exists (MCP servers don't have it)
+        ;; Show file path if it exists
         (when file-path
           (insert body-indent
-                  (propertize (format "File: %s" file-path)
-                              'face 'claude-gravity-detail-label)
-                  "\n"))))))
+                  (propertize "File: " 'face 'claude-gravity-detail-label)
+                  (propertize file-path 'face 'default)
+                  "\n"))
+        ;; Show other frontmatter fields (excluding already shown fields)
+        (when frontmatter
+          (dolist (field frontmatter)
+            (let ((key (car field))
+                  (val (cdr field)))
+              (unless (or (member key shown-fields) (string-empty-p val))
+                (insert body-indent
+                        (propertize (format "%s: " (capitalize (symbol-name key)))
+                                    'face 'claude-gravity-detail-label)
+                        (propertize val 'face 'default)
+                        "\n")))))))))
 
 
 (defun claude-gravity--insert-capability-category (title caps)
