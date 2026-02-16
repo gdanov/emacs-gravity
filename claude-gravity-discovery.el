@@ -52,7 +52,7 @@ Values are trimmed strings.  Multi-line values (e.g. >- blocks)
 are joined into a single line."
   (condition-case err
       (with-temp-buffer
-        (insert-file-contents file-path)
+        (insert-file-contents file-path nil 0 2048)
         (goto-char (point-min))
         (when (looking-at "^---[ \t]*$")
           (forward-line 1)
