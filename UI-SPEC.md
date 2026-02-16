@@ -45,6 +45,112 @@ Status:
   "idle 1h"     (green)   — idle with elapsed time (>1h)
 ```
 
+### Capabilities Section (in Overview Buffer)
+
+Appears below each project's sessions, showing all skills, agents, commands, and MCP servers available for the project (from plugins, project-local, and global scopes).
+
+#### All capabilities collapsed (default)
+
+```
+▶ Capabilities (12 total)
+```
+
+#### Capabilities expanded, categories collapsed
+
+```
+▼ Capabilities (12 total)
+  ▶ Plugins (2)
+  ▶ Standalone Skills (3)
+  ▶ Standalone Agents (1)
+  ▶ Standalone Commands (2)
+  ▶ MCP Servers (1)
+```
+
+#### Plugins expanded with nested capabilities
+
+```
+▼ Capabilities (12 total)
+  ▼ Plugins (2)
+    ▼ obsidian  (user) — 3 items
+      ▼ Skills (2)
+        ▶ S obsidian-markdown  (obsidian)
+        ▶ S obsidian-bases  (obsidian)
+      ▼ Commands (1)
+        ▶ / obsidian-cli  (obsidian)
+    ▶ beads  (user) — 5 items
+  ▶ Standalone Skills (3)
+```
+
+#### Capability entry expanded (showing detail)
+
+```
+        ▼ S obsidian-markdown  (obsidian)
+            Create and edit Obsidian Flavored Markdown with wikilinks, embeds, callouts...
+            File: ~/.claude/plugins/obsidian/skills/obsidian-markdown/SKILL.md
+```
+
+#### Standalone categories expanded
+
+```
+▼ Capabilities (12 total)
+  ▶ Plugins (2)
+  ▼ Standalone Skills (3)
+    ▶ S custom-skill  (project)
+    ▶ S another-skill  (global)
+    ▶ S test-skill  (project)
+  ▼ Standalone Agents (2)
+    ▶ A Explore  (built-in)
+    ▶ A custom-agent  (project)
+  ▼ Standalone Commands (2)
+    ▶ / custom-cmd  (project)
+  ▶ MCP Servers (1)
+```
+
+#### Legend
+
+```
+Prefixes:
+  S    = Skill
+  A    = Agent
+  /    = Command (slash command)
+  M    = MCP Server
+
+Scope labels (in parentheses):
+  (global)         = from ~/.claude/
+  (project)        = from .claude/ in project
+  (plugin-name)    = from installed plugin
+  (built-in)       = for built-in agents (Explore, Plan, Bash, etc.)
+  (user)           = user-scoped plugin
+
+Plugin format:     PluginName  (scope) — N items
+Category counts:   CategoryName (N)
+Top-level count:   Capabilities (N total)
+Description:       Truncated to 80 characters, shown when expanded
+File path:         Shown when expanded (if applicable)
+```
+
+#### Interactions
+
+| Key | Action |
+|-----|--------|
+| `TAB` | Toggle section expansion |
+| `RET` | Navigate to capability file (if file-path exists) |
+| Collapse behavior | Completed (non-running) sections auto-collapse when not focused |
+
+#### Colors
+
+```
+Section headings (Plugins, Standalone Skills, etc.):
+  Face: claude-gravity-section-heading (bold white)
+
+Capability names:
+  Skills/Agents: claude-gravity-tool-name (light green)
+  Commands/MCP:  claude-gravity-tool-signature (gray italic)
+
+Prefixes, scopes, descriptions, file paths:
+  Face: claude-gravity-detail-label (gray)
+```
+
 ---
 ## 2. Session Detail Buffer: `*Structured Claude Session <slug>*`
 
