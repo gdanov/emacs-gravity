@@ -764,7 +764,7 @@ Only shows permission, question, and plan-review items (not idle)."
 
 (define-key claude-gravity-mode-map (kbd "P") 'claude-gravity-show-plan)
 
-(define-key claude-gravity-mode-map (kbd "?") 'claude-gravity-menu)
+(define-key claude-gravity-mode-map (kbd "?") 'claude-gravity-overview-menu)
 
 (define-key claude-gravity-mode-map (kbd "TAB") 'magit-section-toggle)
 
@@ -944,6 +944,15 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
     (claude-gravity--layout-header-segments segments)))
 
 
+(defvar claude-gravity-session-mode-map (make-sparse-keymap)
+  "Keymap for `claude-gravity-session-mode' (session buffer specific).")
+(set-keymap-parent claude-gravity-session-mode-map claude-gravity-mode-map)
+
+;; Session buffer specific bindings (override parent)
+(define-key claude-gravity-session-mode-map (kbd "l") 'claude-gravity-set-permission-mode)
+(define-key claude-gravity-session-mode-map (kbd "?") 'claude-gravity-session-menu)
+
+
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
   "Major mode for a single Structured Claude Session buffer."
   (setq mode-name '(:eval (if claude-gravity--follow-mode
@@ -1112,57 +1121,71 @@ Returns a list from most specific to most general, with nils removed."
 
 ;;; Commands
 
-;;;###autoload (autoload 'claude-gravity-menu "claude-gravity" nil t)
-(transient-define-prefix claude-gravity-menu ()
-  "Interactions with Claude Code."
+;;;###autoload (autoload 'claude-gravity-overview-menu "claude-gravity" nil t)
+(transient-define-prefix claude-gravity-overview-menu ()
+  "Overview buffer menu: manage sessions and inbox."
   [["Actions"
-    ("c" "Comment" claude-gravity-comment-at-point)
+    ("g" "Refresh" claude-gravity-refresh)
+    ("b" "Switch session" claude-gravity-switch-session)
+    ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)]
+   ["Session Management"
+    ("N" "Start (Cloud)" claude-gravity-daemon-start-session)
+    ("S" "Start (tmux)" claude-gravity-start-session)
+    ("r" "Resume session" claude-gravity-unified-resume)
+    ("w" "Resume (picker)" claude-gravity-resume-in-tmux)
+    ("D" "Remove ended" claude-gravity-cleanup-sessions)
+    ("X" "Detect dead" claude-gravity-detect-dead-sessions)
+    ("R" "Reset all idle" claude-gravity-reset-status)
+    ("d" "Delete session" claude-gravity-delete-session)]
+   ["Navigation"
+    ("TAB" "Toggle section" magit-section-toggle)
+    ("e" "Edit entry" claude-gravity-edit-entry)
+    ("k" "Dismiss inbox" claude-gravity-inbox-dismiss)]
+   ["Debug"
+    ("M" "Debug messages" claude-gravity-debug-show)]])
+
+
+;;;###autoload (autoload 'claude-gravity-session-menu "claude-gravity" nil t)
+(transient-define-prefix claude-gravity-session-menu ()
+  "Session buffer menu: interact with current session."
+  [["View & Navigate"
     ("g" "Refresh" claude-gravity-refresh)
     ("t" "Tail" claude-gravity-tail)
     ("f" "Follow mode" claude-gravity-follow-mode)
-    ("P" "Show Plan" claude-gravity-show-plan)
-    ("F" "Open plan file" claude-gravity-open-plan-file)
-    ("T" "Parse transcript" claude-gravity-view-agent-transcript)
-    ("V" "Open transcript" claude-gravity-open-agent-transcript)
-    ("M" "Debug messages" claude-gravity-debug-show)]
-   ["Sessions"
-    ("N" "Start (Cloud)" claude-gravity-daemon-start-session)
-    ("S" "Start (tmux)" claude-gravity-start-session)
+    ("TAB" "Toggle section" magit-section-toggle)]
+   ["Current Session"
     ("s" "Compose prompt" claude-gravity-unified-compose
      :inapt-if-not claude-gravity--current-session-managed-p)
-    ("r" "Resume session" claude-gravity-unified-resume)
-    ("w" "Resume (picker)" claude-gravity-resume-in-tmux)
     ("K" "Stop session" claude-gravity-unified-stop
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("E" "Interrupt" claude-gravity-unified-interrupt
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("m" "Set model" claude-gravity-set-model
      :inapt-if-not claude-gravity--current-session-managed-p)
-    ("p" "Set permission mode" claude-gravity-set-permission-mode
-     :inapt-if-not claude-gravity--current-session-managed-p)
-    ""
-    "Tmux-only"
+    ("l" "Set permission mode" claude-gravity-set-permission-mode
+     :inapt-if-not claude-gravity--current-session-managed-p)]
+   ["Plan & Transcript"
+    ("P" "Show Plan" claude-gravity-show-plan)
+    ("F" "Open plan file" claude-gravity-open-plan-file)
+    ("c" "Comment" claude-gravity-comment-at-point)
+    ("T" "Parse transcript" claude-gravity-view-agent-transcript)
+    ("V" "Open transcript" claude-gravity-open-agent-transcript)]
+   ["Tmux Session"
     ("/" "Slash command" claude-gravity-slash-command
      :inapt-if-not claude-gravity--current-session-tmux-p)
     ("$" "Terminal" claude-gravity-terminal-session
      :inapt-if-not claude-gravity--current-session-tmux-p)
     ("C" "Reset/clear" claude-gravity-reset-session
      :inapt-if-not claude-gravity--current-session-tmux-p)]
-   ["Manage"
-    ("D" "Remove ended" claude-gravity-cleanup-sessions)
-    ("R" "Reset all idle" claude-gravity-reset-status)
-    ("X" "Detect dead" claude-gravity-detect-dead-sessions)
-    ("d" "Delete session" claude-gravity-delete-session)
-    ""
-    "Permissions"
+   ["Permissions"
     ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
-    ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]]
-  ["Navigation"
-   ("b" "Switch session" claude-gravity-switch-session)
-   ("e" "Edit entry" claude-gravity-edit-entry)
-   ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)
-   ("TAB" "Toggle section" magit-section-toggle)
-   ("k" "Dismiss inbox item" claude-gravity-inbox-dismiss)])
+    ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]
+   ["Debug"
+    ("M" "Debug messages" claude-gravity-debug-show)]])
+
+
+;; Compatibility alias for existing code
+(defalias 'claude-gravity-menu 'claude-gravity-overview-menu)
 
 
 (defun claude-gravity-cleanup-sessions ()
@@ -1370,7 +1393,6 @@ summary.  Otherwise expands the last turn and its last cycle."
 (define-key claude-gravity-mode-map (kbd "K") 'claude-gravity-unified-stop)
 (define-key claude-gravity-mode-map (kbd "E") 'claude-gravity-unified-interrupt)
 (define-key claude-gravity-mode-map (kbd "m") 'claude-gravity-set-model)
-(define-key claude-gravity-mode-map (kbd "p") 'claude-gravity-set-permission-mode)
 ;; Tmux-only
 (define-key claude-gravity-mode-map (kbd "/") 'claude-gravity-slash-command)
 (define-key claude-gravity-mode-map (kbd "C") 'claude-gravity-reset-session)
