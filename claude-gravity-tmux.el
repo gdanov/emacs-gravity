@@ -111,6 +111,32 @@ send-keys -l interpreting newlines as Enter."
     (and sid (gethash sid claude-gravity--tmux-sessions))))
 
 
+(defun claude-gravity--tmux-handle-trust-prompt (tmux-name &optional attempt)
+  "Detect and auto-accept the workspace trust prompt in TMUX-NAME.
+Polls the tmux pane content up to 5 times at 1.5-second intervals.
+If Claude's \"Do you trust the files in this folder?\" prompt is
+detected, sends `y' to accept it.  This is safe because the user
+explicitly chose the directory when starting the session."
+  (let ((attempt (or attempt 0)))
+    (when (and (< attempt 5) (claude-gravity--tmux-alive-p tmux-name))
+      (condition-case nil
+          (let ((content (with-temp-buffer
+                           (call-process "tmux" nil t nil
+                                         "capture-pane" "-t" tmux-name "-p")
+                           (buffer-string))))
+            (cond
+             ((string-match-p "trust the files\\|Do you trust" content)
+              (claude-gravity--log 'info
+                "Trust prompt detected in %s, auto-accepting" tmux-name)
+              (call-process "tmux" nil nil nil
+                            "send-keys" "-t" tmux-name "y"))
+             ;; Still loading — retry
+             ((< attempt 4)
+              (run-at-time 1.5 nil #'claude-gravity--tmux-handle-trust-prompt
+                           tmux-name (1+ attempt)))))
+        (error nil)))))
+
+
 (defun claude-gravity--statusline-parts (plugin-root)
   "Return statusline override parts for managed sessions.
 PLUGIN-ROOT is the directory containing claude-gravity.el.
@@ -198,6 +224,7 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
         (plist-put session :temp-id temp-id)
         (claude-gravity-model-set-claude-status session 'idle))
       (claude-gravity--tmux-ensure-heartbeat)
+      (run-at-time 2 nil #'claude-gravity--tmux-handle-trust-prompt tmux-name)
       (claude-gravity--schedule-refresh)
       (claude-gravity--log 'debug "Claude tmux session starting in %s" cwd)
       temp-id)))
@@ -263,6 +290,7 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
         (plist-put session :temp-id temp-id)
         (claude-gravity-model-set-claude-status session 'idle))
       (claude-gravity--tmux-ensure-heartbeat)
+      (run-at-time 2 nil #'claude-gravity--tmux-handle-trust-prompt tmux-name)
       (claude-gravity--schedule-refresh)
       (claude-gravity--log 'debug "Claude tmux session resuming %s" session-id)
       session-id)))
@@ -671,18 +699,22 @@ Sources from `tmux list-sessions' directly for robustness."
     (error nil)))
 
 (defun claude-gravity--tmux-session-display (tmux-name)
-  "Build a display string for TMUX-NAME, enriched with gravity metadata if available."
-  (let ((label tmux-name))
-    ;; Try to find gravity session metadata for richer display
+  "Build a display string for TMUX-NAME, enriched with gravity metadata if available.
+Untracked sessions (not in gravity session list) get a ghost prefix."
+  (let ((label tmux-name)
+        (found nil))
     (maphash (lambda (sid name)
                (when (equal name tmux-name)
                  (let ((session (gethash sid claude-gravity--sessions)))
                    (when session
+                     (setq found t)
                      (setq label (format "%s  %s  %s"
                                          tmux-name
                                          (or (plist-get session :project) "")
                                          (or (plist-get session :slug) "")))))))
              claude-gravity--tmux-sessions)
+    (unless found
+      (setq label (format "👻 %s" tmux-name)))
     label))
 
 (defun claude-gravity-terminal-session ()
@@ -776,6 +808,7 @@ session buffer opens alongside it automatically via SessionStart."
       ;; entry so the re-key mechanism can track the tmux mapping.
       (puthash temp-id tmux-name claude-gravity--tmux-pending)
       (claude-gravity--tmux-ensure-heartbeat)
+      (run-at-time 2 nil #'claude-gravity--tmux-handle-trust-prompt tmux-name)
       ;; Attach via terminal emulator so user can interact with the picker.
       ;; The buffer stays alive — it becomes the terminal view of
       ;; the resumed session after selection.

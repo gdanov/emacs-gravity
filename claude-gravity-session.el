@@ -44,18 +44,28 @@ Each session plist has keys:
 Strips trailing slash, then resolves to the git root.  If CWD itself
 is a `.claude' subdirectory (common when Claude Code is launched from
 inside it), the git root lookup handles this correctly.  Falls back to
-stripping a trailing `/.claude' component, or returns CWD as-is."
+stripping a trailing `/.claude' component, or returns CWD as-is.
+Always returns a fully expanded absolute path (no tilde abbreviation)
+because external processes like tmux do not expand tilde."
   (let ((dir (if (and cwd (> (length cwd) 1) (string-suffix-p "/" cwd))
                  (substring cwd 0 -1)
                (or cwd ""))))
-    (or (when (and (> (length dir) 0) (file-directory-p dir))
-          (let ((root (vc-git-root dir)))
-            (when root
-              (directory-file-name root))))
-        ;; Fallback: strip /.claude suffix
-        (if (string-suffix-p "/.claude" dir)
-            (substring dir 0 (- (length dir) 7))
-          dir))))
+    (let ((result
+           (or (when (and (> (length dir) 0) (file-directory-p dir))
+                 (let ((root (vc-git-root dir)))
+                   (when root
+                     (directory-file-name root))))
+               ;; Fallback: strip /.claude suffix
+               (if (string-suffix-p "/.claude" dir)
+                   (substring dir 0 (- (length dir) 7))
+                 dir))))
+      ;; vc-git-root returns tilde-abbreviated paths (~/...) via
+      ;; abbreviate-file-name.  External processes invoked via
+      ;; call-process (no shell) cannot expand tilde, so tmux -c
+      ;; "~/path" silently falls back to $HOME.  Always expand.
+      (if (and result (> (length result) 0))
+          (expand-file-name result)
+        result))))
 
 
 (defun claude-gravity--session-short-id (session-id)
