@@ -29,6 +29,8 @@
 
 (define-key claude-gravity-permission-action-mode-map (kbd "p") #'claude-gravity-permission-action-add-pattern)
 
+(define-key claude-gravity-permission-action-mode-map (kbd "!") #'claude-gravity-permission-action-allow-turn)
+
 (define-key claude-gravity-permission-action-mode-map (kbd "q") #'claude-gravity-permission-action-quit)
 
 
@@ -165,6 +167,7 @@ CONTEXT-LINES defaults to 3."
         (insert (propertize "  a" 'face 'claude-gravity-tool-name) " Allow  "
                 (propertize "  A" 'face 'claude-gravity-tool-name) " Allow always  "
                 (propertize "  S" 'face 'claude-gravity-tool-name) " Session allow  "
+                (propertize "  !" 'face 'claude-gravity-tool-name) " Allow turn  "
                 (propertize "  d" 'face 'claude-gravity-tool-name) " Deny  "
                 (propertize "  p" 'face 'claude-gravity-tool-name) " Add pattern  "
                 (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n")
@@ -193,13 +196,33 @@ CONTEXT-LINES defaults to 3."
 
 (defun claude-gravity--permission-action-finish ()
   "Clean up after a permission action: remove inbox item, kill buffer."
-  (let ((item claude-gravity--action-inbox-item))
+  (let* ((item claude-gravity--action-inbox-item)
+         (session-id (when item (alist-get 'session-id item))))
     (when item
       (remhash (alist-get 'id item) claude-gravity--inbox-action-buffers)
-      (claude-gravity--inbox-remove (alist-get 'id item))))
-  (let ((buf (current-buffer)))
-    (quit-window)
-    (kill-buffer buf)))
+      (claude-gravity--inbox-remove (alist-get 'id item)))
+    (let ((buf (current-buffer)))
+      (quit-window)
+      (kill-buffer buf))
+    (when session-id
+      (claude-gravity--inbox-pop-next session-id))))
+
+
+(defun claude-gravity--inbox-pop-next (session-id)
+  "Auto-open the next pending actionable inbox item for SESSION-ID.
+Called after finishing a permission or question action."
+  (let ((next (cl-find-if
+               (lambda (item)
+                 (and (equal (alist-get 'session-id item) session-id)
+                      (memq (alist-get 'type item) '(permission question))))
+               claude-gravity--inbox)))
+    (when next
+      (run-at-time 0 nil
+                   (lambda (it)
+                     (pcase (alist-get 'type it)
+                       ('permission (claude-gravity--inbox-act-permission it))
+                       ('question (claude-gravity--inbox-act-question it))))
+                   next))))
 
 
 (defun claude-gravity-permission-action-allow ()
@@ -247,6 +270,49 @@ CONTEXT-LINES defaults to 3."
               (tool (alist-get 'tool chosen)))
           (claude-gravity--log 'debug "Permission allowed + session rule: %s: %s" type (or tool "all")))))
     (claude-gravity--permission-action-finish)))
+
+
+(defun claude-gravity-permission-action-allow-turn ()
+  "Allow this and all remaining permission requests for the current turn.
+Approves all currently pending permissions for the same session, then sets
+a turn-scoped auto-approve flag so any new permissions arriving during this
+turn are also automatically approved.  The flag is cleared on turn boundaries
+\(Stop, UserPromptSubmit, SessionEnd)."
+  (interactive)
+  (let* ((item claude-gravity--action-inbox-item)
+         (session-id (alist-get 'session-id item))
+         (proc (alist-get 'socket-proc item))
+         (session (claude-gravity--get-session session-id))
+         (turn (when session (plist-get session :current-turn))))
+    ;; Approve current item
+    (claude-gravity--send-permission-response proc "allow")
+    ;; Approve all other pending permissions for this session
+    (let ((others (cl-remove-if-not
+                   (lambda (it)
+                     (and (equal (alist-get 'session-id it) session-id)
+                          (eq (alist-get 'type it) 'permission)
+                          (not (eq (alist-get 'id it) (alist-get 'id item)))))
+                   claude-gravity--inbox)))
+      (dolist (other others)
+        (let ((p (alist-get 'socket-proc other)))
+          (when (and p (process-live-p p))
+            (claude-gravity--send-permission-response p "allow")))
+        (remhash (alist-get 'id other) claude-gravity--inbox-action-buffers)
+        (claude-gravity--inbox-remove (alist-get 'id other))))
+    ;; Set turn-scoped auto-approve flag
+    (when turn
+      (setq claude-gravity--turn-auto-approve
+            (cons (cons session-id turn)
+                  (assoc-delete-all session-id claude-gravity--turn-auto-approve))))
+    ;; Clean up current item (don't pop-next since we approved them all)
+    (when item
+      (remhash (alist-get 'id item) claude-gravity--inbox-action-buffers)
+      (claude-gravity--inbox-remove (alist-get 'id item)))
+    (let ((buf (current-buffer)))
+      (quit-window)
+      (kill-buffer buf))
+    (claude-gravity--log 'debug "Turn auto-approve set for session %s turn %s"
+                         session-id turn)))
 
 
 (defun claude-gravity-permission-action-deny ()
@@ -415,7 +481,8 @@ Does not approve/deny — just writes the pattern to settings.local.json."
     (let ((buf (current-buffer)))
       (quit-window)
       (kill-buffer buf))
-    (claude-gravity--log 'debug "Answered: %s" answer-label)))
+    (claude-gravity--log 'debug "Answered: %s" answer-label)
+    (claude-gravity--inbox-pop-next session-id)))
 
 
 (defun claude-gravity--question-action-select (n)

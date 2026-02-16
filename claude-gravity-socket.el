@@ -142,7 +142,16 @@ Accumulates partial data per connection until complete lines arrive."
                          ((equal tool-name "ExitPlanMode")
                           (claude-gravity--inbox-add 'plan-review session-id payload proc))
                          (t
-                          (claude-gravity--inbox-add 'permission session-id payload proc))))
+                          (let ((auto (assoc session-id claude-gravity--turn-auto-approve)))
+                            (if (and auto
+                                     (let ((session (claude-gravity--get-session session-id)))
+                                       (and session
+                                            (eql (cdr auto) (plist-get session :current-turn)))))
+                                (progn
+                                  (claude-gravity--send-permission-response proc "allow")
+                                  (claude-gravity--log 'debug "Turn auto-approved: %s"
+                                                       (alist-get 'tool_name payload)))
+                              (claude-gravity--inbox-add 'permission session-id payload proc))))))
                     (when event
                       (claude-gravity-handle-event event session-id cwd payload pid source)))))
             (error

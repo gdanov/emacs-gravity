@@ -33,6 +33,13 @@ timestamp, summary, data, socket-proc.")
 Used by dismiss logic to find and kill the correct action buffer.")
 
 
+(defvar claude-gravity--turn-auto-approve nil
+  "Alist of (SESSION-ID . TURN-NUMBER) pairs with turn-scoped auto-approve.
+When a permission request arrives for a session whose current turn matches,
+it is automatically approved without user interaction.
+Cleared on turn boundaries (Stop, UserPromptSubmit, SessionEnd).")
+
+
 (defun claude-gravity--inbox-add (type session-id data proc)
   "Add an inbox item of TYPE for SESSION-ID with DATA and socket PROC.
 TYPE is a symbol: permission, question, plan-review, or idle.

@@ -7,6 +7,7 @@
 ; Forward declarations for functions defined in other modules
 (declare-function claude-gravity--make-turn-node "claude-gravity-state")
 (declare-function claude-gravity--current-turn-node "claude-gravity-state")
+(declare-function vc-git-root "vc-git")
 
 
 ;;; Session Registry
@@ -39,10 +40,22 @@ Each session plist has keys:
 
 
 (defun claude-gravity--normalize-cwd (cwd)
-  "Strip trailing slash from CWD unless it is root /."
-  (if (and cwd (> (length cwd) 1) (string-suffix-p "/" cwd))
-      (substring cwd 0 -1)
-    (or cwd "")))
+  "Normalize CWD to the project root directory.
+Strips trailing slash, then resolves to the git root.  If CWD itself
+is a `.claude' subdirectory (common when Claude Code is launched from
+inside it), the git root lookup handles this correctly.  Falls back to
+stripping a trailing `/.claude' component, or returns CWD as-is."
+  (let ((dir (if (and cwd (> (length cwd) 1) (string-suffix-p "/" cwd))
+                 (substring cwd 0 -1)
+               (or cwd ""))))
+    (or (when (and (> (length dir) 0) (file-directory-p dir))
+          (let ((root (vc-git-root dir)))
+            (when root
+              (directory-file-name root))))
+        ;; Fallback: strip /.claude suffix
+        (if (string-suffix-p "/.claude" dir)
+            (substring dir 0 (- (length dir) 7))
+          dir))))
 
 
 (defun claude-gravity--session-short-id (session-id)
