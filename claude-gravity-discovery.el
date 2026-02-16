@@ -8,10 +8,39 @@
 
 (defvar claude-gravity--capabilities-cache (make-hash-table :test 'equal)
   "Hash table mapping project-dir -> (timestamp . capabilities-alist).
-Capabilities alist has keys: skills, agents, commands.")
+Capabilities alist has keys: plugins, standalone-skills, standalone-agents,
+standalone-commands, standalone-mcp-servers.")
 
 (defvar claude-gravity--capabilities-ttl 60
   "Cache TTL in seconds for capability discovery results.")
+
+
+;;; Built-in Agents
+
+(defconst claude-gravity--builtin-agents
+  '("Explore" "Plan" "Bash" "general-purpose" "statusline-setup"
+    "claude-code-guide" "linear-branch-manager" "beads:task-agent"
+    "plugin-dev:agent-creator" "dev-loop:architect" "dev-loop:verifier"
+    "dev-loop:story-partner" "sentry:issue-summarizer"
+    "sentry:seer" "code-simplifier:code-simplifier"
+    "code-review:code-review" "code-review:fix-pr-comments")
+  "List of known Claude Code built-in agent types.")
+
+
+(defun claude-gravity--agent-scope (agent-cap)
+  "Determine the scope of AGENT-CAP: plugin, built-in, or standalone.
+Returns a symbol: 'plugin, 'built-in, or 'standalone."
+  (let ((scope (alist-get 'scope agent-cap))
+        (name (alist-get 'name agent-cap)))
+    (cond
+     ;; If scope is a plugin name, it's a plugin agent
+     ((and scope (not (member scope '("global" "project"))))
+      'plugin)
+     ;; If name is in builtin-agents list
+     ((member name claude-gravity--builtin-agents)
+      'built-in)
+     ;; Otherwise standalone
+     (t 'standalone))))
 
 
 ;;; YAML Frontmatter Parser
@@ -185,12 +214,124 @@ Includes user-scope plugins and project-scope plugins matching PROJECT-DIR."
     (nreverse result)))
 
 
+;;; MCP Server Discovery
+
+(defun claude-gravity--scan-mcp-servers (base-dir scope-label)
+  "Scan BASE-DIR for .mcp.json file and parse MCP server configs.
+SCOPE-LABEL is a string like \"global\", \"project\", or a plugin name.
+Returns list of alists with keys: name, scope, config, file-path."
+  (let ((mcp-file (expand-file-name ".mcp.json" base-dir))
+        (result nil))
+    (when (file-exists-p mcp-file)
+      (condition-case err
+          (let ((config (claude-gravity--json-read-file mcp-file)))
+            (dolist (entry config)
+              (let* ((server-name (car entry))
+                     (server-config (cdr entry)))
+                (push (list (cons 'name (symbol-name server-name))
+                            (cons 'scope scope-label)
+                            (cons 'config server-config)
+                            (cons 'file-path mcp-file)
+                            (cons 'type 'mcp-server))
+                      result)))
+            (nreverse result))
+        (error
+         (claude-gravity--log 'warn "Failed to parse MCP config from %s: %s" mcp-file err)
+         nil)))))
+
+
+;;; Capability Grouping
+
+(defun claude-gravity--capabilities-total-count (grouped-caps)
+  "Return total count of capabilities from GROUPED-CAPS structure."
+  (let ((total 0))
+    (dolist (plugin (alist-get 'plugins grouped-caps))
+      (cl-incf total (alist-get 'total plugin)))
+    (dolist (_ (alist-get 'standalone-skills grouped-caps)) (cl-incf total))
+    (dolist (_ (alist-get 'standalone-agents grouped-caps)) (cl-incf total))
+    (dolist (_ (alist-get 'standalone-commands grouped-caps)) (cl-incf total))
+    (dolist (_ (alist-get 'standalone-mcp-servers grouped-caps)) (cl-incf total))
+    total))
+
+
+(defun claude-gravity--group-capabilities-by-source (skills agents commands mcp-servers plugins)
+  "Group capabilities by source: plugin vs. standalone.
+Returns alist with keys: plugins, standalone-skills, standalone-agents,
+standalone-commands, standalone-mcp-servers.
+PLUGINS is list of plugin metadata to identify which caps belong to plugins."
+  (let ((plugin-names (mapcar (lambda (p) (alist-get 'name p)) plugins))
+        (plugin-skills (make-hash-table :test 'equal))
+        (plugin-agents (make-hash-table :test 'equal))
+        (plugin-commands (make-hash-table :test 'equal))
+        (plugin-mcp (make-hash-table :test 'equal))
+        (standalone-skills nil)
+        (standalone-agents nil)
+        (standalone-commands nil)
+        (standalone-mcp-servers nil))
+    ;; Initialize plugin buckets
+    (dolist (plugin plugins)
+      (let ((name (alist-get 'name plugin)))
+        (puthash name nil plugin-skills)
+        (puthash name nil plugin-agents)
+        (puthash name nil plugin-commands)
+        (puthash name nil plugin-mcp)))
+    ;; Categorize skills
+    (dolist (skill skills)
+      (let ((scope (alist-get 'scope skill)))
+        (if (member scope plugin-names)
+            (puthash scope (cons skill (gethash scope plugin-skills)) plugin-skills)
+          (push skill standalone-skills))))
+    ;; Categorize agents
+    (dolist (agent agents)
+      (let ((scope (alist-get 'scope agent)))
+        (if (member scope plugin-names)
+            (puthash scope (cons agent (gethash scope plugin-agents)) plugin-agents)
+          (push agent standalone-agents))))
+    ;; Categorize commands
+    (dolist (command commands)
+      (let ((scope (alist-get 'scope command)))
+        (if (member scope plugin-names)
+            (puthash scope (cons command (gethash scope plugin-commands)) plugin-commands)
+          (push command standalone-commands))))
+    ;; Categorize MCP servers
+    (dolist (server mcp-servers)
+      (let ((scope (alist-get 'scope server)))
+        (if (member scope plugin-names)
+            (puthash scope (cons server (gethash scope plugin-mcp)) plugin-mcp)
+          (push server standalone-mcp-servers))))
+    ;; Build plugin groups with their capabilities
+    (let ((plugin-groups nil))
+      (dolist (plugin plugins)
+        (let* ((name (alist-get 'name plugin))
+               (p-skills (nreverse (gethash name plugin-skills)))
+               (p-agents (nreverse (gethash name plugin-agents)))
+               (p-commands (nreverse (gethash name plugin-commands)))
+               (p-mcp (nreverse (gethash name plugin-mcp)))
+               (total (+ (length p-skills) (length p-agents) (length p-commands) (length p-mcp))))
+          (when (> total 0)
+            (push (list (cons 'name name)
+                        (cons 'scope (alist-get 'scope plugin))
+                        (cons 'install-path (alist-get 'install-path plugin))
+                        (cons 'skills p-skills)
+                        (cons 'agents p-agents)
+                        (cons 'commands p-commands)
+                        (cons 'mcp-servers p-mcp)
+                        (cons 'total total))
+                  plugin-groups))))
+      (list (cons 'plugins (nreverse plugin-groups))
+            (cons 'standalone-skills (nreverse standalone-skills))
+            (cons 'standalone-agents (nreverse standalone-agents))
+            (cons 'standalone-commands (nreverse standalone-commands))
+            (cons 'standalone-mcp-servers (nreverse standalone-mcp-servers))))))
+
+
 ;;; Main Discovery Function
 
 (defun claude-gravity--discover-project-capabilities (project-dir)
-  "Discover skills, agents, and commands for PROJECT-DIR.
-Returns alist with keys: skills, agents, commands.
-Each value is a list of capability alists.
+  "Discover skills, agents, commands, and MCP servers for PROJECT-DIR.
+Returns alist with keys: plugins, standalone-skills, standalone-agents,
+standalone-commands, standalone-mcp-servers.
+Each value is a list of capability alists, grouped hierarchically.
 Results are cached for `claude-gravity--capabilities-ttl' seconds."
   (let* ((key (expand-file-name project-dir))
          (cached (gethash key claude-gravity--capabilities-cache))
@@ -202,33 +343,38 @@ Results are cached for `claude-gravity--capabilities-ttl' seconds."
       (let ((skills nil)
             (agents nil)
             (commands nil)
+            (mcp-servers nil)
             (claude-dir (expand-file-name ".claude" project-dir))
-            (global-dir (expand-file-name "~/.claude")))
+            (global-dir (expand-file-name "~/.claude"))
+            (plugins (claude-gravity--plugins-for-project project-dir)))
 
         ;; 1. Project-local .claude/ directory
         (when (file-directory-p claude-dir)
           (setq skills (nconc skills (claude-gravity--scan-skills claude-dir "project")))
           (setq agents (nconc agents (claude-gravity--scan-agents claude-dir "project")))
-          (setq commands (nconc commands (claude-gravity--scan-commands claude-dir "project"))))
+          (setq commands (nconc commands (claude-gravity--scan-commands claude-dir "project")))
+          (setq mcp-servers (nconc mcp-servers (claude-gravity--scan-mcp-servers claude-dir "project"))))
 
         ;; 2. Global ~/.claude/ directory
         (when (file-directory-p global-dir)
           (setq skills (nconc skills (claude-gravity--scan-skills global-dir "global")))
           (setq agents (nconc agents (claude-gravity--scan-agents global-dir "global")))
-          (setq commands (nconc commands (claude-gravity--scan-commands global-dir "global"))))
+          (setq commands (nconc commands (claude-gravity--scan-commands global-dir "global")))
+          (setq mcp-servers (nconc mcp-servers (claude-gravity--scan-mcp-servers global-dir "global"))))
 
         ;; 3. Installed plugins relevant to this project
-        (dolist (plugin (claude-gravity--plugins-for-project project-dir))
+        (dolist (plugin plugins)
           (let ((install-path (alist-get 'install-path plugin))
                 (plugin-name (alist-get 'name plugin)))
             (when (and install-path (file-directory-p install-path))
               (setq skills (nconc skills (claude-gravity--scan-skills install-path plugin-name)))
               (setq agents (nconc agents (claude-gravity--scan-agents install-path plugin-name)))
-              (setq commands (nconc commands (claude-gravity--scan-commands install-path plugin-name))))))
+              (setq commands (nconc commands (claude-gravity--scan-commands install-path plugin-name)))
+              (setq mcp-servers (nconc mcp-servers (claude-gravity--scan-mcp-servers install-path plugin-name))))))
 
-        (let ((result (list (cons 'skills skills)
-                            (cons 'agents agents)
-                            (cons 'commands commands))))
+        ;; Group by source
+        (let ((result (claude-gravity--group-capabilities-by-source
+                       skills agents commands mcp-servers plugins)))
           (puthash key (cons now result) claude-gravity--capabilities-cache)
           result)))))
 

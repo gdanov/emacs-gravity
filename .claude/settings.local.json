@@ -63,8 +63,13 @@
       "Bash(git*rev-parse*)",
       "Bash(git rev-parse*)",
       "Bash(git rev-parse *)",
-      "Bash(col:*)"
+      "Bash(col:*)",
+      "Bash(bd *)",
+      "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs:*)"
     ],
-    "additionalDirectories": ["/Users/gdanov/.emacs.d", "/tmp"]
+    "additionalDirectories": [
+      "/Users/gdanov/.emacs.d",
+      "/tmp"
+    ]
   }
 }

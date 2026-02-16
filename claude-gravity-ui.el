@@ -145,54 +145,171 @@ CAP is an alist with keys: name, description, scope, file-path, type."
                    ('skill "S ")
                    ('agent "A ")
                    ('command "/ ")
+                   ('mcp-server "M ")
                    (_ "  ")))
          (name-face (pcase type
                       ('skill 'claude-gravity-tool-name)
                       ('agent 'claude-gravity-tool-name)
                       ('command 'claude-gravity-tool-signature)
-                      (_ 'default))))
+                      ('mcp-server 'claude-gravity-tool-signature)
+                      (_ 'default)))
+         ;; Determine scope label for agents
+         (scope-label (if (eq type 'agent)
+                          (let ((agent-type (claude-gravity--agent-scope cap)))
+                            (pcase agent-type
+                              ('built-in "(built-in)")
+                              ('plugin (format "(%s)" scope))
+                              (_ (format "(%s)" scope))))
+                        (format "(%s)" scope))))
     (magit-insert-section (capability-entry cap t)
       (magit-insert-heading
         (format "%s%s%s  %s"
                 indent
                 (propertize prefix 'face 'claude-gravity-detail-label)
                 (propertize name 'face name-face)
-                (propertize (format "(%s)" scope)
-                            'face 'claude-gravity-detail-label)))
-      ;; Expanded content: description and file path
-      (let ((body-indent (concat indent "    ")))
+                (propertize scope-label 'face 'claude-gravity-detail-label)))
+      ;; Expanded content: description and file path (if present)
+      (let ((body-indent (concat indent "    "))
+            (file-path (alist-get 'file-path cap)))
         (when (and desc (not (string-empty-p desc)))
           (insert body-indent
                   (propertize (truncate-string-to-width desc 80 nil nil t)
                               'face 'claude-gravity-detail-label)
                   "\n"))
-        (insert body-indent
-                (propertize (format "File: %s" (alist-get 'file-path cap))
-                            'face 'claude-gravity-detail-label)
-                "\n")))))
+        ;; Only show file path if it exists (MCP servers don't have it)
+        (when file-path
+          (insert body-indent
+                  (propertize (format "File: %s" file-path)
+                              'face 'claude-gravity-detail-label)
+                  "\n"))))))
 
 
-(defun claude-gravity--insert-project-capabilities (project-dir)
-  "Insert collapsible capabilities section for PROJECT-DIR.
-Shows skills, agents, and commands with scope labels."
-  (let ((caps (claude-gravity--discover-project-capabilities project-dir)))
-    (let ((skills (alist-get 'skills caps))
-          (agents (alist-get 'agents caps))
-          (commands (alist-get 'commands caps)))
-      (when (or skills agents commands)
-        (let ((total (+ (length skills) (length agents) (length commands))))
+(defun claude-gravity--insert-capability-category (title caps)
+  "Insert collapsible category TITLE with list of CAPS.
+Used for standalone skills/agents/commands sections."
+  (when caps
+    (let ((indent (claude-gravity--indent)))
+      (magit-insert-section (capability-category title caps t)
+        (magit-insert-heading
+          (format "%s%s (%d)"
+                  indent
+                  (propertize title 'face 'claude-gravity-section-heading)
+                  (length caps)))
+        (dolist (cap caps)
+          (claude-gravity--insert-capability-entry cap))))))
+
+
+(defun claude-gravity--insert-plugin-capabilities (plugin)
+  "Insert capabilities section for a single PLUGIN."
+  (let* ((name (alist-get 'name plugin))
+         (scope (alist-get 'scope plugin))
+         (skills (alist-get 'skills plugin))
+         (agents (alist-get 'agents plugin))
+         (commands (alist-get 'commands plugin))
+         (mcp (alist-get 'mcp-servers plugin))
+         (total (alist-get 'total plugin))
+         (indent (claude-gravity--indent)))
+    (when (> total 0)
+      (magit-insert-section (plugin-entry plugin t)
+        ;; Plugin header with counts
+        (magit-insert-heading
+          (format "%s%s  %s — %d items"
+                  indent
+                  (propertize name 'face 'claude-gravity-section-heading)
+                  (propertize (format "(%s)" scope) 'face 'claude-gravity-detail-label)
+                  total))
+        ;; Skills subsection
+        (when skills
+          (let ((subindent (concat indent "  ")))
+            (magit-insert-section (plugin-skills-section plugin skills t)
+              (magit-insert-heading
+                (format "%sSkills (%d)"
+                        subindent
+                        (length skills)))
+              (dolist (s skills)
+                (claude-gravity--insert-capability-entry s)))))
+        ;; Agents subsection
+        (when agents
+          (let ((subindent (concat indent "  ")))
+            (magit-insert-section (plugin-agents-section plugin agents t)
+              (magit-insert-heading
+                (format "%sAgents (%d)"
+                        subindent
+                        (length agents)))
+              (dolist (a agents)
+                (claude-gravity--insert-capability-entry a)))))
+        ;; Commands subsection
+        (when commands
+          (let ((subindent (concat indent "  ")))
+            (magit-insert-section (plugin-commands-section plugin commands t)
+              (magit-insert-heading
+                (format "%sCommands (%d)"
+                        subindent
+                        (length commands)))
+              (dolist (c commands)
+                (claude-gravity--insert-capability-entry c)))))
+        ;; MCP servers subsection
+        (when mcp
+          (let ((subindent (concat indent "  ")))
+            (magit-insert-section (plugin-mcp-section plugin mcp t)
+              (magit-insert-heading
+                (format "%sMCP Tools (%d)"
+                        subindent
+                        (length mcp)))
+              (dolist (m mcp)
+                (claude-gravity--insert-capability-entry m)))))))))
+
+
+(defun claude-gravity--insert-hierarchical-capabilities (project-dir)
+  "Insert hierarchical capabilities section for PROJECT-DIR.
+Shows plugins with nested capabilities, then standalone categories."
+  (let ((grouped (claude-gravity--discover-project-capabilities project-dir)))
+    (let ((plugins (alist-get 'plugins grouped))
+          (standalone-skills (alist-get 'standalone-skills grouped))
+          (standalone-agents (alist-get 'standalone-agents grouped))
+          (standalone-commands (alist-get 'standalone-commands grouped))
+          (standalone-mcp (alist-get 'standalone-mcp-servers grouped)))
+      (when (or plugins standalone-skills standalone-agents standalone-commands standalone-mcp)
+        (let ((indent (claude-gravity--indent))
+              (total (claude-gravity--capabilities-total-count grouped)))
           (magit-insert-section (project-capabilities project-dir t)
             (magit-insert-heading
               (format "%s%s"
-                      (claude-gravity--indent)
-                      (propertize (format "Skills & Agents (%d)" total)
+                      indent
+                      (propertize (format "Capabilities (%d total)" total)
                                   'face 'claude-gravity-section-heading)))
-            (dolist (s skills)
-              (claude-gravity--insert-capability-entry s))
-            (dolist (a agents)
-              (claude-gravity--insert-capability-entry a))
-            (dolist (c commands)
-              (claude-gravity--insert-capability-entry c))))))))
+            ;; Plugins section
+            (when plugins
+              (magit-insert-section (capabilities-plugins-section plugins t)
+                (magit-insert-heading
+                  (format "%s  ▼ Plugins (%d)"
+                          indent
+                          (length plugins)))
+                (dolist (plugin plugins)
+                  (claude-gravity--insert-plugin-capabilities plugin))))
+            ;; Standalone sections
+            (when standalone-skills
+              (claude-gravity--insert-capability-category
+               (concat indent "  ▼ Standalone Skills")
+               standalone-skills))
+            (when standalone-agents
+              (claude-gravity--insert-capability-category
+               (concat indent "  ▼ Standalone Agents")
+               standalone-agents))
+            (when standalone-commands
+              (claude-gravity--insert-capability-category
+               (concat indent "  ▼ Standalone Commands")
+               standalone-commands))
+            (when standalone-mcp
+              (claude-gravity--insert-capability-category
+               (concat indent "  ▼ MCP Servers")
+               standalone-mcp))))))))
+
+
+(defun claude-gravity--insert-project-capabilities (project-dir)
+  "Deprecated: use claude-gravity--insert-hierarchical-capabilities instead.
+Maintained for backward compatibility."
+  (claude-gravity--insert-hierarchical-capabilities project-dir))
 
 
 (defun claude-gravity--render-overview ()
