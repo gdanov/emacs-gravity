@@ -361,35 +361,78 @@ Results are cached for `claude-gravity--capabilities-ttl' seconds."
             (mcp-servers nil)
             (claude-dir (expand-file-name ".claude" project-dir))
             (global-dir (expand-file-name "~/.claude"))
-            (plugins (claude-gravity--plugins-for-project project-dir)))
+            (plugins nil))
+
+        ;; Get plugins with error handling
+        (condition-case scan-err
+            (setq plugins (claude-gravity--plugins-for-project project-dir))
+          (error
+           (claude-gravity--log 'warn "Failed to scan plugins for %s: %s" project-dir scan-err)
+           (setq plugins nil)))
 
         ;; 1. Project-local .claude/ directory
         (when (file-directory-p claude-dir)
-          (setq skills (nconc skills (claude-gravity--scan-skills claude-dir "project")))
-          (setq agents (nconc agents (claude-gravity--scan-agents claude-dir "project")))
-          (setq commands (nconc commands (claude-gravity--scan-commands claude-dir "project")))
-          (setq mcp-servers (nconc mcp-servers (claude-gravity--scan-mcp-servers claude-dir "project"))))
+          (condition-case scan-err
+              (setq skills (nconc skills (claude-gravity--scan-skills claude-dir "project")))
+            (error
+             (claude-gravity--log 'warn "Failed to scan project skills in %s: %s" claude-dir scan-err)))
+          (condition-case scan-err
+              (setq agents (nconc agents (claude-gravity--scan-agents claude-dir "project")))
+            (error
+             (claude-gravity--log 'warn "Failed to scan project agents in %s: %s" claude-dir scan-err)))
+          (condition-case scan-err
+              (setq commands (nconc commands (claude-gravity--scan-commands claude-dir "project")))
+            (error
+             (claude-gravity--log 'warn "Failed to scan project commands in %s: %s" claude-dir scan-err)))
+          (condition-case scan-err
+              (setq mcp-servers (nconc mcp-servers (claude-gravity--scan-mcp-servers claude-dir "project")))
+            (error
+             (claude-gravity--log 'warn "Failed to scan project MCP servers in %s: %s" claude-dir scan-err))))
 
         ;; 2. Global ~/.claude/ directory
         (when (file-directory-p global-dir)
-          (setq skills (nconc skills (claude-gravity--scan-skills global-dir "global")))
-          (setq agents (nconc agents (claude-gravity--scan-agents global-dir "global")))
-          (setq commands (nconc commands (claude-gravity--scan-commands global-dir "global")))
-          (setq mcp-servers (nconc mcp-servers (claude-gravity--scan-mcp-servers global-dir "global"))))
+          (condition-case scan-err
+              (setq skills (nconc skills (claude-gravity--scan-skills global-dir "global")))
+            (error
+             (claude-gravity--log 'warn "Failed to scan global skills: %s" scan-err)))
+          (condition-case scan-err
+              (setq agents (nconc agents (claude-gravity--scan-agents global-dir "global")))
+            (error
+             (claude-gravity--log 'warn "Failed to scan global agents: %s" scan-err)))
+          (condition-case scan-err
+              (setq commands (nconc commands (claude-gravity--scan-commands global-dir "global")))
+            (error
+             (claude-gravity--log 'warn "Failed to scan global commands: %s" scan-err)))
+          (condition-case scan-err
+              (setq mcp-servers (nconc mcp-servers (claude-gravity--scan-mcp-servers global-dir "global")))
+            (error
+             (claude-gravity--log 'warn "Failed to scan global MCP servers: %s" scan-err))))
 
         ;; 3. Installed plugins relevant to this project
         (dolist (plugin plugins)
           (let ((install-path (alist-get 'install-path plugin))
                 (plugin-name (alist-get 'name plugin)))
             (when (and install-path (file-directory-p install-path))
-              (setq skills (nconc skills (claude-gravity--scan-skills install-path plugin-name)))
-              (setq agents (nconc agents (claude-gravity--scan-agents install-path plugin-name)))
-              (setq commands (nconc commands (claude-gravity--scan-commands install-path plugin-name)))
-              (setq mcp-servers (nconc mcp-servers (claude-gravity--scan-mcp-servers install-path plugin-name))))))
+              (condition-case scan-err
+                  (setq skills (nconc skills (claude-gravity--scan-skills install-path plugin-name)))
+                (error
+                 (claude-gravity--log 'warn "Failed to scan plugin %s skills: %s" plugin-name scan-err)))
+              (condition-case scan-err
+                  (setq agents (nconc agents (claude-gravity--scan-agents install-path plugin-name)))
+                (error
+                 (claude-gravity--log 'warn "Failed to scan plugin %s agents: %s" plugin-name scan-err)))
+              (condition-case scan-err
+                  (setq commands (nconc commands (claude-gravity--scan-commands install-path plugin-name)))
+                (error
+                 (claude-gravity--log 'warn "Failed to scan plugin %s commands: %s" plugin-name scan-err)))
+              (condition-case scan-err
+                  (setq mcp-servers (nconc mcp-servers (claude-gravity--scan-mcp-servers install-path plugin-name)))
+                (error
+                 (claude-gravity--log 'warn "Failed to scan plugin %s MCP servers: %s" plugin-name scan-err))))))
 
         ;; Group by source
         (let ((result (claude-gravity--group-capabilities-by-source
-                       skills agents commands mcp-servers plugins)))
+                       skills agents commands mcp-servers (or plugins nil))))
           (puthash key (cons now result) claude-gravity--capabilities-cache)
           result)))))
 
@@ -399,6 +442,15 @@ Results are cached for `claude-gravity--capabilities-ttl' seconds."
   (if project-dir
       (remhash (expand-file-name project-dir) claude-gravity--capabilities-cache)
     (clrhash claude-gravity--capabilities-cache)))
+
+
+(defun claude-gravity-refresh-capabilities ()
+  "Force refresh of capabilities cache and re-render overview buffer.
+Useful when plugins, skills, agents, or commands are added/removed."
+  (interactive)
+  (claude-gravity--invalidate-capabilities-cache)
+  (claude-gravity--render-overview)
+  (message "Capabilities cache cleared and overview refreshed"))
 
 
 (defun claude-gravity--invalidate-frontmatter-cache (&optional file-path)

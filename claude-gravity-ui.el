@@ -262,8 +262,13 @@ Used for standalone skills/agents/commands sections."
 
 (defun claude-gravity--insert-hierarchical-capabilities (project-dir)
   "Insert hierarchical capabilities section for PROJECT-DIR.
-Shows plugins with nested capabilities, then standalone categories."
-  (let ((grouped (claude-gravity--discover-project-capabilities project-dir)))
+Shows plugins grouped in Plugins section, standalone categories as siblings."
+  (let ((grouped (or (claude-gravity--discover-project-capabilities project-dir)
+                     '((plugins . nil)
+                       (standalone-skills . nil)
+                       (standalone-agents . nil)
+                       (standalone-commands . nil)
+                       (standalone-mcp-servers . nil)))))
     (let ((plugins (alist-get 'plugins grouped))
           (standalone-skills (alist-get 'standalone-skills grouped))
           (standalone-agents (alist-get 'standalone-agents grouped))
@@ -278,31 +283,33 @@ Shows plugins with nested capabilities, then standalone categories."
                       indent
                       (propertize (format "Capabilities (%d total)" total)
                                   'face 'claude-gravity-section-heading)))
-            ;; Plugins section
+            ;; Plugins section (same visual style as standalone categories)
             (when plugins
-              (magit-insert-section (capabilities-plugins t)
-                (magit-insert-heading
-                  (format "%sPlugins (%d)"
-                          indent
-                          (length plugins)))
-                (dolist (plugin plugins)
-                  (claude-gravity--insert-plugin-capabilities plugin))))
+              (let ((indent (claude-gravity--indent)))
+                (magit-insert-section (category t)
+                  (magit-insert-heading
+                    (format "%s%s (%d)"
+                            indent
+                            (propertize "Plugins" 'face 'claude-gravity-section-heading)
+                            (length plugins)))
+                  (dolist (plugin plugins)
+                    (claude-gravity--insert-plugin-capabilities plugin)))))
             ;; Standalone sections
             (when standalone-skills
               (claude-gravity--insert-capability-category
-               (concat indent "Standalone Skills")
+               "Standalone Skills"
                standalone-skills))
             (when standalone-agents
               (claude-gravity--insert-capability-category
-               (concat indent "Standalone Agents")
+               "Standalone Agents"
                standalone-agents))
             (when standalone-commands
               (claude-gravity--insert-capability-category
-               (concat indent "Standalone Commands")
+               "Standalone Commands"
                standalone-commands))
             (when standalone-mcp
               (claude-gravity--insert-capability-category
-               (concat indent "MCP Servers")
+               "MCP Servers"
                standalone-mcp))))))))
 
 
