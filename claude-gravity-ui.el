@@ -168,6 +168,7 @@ CAP is an alist with keys: name, description, scope, file-path, type."
                 (propertize prefix 'face 'claude-gravity-detail-label)
                 (propertize name 'face name-face)
                 (propertize scope-label 'face 'claude-gravity-detail-label)))
+      (insert "\n")
       ;; Expanded content: description and file path (if present)
       (let ((body-indent (concat indent "    "))
             (file-path (alist-get 'file-path cap)))
