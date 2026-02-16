@@ -949,6 +949,7 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
 (set-keymap-parent claude-gravity-session-mode-map claude-gravity-mode-map)
 
 ;; Session buffer specific bindings (override parent)
+(define-key claude-gravity-session-mode-map (kbd "o") 'claude-gravity-return-to-overview)
 (define-key claude-gravity-session-mode-map (kbd "l") 'claude-gravity-set-permission-mode)
 (define-key claude-gravity-session-mode-map (kbd "?") 'claude-gravity-session-menu)
 
@@ -1151,6 +1152,7 @@ Returns a list from most specific to most general, with nils removed."
   [["View & Navigate"
     ("g" "Refresh" claude-gravity-refresh)
     ("t" "Tail" claude-gravity-tail)
+    ("o" "Return to overview" claude-gravity-return-to-overview)
     ("f" "Follow mode" claude-gravity-follow-mode)
     ("TAB" "Toggle section" magit-section-toggle)]
    ["Current Session"
@@ -1366,6 +1368,33 @@ summary.  Otherwise expands the last turn and its last cycle."
                   (with-selected-window win
                     (goto-char (1- (oref last-turn end)))
                     (recenter -3)))))))))))
+
+
+(defun claude-gravity-return-to-overview (&optional bury)
+  "Return to the session overview buffer from a session detail buffer.
+With prefix arg BURY (\\[universal-argument]), bury the current session
+buffer instead of switching to overview.
+
+If the overview buffer exists and is visible in another window,
+switch to that window. Otherwise, display the overview buffer
+in the current window."
+  (interactive "P")
+  (if bury
+      ;; With prefix arg: bury the current session buffer
+      (bury-buffer)
+    ;; Without prefix: navigate to overview
+    (let* ((overview-buf (get-buffer claude-gravity-buffer-name))
+           (overview-win (when overview-buf (get-buffer-window overview-buf))))
+      (cond
+       ;; Overview already visible in another window - switch to it
+       (overview-win
+        (select-window overview-win))
+       ;; Overview buffer exists but not visible - display it
+       (overview-buf
+        (switch-to-buffer overview-buf))
+       ;; Overview doesn't exist - create it
+       (t
+        (claude-gravity-status))))))
 
 
 ;;;###autoload
