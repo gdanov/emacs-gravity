@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "fs
 import { join, dirname, basename } from "path";
 import { execSync } from "child_process";
 import { log } from "./log";
+import { isSafeBashCommand } from "./safe-bash";
 
 // Re-export transcript functions from enrichment (canonical location)
 export {
@@ -602,6 +603,22 @@ async function main() {
       writeDumpFile(dumpDir, dumpSeq, eventName, "output", {
         event: eventName, session_id: sessionId, cwd, pid, data: inputData,
       });
+    }
+
+    // Auto-approve safe read-only Bash commands (skip Emacs round-trip)
+    if (eventName === "PermissionRequest" && isSafeBashCommand(inputData)) {
+      await sendToEmacs("PermissionAutoApproved", sessionId, cwd, pid, {
+        tool_name: (inputData as any).tool_name,
+        tool_use_id: (inputData as any).tool_use_id,
+        command: (inputData as any).tool_input?.command,
+      });
+      console.log(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: "allow" },
+        },
+      }));
+      return;
     }
 
     // Send to Emacs — PermissionRequest and AskUserQuestionIntercept use bidirectional wait

@@ -117,7 +117,9 @@ the model mutation API to update session state."
   ;; Only dismiss on turn/session boundaries — mid-turn events like
   ;; PostToolUse or SubagentStop don't mean other tools' permissions are stale.
   (when (member event '("UserPromptSubmit" "Stop" "SessionEnd"))
-    (claude-gravity--dismiss-stale-inbox-items session-id))
+    (claude-gravity--dismiss-stale-inbox-items session-id)
+    (setq claude-gravity--turn-auto-approve
+          (assoc-delete-all session-id claude-gravity--turn-auto-approve)))
   (pcase event
     ("SessionStart"
      (let ((existing (claude-gravity--get-session session-id)))
@@ -678,6 +680,18 @@ the model mutation API to update session state."
      (claude-gravity--log 'debug "Notification [%s]: %s"
                           (claude-gravity--session-short-id session-id)
                           (or (alist-get 'message data) "")))
+
+    ("PermissionAutoApproved"
+     ;; Bridge auto-approved a safe read-only Bash command.
+     ;; Annotate the existing tool entry so the UI can show a badge.
+     (let* ((tool-use-id (alist-get 'tool_use_id data))
+            (session (claude-gravity--get-session session-id)))
+       (when (and session tool-use-id)
+         (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+           (when tool
+             ;; Destructive append to preserve hash-table reference
+             (nconc tool (list (cons 'auto_approved t))))))
+       (claude-gravity--schedule-session-refresh session-id)))
 
     ;; ── Daemon-specific events ──────────────────────────────────────────
 

@@ -22,6 +22,7 @@ export const EVENT_DATA_SCHEMAS: Record<string, { required: string[]; optional: 
   Stop:                { required: [], optional: ['stop_text', 'stop_thinking', 'token_usage', 'slug'] },
   Notification:        { required: [], optional: ['title', 'message', 'slug'] },
   PermissionRequest:   { required: [], optional: ['slug', 'permission_id', 'permission', 'patterns', 'metadata', 'always', 'tool'] },
+  PermissionAutoApproved: { required: ['tool_name', 'tool_use_id'], optional: ['command'] },
 
   // -- OpenCode-specific events --
   SessionStatus:       { required: ['status'], optional: ['attempt', 'message'] },
