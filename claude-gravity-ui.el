@@ -325,7 +325,10 @@ Maintained for backward compatibility."
     (when buf
       (with-current-buffer buf
         (let ((inhibit-read-only t)
-              (pos (point))
+              (section-ident (when (magit-current-section)
+                               (magit-section-ident (magit-current-section))))
+              (pos-in-section (when (magit-current-section)
+                                (- (point) (oref (magit-current-section) start))))
               (projects (make-hash-table :test 'equal)))
           ;; Group sessions by project
           (maphash (lambda (_id session)
@@ -421,7 +424,13 @@ Maintained for backward compatibility."
                      (when proj-cwd
                        (claude-gravity--insert-project-capabilities proj-cwd)))))
                projects)))
-          (goto-char (min pos (point-max)))
+          ;; Restore semantic position
+          (if section-ident
+              (when-let ((section (magit-get-section section-ident)))
+                (goto-char (max (oref section start)
+                               (min (+ (oref section start) pos-in-section)
+                                    (oref section end)))))
+            (goto-char (point-min)))
           (claude-gravity--apply-visibility))))))
 
 
@@ -744,7 +753,10 @@ Only shows permission, question, and plan-review items (not idle)."
     (when buf
       (with-current-buffer buf
         (let ((inhibit-read-only t)
-              (pos (point)))
+              (section-ident (when (magit-current-section)
+                               (magit-section-ident (magit-current-section))))
+              (pos-in-section (when (magit-current-section)
+                                (- (point) (oref (magit-current-section) start)))))
           (erase-buffer)
           (magit-insert-section (root)
             (claude-gravity-insert-header session)
@@ -754,7 +766,13 @@ Only shows permission, question, and plan-review items (not idle)."
             (claude-gravity--insert-session-inbox session)
             (claude-gravity-insert-files session)
             (claude-gravity-insert-allow-patterns session))
-          (goto-char (min pos (point-max)))
+          ;; Restore semantic position
+          (if section-ident
+              (when-let ((section (magit-get-section section-ident)))
+                (goto-char (max (oref section start)
+                               (min (+ (oref section start) pos-in-section)
+                                    (oref section end)))))
+            (goto-char (point-min)))
           (claude-gravity--apply-visibility)))
       )))
 

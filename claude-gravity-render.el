@@ -211,8 +211,9 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
                               dur-str))
                   ""))
                (agent-icon (if agent "🤖 " ""))
+               (tool-use-id (alist-get 'tool_use_id item))
                (section-start (point)))
-          (magit-insert-section (tool item t)
+          (magit-insert-section (tool tool-use-id t)
             (magit-insert-heading
               (if desc
                   (format "%s%s%s %s\n%s%s%s%s"
@@ -323,9 +324,10 @@ DEPTH tracks nesting level for background tint."
                                model-badge
                                dur-str))
          (agent-cycles (claude-gravity--tlist-items (alist-get 'cycles agent)))
-         (collapsed (and agent-done-p (not (null agent-cycles)))))
+         (collapsed (and agent-done-p (not (null agent-cycles))))
+         (tool-use-id (alist-get 'tool_use_id item)))
     (let ((section-start (point)))
-      (magit-insert-section (tool item collapsed)
+      (magit-insert-section (tool tool-use-id collapsed)
         (magit-insert-heading
           (if desc
               (format "%s🤖 %s %s\n%s%s%s"
@@ -477,7 +479,8 @@ Deduplicates against the last tool's post_text/post_thinking."
 
 (defun claude-gravity--insert-task-item (task)
   "Insert a single TASK as a magit-section."
-  (let* ((subject (or (alist-get 'subject task) "(no subject)"))
+  (let* ((task-id (alist-get 'taskId task))
+         (subject (or (alist-get 'subject task) "(no subject)"))
          (status (or (alist-get 'status task) "pending"))
          (active-form (alist-get 'activeForm task))
          (checkbox (pcase status
@@ -490,7 +493,7 @@ Deduplicates against the last tool's post_text/post_thinking."
          (suffix (if (and (equal status "in_progress") active-form)
                      (concat "  " (propertize active-form 'face 'claude-gravity-task-active-form))
                    "")))
-    (magit-insert-section (task task)
+    (magit-insert-section (task task-id)
       (insert (format "%s%s %s%s\n" (claude-gravity--indent) checkbox subject suffix)))))
 
 
