@@ -662,19 +662,58 @@ Uses a single `tmux list-sessions' call instead of N `has-session' calls."
 (add-hook 'kill-emacs-hook #'claude-gravity--tmux-cleanup-all)
 
 
+(defun claude-gravity--tmux-list-claude-sessions ()
+  "Return list of live tmux session names matching the claude-* prefix.
+Sources from `tmux list-sessions' directly for robustness."
+  (condition-case nil
+      (seq-filter (lambda (name) (string-prefix-p "claude-" name))
+                  (process-lines "tmux" "list-sessions" "-F" "#{session_name}"))
+    (error nil)))
+
+(defun claude-gravity--tmux-session-display (tmux-name)
+  "Build a display string for TMUX-NAME, enriched with gravity metadata if available."
+  (let ((label tmux-name))
+    ;; Try to find gravity session metadata for richer display
+    (maphash (lambda (sid name)
+               (when (equal name tmux-name)
+                 (let ((session (gethash sid claude-gravity--sessions)))
+                   (when session
+                     (setq label (format "%s  %s  %s"
+                                         tmux-name
+                                         (or (plist-get session :project) "")
+                                         (or (plist-get session :slug) "")))))))
+             claude-gravity--tmux-sessions)
+    label))
+
 (defun claude-gravity-terminal-session ()
-  "Open a terminal buffer attached to the current session's tmux."
+  "Open a terminal buffer attached to a tmux Claude session.
+When point is on a session entry or inside a session buffer, attaches
+to that session's tmux.  Otherwise offers a picker over all live
+claude-* tmux sessions (sourced from `tmux list-sessions')."
   (interactive)
   (let* ((sid (or claude-gravity--buffer-session-id
                   (let ((section (magit-current-section)))
                     (when (and section (eq (oref section type) 'session-entry))
                       (oref section value)))))
-         (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions)))
-         (session (and sid (gethash sid claude-gravity--sessions)))
-         (project (and session (plist-get session :project))))
+         (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions))))
+    ;; Fallback: pick from live tmux sessions
     (unless tmux-name
-      (user-error "No tmux session at point"))
-    (let* ((buf-name (format "*Claude Terminal: %s*" (or project sid)))
+      (let ((live (claude-gravity--tmux-list-claude-sessions)))
+        (cond
+         ((null live)
+          (user-error "No running Claude tmux sessions"))
+         ((= (length live) 1)
+          (setq tmux-name (car live)))
+         (t
+          (let* ((candidates (mapcar (lambda (name)
+                                       (cons (claude-gravity--tmux-session-display name) name))
+                                     live))
+                 (choice (completing-read "Attach to tmux session: " candidates nil t)))
+            (setq tmux-name (cdr (assoc choice candidates))))))))
+    (let* ((session (and sid (gethash sid claude-gravity--sessions)))
+           (project (or (and session (plist-get session :project))
+                        tmux-name))
+           (buf-name (format "*Claude Terminal: %s*" project))
            (existing (get-buffer buf-name)))
       (if (and existing (buffer-live-p existing)
                 (get-buffer-process existing)

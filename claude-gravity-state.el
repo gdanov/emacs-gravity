@@ -543,7 +543,8 @@ Uses the cached :total-tool-count when available."
 
 (defun claude-gravity-model-session-end (session)
   "Mark SESSION as ended."
-  (plist-put session :status 'ended))
+  (plist-put session :status 'ended)
+  (plist-put session :claude-status 'idle))
 
 
 (defun claude-gravity-model-set-claude-status (session status)
