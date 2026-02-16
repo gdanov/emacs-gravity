@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SessionStart"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SessionStart",
+            "statusMessage": "gravity: session start"
           }
         ]
       }
@@ -17,7 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SessionEnd"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SessionEnd",
+            "statusMessage": "gravity: session end"
           }
         ]
       }
@@ -28,7 +30,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/Stop"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/Stop",
+            "statusMessage": "gravity: stop"
           }
         ]
       }
@@ -39,7 +42,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/UserPromptSubmit"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/UserPromptSubmit",
+            "statusMessage": "gravity: prompt"
           }
         ]
       }
@@ -50,7 +54,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SubagentStart"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SubagentStart",
+            "statusMessage": "gravity: agent start"
           }
         ]
       }
@@ -61,7 +66,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SubagentStop"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SubagentStop",
+            "statusMessage": "gravity: agent stop"
           }
         ]
       }
@@ -72,7 +78,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/Notification"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/Notification",
+            "statusMessage": "gravity: notification"
           }
         ]
       }
@@ -83,7 +90,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PreToolUse"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PreToolUse",
+            "statusMessage": "gravity: pre-tool"
           }
         ]
       },
@@ -93,7 +101,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/AskUserQuestionIntercept",
-            "timeout": 345600
+            "timeout": 345600,
+            "statusMessage": "gravity: question"
           }
         ]
       }
@@ -104,7 +113,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PostToolUse"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PostToolUse",
+            "statusMessage": "gravity: post-tool"
           }
         ]
       }
@@ -115,7 +125,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PostToolUseFailure"
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PostToolUseFailure",
+            "statusMessage": "gravity: tool failure"
           }
         ]
       }
@@ -127,7 +138,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PermissionRequest",
-            "timeout": 345600
+            "timeout": 345600,
+            "statusMessage": "gravity: permission"
           }
         ]
       }
