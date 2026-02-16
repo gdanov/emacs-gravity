@@ -206,13 +206,16 @@ Groups non-idle items by session and shows badge counts."
                                              ""))
                                (branch-str (or (claude-gravity--branch-or-cwd session) ""))
                                (source-str (or (claude-gravity--source-indicator session) ""))
+                               (uuid-prefix (propertize
+                                            (format " %s" (substring sid 0 (min 7 (length sid))))
+                                            'face 'claude-gravity-detail-label))
                                (inbox-badge (claude-gravity--inbox-badges sid)))
                           (magit-insert-section (session-entry sid)
                             (magit-insert-heading
-                              (format "%s%s %s %s %s %s  %s%s  [%d tools]%s"
+                              (format "%s%s %s %s %s%s %s  %s%s  [%d tools]%s"
                                       (claude-gravity--indent)
                                       indicator branch-str source-str label
-                                      tmux-badge
+                                      uuid-prefix tmux-badge
                                       (or status-label "")
                                       mode-badge
                                       n-tools inbox-badge))
@@ -716,6 +719,9 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
          (segments nil))
     (push (concat " " dot " " status-word) segments)
     (push (concat "  " slug) segments)
+    (push (propertize (format " %s" (substring sid 0 (min 7 (length sid))))
+                      'face 'claude-gravity-detail-label)
+          segments)
     (when branch-str
       (push (concat "  " branch-str) segments))
     (when source-str

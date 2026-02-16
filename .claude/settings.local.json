@@ -37,7 +37,6 @@
       "Bash(test:*)",
       "Bash(wc:*)",
       "Bash(python3:*)",
-      "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs:*)",
       "Bash(head:*)",
       "Bash(cat:*)",
       "Bash(jq:*)",
@@ -60,13 +59,12 @@
       "Bash(unset:*)",
       "WebFetch(domain:claudefa.st)",
       "mcp__plugin_github_github__search_code",
-      "Bash(git -C \"$(git rev-parse --show-toplevel)\" log --oneline -5)",
-      "Bash(git -C \"$(git rev-parse --show-toplevel)\" diff -- claude-gravity-socket.el)",
-      "Bash(git -C \"$(git rev-parse --show-toplevel)\" diff -- .claude/settings.local.json)"
+      "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs -nw --batch --eval *)",
+      "Bash(git*rev-parse*)",
+      "Bash(git rev-parse*)",
+      "Bash(git rev-parse *)",
+      "Bash(col:*)"
     ],
-    "additionalDirectories": [
-      "/Users/gdanov/.emacs.d",
-      "/tmp"
-    ]
+    "additionalDirectories": ["/Users/gdanov/.emacs.d", "/tmp"]
   }
 }
