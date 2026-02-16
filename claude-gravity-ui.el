@@ -282,7 +282,7 @@ Shows plugins with nested capabilities, then standalone categories."
             (when plugins
               (magit-insert-section (capabilities-plugins t)
                 (magit-insert-heading
-                  (format "%s  ▼ Plugins (%d)"
+                  (format "%sPlugins (%d)"
                           indent
                           (length plugins)))
                 (dolist (plugin plugins)
@@ -290,19 +290,19 @@ Shows plugins with nested capabilities, then standalone categories."
             ;; Standalone sections
             (when standalone-skills
               (claude-gravity--insert-capability-category
-               (concat indent "  ▼ Standalone Skills")
+               (concat indent "Standalone Skills")
                standalone-skills))
             (when standalone-agents
               (claude-gravity--insert-capability-category
-               (concat indent "  ▼ Standalone Agents")
+               (concat indent "Standalone Agents")
                standalone-agents))
             (when standalone-commands
               (claude-gravity--insert-capability-category
-               (concat indent "  ▼ Standalone Commands")
+               (concat indent "Standalone Commands")
                standalone-commands))
             (when standalone-mcp
               (claude-gravity--insert-capability-category
-               (concat indent "  ▼ MCP Servers")
+               (concat indent "MCP Servers")
                standalone-mcp))))))))
 
 
