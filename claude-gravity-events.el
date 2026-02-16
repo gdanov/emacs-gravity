@@ -194,6 +194,11 @@ the model mutation API to update session state."
          (claude-gravity-model-update-session-meta
           session :pid pid :slug (alist-get 'slug data)
           :branch (alist-get 'branch data))
+         ;; Capture model from SessionStart payload (available since Claude Code 2.x)
+         (let ((model-id (alist-get 'model data)))
+           (when (and model-id (stringp model-id) (not (string-empty-p model-id)))
+             (plist-put session :model-name
+                        (or (claude-gravity--short-model-name model-id) model-id))))
          (when (and source (equal source "opencode"))
            (claude-gravity--session-set-source session "opencode"
              (alist-get 'instance_port data)
