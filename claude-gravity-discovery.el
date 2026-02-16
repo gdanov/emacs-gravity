@@ -14,6 +14,9 @@ standalone-commands, standalone-mcp-servers.")
 (defvar claude-gravity--capabilities-ttl 60
   "Cache TTL in seconds for capability discovery results.")
 
+(defvar claude-gravity--frontmatter-cache (make-hash-table :test 'equal)
+  "Per-file frontmatter cache. Maps file-path -> (mtime . parsed-alist).")
+
 
 ;;; Built-in Agents
 
@@ -46,46 +49,58 @@ Returns a symbol: 'plugin, 'built-in, or 'standalone."
 ;;; YAML Frontmatter Parser
 
 (defun claude-gravity--parse-frontmatter (file-path)
-  "Parse YAML frontmatter from FILE-PATH.
+  "Parse YAML frontmatter from FILE-PATH with mtime-based caching.
 Returns alist of key-value pairs from the --- delimited header.
 Values are trimmed strings.  Multi-line values (e.g. >- blocks)
 are joined into a single line."
-  (condition-case err
-      (with-temp-buffer
-        (insert-file-contents file-path nil 0 2048)
-        (goto-char (point-min))
-        (when (looking-at "^---[ \t]*$")
-          (forward-line 1)
-          (let ((start (point))
-                (result nil))
-            (when (re-search-forward "^---[ \t]*$" nil t)
-              (let ((yaml-text (buffer-substring-no-properties start (match-beginning 0))))
-                (with-temp-buffer
-                  (insert yaml-text)
-                  (goto-char (point-min))
-                  (while (re-search-forward
-                          "^\\([a-zA-Z_-]+\\)[ \t]*:[ \t]*\\(.*\\)$" nil t)
-                    (let ((key (match-string 1))
-                          (val (string-trim (match-string 2))))
-                      ;; Handle multi-line values (>- or > or |)
-                      (when (or (string= val ">-") (string= val ">") (string= val "|"))
-                        (let ((lines nil))
-                          (forward-line 1)
-                          (while (and (not (eobp))
-                                      (looking-at "^[ \t]+\\(.+\\)$"))
-                            (push (string-trim (match-string 1)) lines)
-                            (forward-line 1))
-                          (setq val (mapconcat #'identity (nreverse lines) " "))))
-                      ;; Strip surrounding quotes
-                      (when (and (> (length val) 1)
-                                 (or (and (string-prefix-p "\"" val) (string-suffix-p "\"" val))
-                                     (and (string-prefix-p "'" val) (string-suffix-p "'" val))))
-                        (setq val (substring val 1 -1)))
-                      (push (cons (intern key) val) result))))))
-            (nreverse result))))
-    (error
-     (claude-gravity--log 'warn "Failed to parse frontmatter from %s: %s" file-path err)
-     nil)))
+  (let* ((abs-path (expand-file-name file-path))
+         (attrs (file-attributes abs-path))
+         (mtime (and attrs (float-time (file-attribute-modification-time attrs))))
+         (cached (gethash abs-path claude-gravity--frontmatter-cache)))
+    ;; Check cache: hit if mtime matches
+    (if (and cached mtime (equal mtime (car cached)))
+        (cdr cached)  ; Return cached alist
+      ;; Cache miss: parse with 2KB limit
+      (condition-case err
+          (with-temp-buffer
+            (insert-file-contents abs-path nil 0 2048)
+            (goto-char (point-min))
+            (when (looking-at "^---[ \t]*$")
+              (forward-line 1)
+              (let ((start (point))
+                    (result nil))
+                (when (re-search-forward "^---[ \t]*$" nil t)
+                  (let ((yaml-text (buffer-substring-no-properties start (match-beginning 0))))
+                    (with-temp-buffer
+                      (insert yaml-text)
+                      (goto-char (point-min))
+                      (while (re-search-forward
+                              "^\\([a-zA-Z_-]+\\)[ \t]*:[ \t]*\\(.*\\)$" nil t)
+                        (let ((key (match-string 1))
+                              (val (string-trim (match-string 2))))
+                          ;; Handle multi-line values (>- or > or |)
+                          (when (or (string= val ">-") (string= val ">") (string= val "|"))
+                            (let ((lines nil))
+                              (forward-line 1)
+                              (while (and (not (eobp))
+                                          (looking-at "^[ \t]+\\(.+\\)$"))
+                                (push (string-trim (match-string 1)) lines)
+                                (forward-line 1))
+                              (setq val (mapconcat #'identity (nreverse lines) " "))))
+                          ;; Strip surrounding quotes
+                          (when (and (> (length val) 1)
+                                     (or (and (string-prefix-p "\"" val) (string-suffix-p "\"" val))
+                                         (and (string-prefix-p "'" val) (string-suffix-p "'" val))))
+                            (setq val (substring val 1 -1)))
+                          (push (cons (intern key) val) result)))))
+                ;; Store result in cache
+                (let ((result-alist (nreverse result)))
+                  (when mtime
+                    (puthash abs-path (cons mtime result-alist) claude-gravity--frontmatter-cache))
+                  result-alist))))
+        (error
+         (claude-gravity--log 'warn "Failed to parse frontmatter from %s: %s" file-path err)
+         nil))))))
 
 
 ;;; Directory Scanners
@@ -384,6 +399,13 @@ Results are cached for `claude-gravity--capabilities-ttl' seconds."
   (if project-dir
       (remhash (expand-file-name project-dir) claude-gravity--capabilities-cache)
     (clrhash claude-gravity--capabilities-cache)))
+
+
+(defun claude-gravity--invalidate-frontmatter-cache (&optional file-path)
+  "Invalidate frontmatter cache for FILE-PATH, or all if nil."
+  (if file-path
+      (remhash (expand-file-name file-path) claude-gravity--frontmatter-cache)
+    (clrhash claude-gravity--frontmatter-cache)))
 
 
 (provide 'claude-gravity-discovery)
