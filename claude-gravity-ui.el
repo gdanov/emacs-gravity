@@ -161,7 +161,7 @@ CAP is an alist with keys: name, description, scope, file-path, type."
                               ('plugin (format "(%s)" scope))
                               (_ (format "(%s)" scope))))
                         (format "(%s)" scope))))
-    (magit-insert-section (capability-entry (alist-get 'name cap) t)
+    (magit-insert-section (capability-entry cap t)
       (magit-insert-heading
         (format "%s%s%s  %s"
                 indent
@@ -169,12 +169,6 @@ CAP is an alist with keys: name, description, scope, file-path, type."
                 (propertize name 'face name-face)
                 (propertize scope-label 'face 'claude-gravity-detail-label)))
       (insert "\n")
-      ;; Store file-path for edit-entry navigation
-      (let ((fp (alist-get 'file-path cap)))
-        (when fp
-          (put-text-property (oref (magit-current-section) start)
-                             (min (+ (oref (magit-current-section) start) 2) (point-max))
-                             'claude-gravity-file-path fp)))
       ;; Expanded content: full frontmatter fields (untruncated)
       (let ((body-indent (concat indent "    "))
             (file-path (alist-get 'file-path cap))
@@ -795,11 +789,31 @@ Only shows permission, question, and plan-review items (not idle)."
       )))
 
 
+;;; Section Navigation
+
+(defun claude-gravity--section-forward ()
+  "Move to next section, silently do nothing at the last section."
+  (interactive)
+  (condition-case nil
+      (magit-section-forward)
+    (user-error nil)))
+
+(defun claude-gravity--section-backward ()
+  "Move to previous section, silently do nothing at the first section."
+  (interactive)
+  (condition-case nil
+      (magit-section-backward)
+    (user-error nil)))
+
+
 ;;; Modes
 
 (defvar claude-gravity-mode-map (make-sparse-keymap)
   "Keymap for `claude-gravity-mode'.")
 (set-keymap-parent claude-gravity-mode-map magit-section-mode-map)
+
+(define-key claude-gravity-mode-map (kbd "n") 'claude-gravity--section-forward)
+(define-key claude-gravity-mode-map (kbd "p") 'claude-gravity--section-backward)
 
 (define-key claude-gravity-mode-map (kbd "g") 'claude-gravity-refresh)
 
@@ -1038,8 +1052,8 @@ On an agent, parse transcript.  Otherwise toggle."
   (let ((section (magit-current-section)))
     (when section
       (if (eq (oref section type) 'capability-entry)
-          (let ((file-path (get-text-property (oref section start)
-                                              'claude-gravity-file-path)))
+          (let* ((cap (oref section value))
+                 (file-path (alist-get 'file-path cap)))
             (if (and file-path (file-exists-p file-path))
                 (find-file file-path)
               (message "No file path for this entry")))
@@ -1356,6 +1370,7 @@ Disables when you manually scroll or navigate."
                                   beginning-of-buffer end-of-buffer
                                   previous-line next-line
                                   magit-section-forward magit-section-backward
+                                  claude-gravity--section-forward claude-gravity--section-backward
                                   magit-section-toggle)))
     (setq claude-gravity--follow-mode nil)
     (remove-hook 'post-command-hook #'claude-gravity--follow-detect-manual t)
