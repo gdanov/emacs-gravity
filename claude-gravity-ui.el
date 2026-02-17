@@ -441,11 +441,20 @@ Maintained for backward compatibility."
                projects)))
           ;; Restore semantic position
           (if section-ident
-              (when-let ((section (magit-get-section section-ident)))
-                (goto-char (max (oref section start)
-                               (min (+ (oref section start) pos-in-section)
-                                    (oref section end)))))
-            (goto-char (point-min)))
+              (let ((section (magit-get-section section-ident))
+                    (ident-len (if (listp section-ident) (length section-ident) 0)))
+                (if section
+                    (progn
+                      (goto-char (max (oref section start)
+                                     (min (+ (oref section start) pos-in-section)
+                                          (oref section end))))
+                      (claude-gravity--log 'debug "[buffer] restored ident (depth %d) at point=%d" ident-len (point)))
+                  (progn
+                    (claude-gravity--log 'warn "[buffer] ident NOT FOUND (depth %d), going to point-min" ident-len)
+                    (goto-char (point-min)))))
+            (progn
+              (claude-gravity--log 'debug "[buffer] no ident saved, going to point-min")
+              (goto-char (point-min))))
           (claude-gravity--apply-visibility))))))
 
 
@@ -783,11 +792,20 @@ Only shows permission, question, and plan-review items (not idle)."
             (claude-gravity-insert-allow-patterns session))
           ;; Restore semantic position
           (if section-ident
-              (when-let ((section (magit-get-section section-ident)))
-                (goto-char (max (oref section start)
-                               (min (+ (oref section start) pos-in-section)
-                                    (oref section end)))))
-            (goto-char (point-min)))
+              (let ((section (magit-get-section section-ident))
+                    (ident-len (if (listp section-ident) (length section-ident) 0)))
+                (if section
+                    (progn
+                      (goto-char (max (oref section start)
+                                     (min (+ (oref section start) pos-in-section)
+                                          (oref section end))))
+                      (claude-gravity--log 'debug "[buffer] restored ident (depth %d) at point=%d" ident-len (point)))
+                  (progn
+                    (claude-gravity--log 'warn "[buffer] ident NOT FOUND (depth %d), going to point-min" ident-len)
+                    (goto-char (point-min)))))
+            (progn
+              (claude-gravity--log 'debug "[buffer] no ident saved, going to point-min")
+              (goto-char (point-min))))
           (claude-gravity--apply-visibility)))
       )))
 
