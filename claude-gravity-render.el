@@ -567,7 +567,10 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                          (is-phase-boundary (when (listp prompt-entry)
                                               (eq (alist-get 'type prompt-entry) 'phase-boundary)))
                          (elapsed (when (listp prompt-entry)
-                                    (alist-get 'elapsed prompt-entry)))
+                                    (or (alist-get 'elapsed prompt-entry)
+                                        (when (alist-get 'submitted prompt-entry)
+                                          (float-time (time-subtract (current-time)
+                                                                     (alist-get 'submitted prompt-entry)))))))
                          (elapsed-str (claude-gravity--format-elapsed elapsed))
                          (indicator (cond (is-phase-boundary
                                            (propertize "→" 'face 'claude-gravity-phase-boundary))
