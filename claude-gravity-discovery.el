@@ -97,10 +97,11 @@ are joined into a single line."
                 (let ((result-alist (nreverse result)))
                   (when mtime
                     (puthash abs-path (cons mtime result-alist) claude-gravity--frontmatter-cache))
-                  result-alist))))
+                  result-alist)))))
         (error
-         (claude-gravity--log 'warn "Failed to parse frontmatter from %s: %s" file-path err)
-         nil))))))
+         (ignore-errors
+           (claude-gravity--log 'warn "Failed to parse frontmatter from %s: %s" file-path err))
+         nil)))))
 
 
 ;;; Directory Scanners

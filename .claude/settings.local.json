@@ -65,7 +65,8 @@
       "Bash(git rev-parse *)",
       "Bash(col:*)",
       "Bash(bd *)",
-      "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs:*)"
+      "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs:*)",
+      "mcp__linear__get_issue"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

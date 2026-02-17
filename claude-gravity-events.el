@@ -527,16 +527,20 @@ the model mutation API to update session state."
          ;; (from polling), so pre-pcase source check missed it
          (when (equal source "opencode")
            (claude-gravity--session-set-source session "opencode"
-             (alist-get 'instance_port data)
-             (alist-get 'instance_dir data)))
-         ;; Map OC status to claude-gravity status
-         (pcase oc-status
-           ((or "busy" "running")
-            (claude-gravity-model-set-claude-status session 'responding))
-           ((or "idle" "completed")
-            (claude-gravity-model-set-claude-status session 'idle))
-           ("error"
-            (claude-gravity-model-set-claude-status session 'idle)))
+(alist-get 'instance_port data)
+              (alist-get 'instance_dir data)))
+          ;; Map OC status to claude-gravity status
+          ;; Only upgrade to responding; never downgrade to idle from polling
+          ;; (real idle comes from SessionIdle/Stop events)
+          (pcase oc-status
+            ((or "busy" "running")
+             (claude-gravity-model-set-claude-status session 'responding))
+            ((or "idle" "completed")
+             (unless (eq (plist-get session :claude-status) 'responding)
+               (claude-gravity-model-set-claude-status session 'idle)))
+            ("error"
+             (unless (eq (plist-get session :claude-status) 'responding)
+               (claude-gravity-model-set-claude-status session 'idle))))
          (when title
            (plist-put session :title title))
          (claude-gravity-model-update-session-meta
