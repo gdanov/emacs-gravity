@@ -161,7 +161,7 @@ CAP is an alist with keys: name, description, scope, file-path, type."
                               ('plugin (format "(%s)" scope))
                               (_ (format "(%s)" scope))))
                         (format "(%s)" scope))))
-    (magit-insert-section (capability-entry cap t)
+    (magit-insert-section (capability-entry (alist-get 'name cap) t)
       (magit-insert-heading
         (format "%s%s%s  %s"
                 indent
@@ -169,6 +169,12 @@ CAP is an alist with keys: name, description, scope, file-path, type."
                 (propertize name 'face name-face)
                 (propertize scope-label 'face 'claude-gravity-detail-label)))
       (insert "\n")
+      ;; Store file-path for edit-entry navigation
+      (let ((fp (alist-get 'file-path cap)))
+        (when fp
+          (put-text-property (oref (magit-current-section) start)
+                             (min (+ (oref (magit-current-section) start) 2) (point-max))
+                             'claude-gravity-file-path fp)))
       ;; Expanded content: full frontmatter fields (untruncated)
       (let ((body-indent (concat indent "    "))
             (file-path (alist-get 'file-path cap))
@@ -204,7 +210,7 @@ CAP is an alist with keys: name, description, scope, file-path, type."
 Used for standalone skills/agents/commands sections."
   (when caps
     (let ((indent (claude-gravity--indent)))
-      (magit-insert-section (category nil t)
+      (magit-insert-section (category title t)
         (magit-insert-heading
           (format "%s%s (%d)"
                   indent
@@ -225,7 +231,7 @@ Used for standalone skills/agents/commands sections."
          (total (alist-get 'total plugin))
          (indent (claude-gravity--indent)))
     (when (> total 0)
-      (magit-insert-section (plugin-entry t)
+      (magit-insert-section (plugin-entry name t)
         ;; Plugin header with counts
         (magit-insert-heading
           (format "%s%s  %s — %d items"
@@ -236,7 +242,7 @@ Used for standalone skills/agents/commands sections."
         ;; Skills subsection
         (when skills
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (skills nil t)
+            (magit-insert-section (skills "skills" t)
               (magit-insert-heading
                 (format "%sSkills (%d)"
                         subindent
@@ -246,7 +252,7 @@ Used for standalone skills/agents/commands sections."
         ;; Agents subsection
         (when agents
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (agents nil t)
+            (magit-insert-section (agents "agents" t)
               (magit-insert-heading
                 (format "%sAgents (%d)"
                         subindent
@@ -256,7 +262,7 @@ Used for standalone skills/agents/commands sections."
         ;; Commands subsection
         (when commands
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (commands nil t)
+            (magit-insert-section (commands "commands" t)
               (magit-insert-heading
                 (format "%sCommands (%d)"
                         subindent
@@ -266,7 +272,7 @@ Used for standalone skills/agents/commands sections."
         ;; MCP servers subsection
         (when mcp
           (let ((subindent (concat indent "  ")))
-            (magit-insert-section (mcp-section nil t)
+            (magit-insert-section (mcp-section "mcp" t)
               (magit-insert-heading
                 (format "%sMCP Tools (%d)"
                         subindent
@@ -301,7 +307,7 @@ Shows plugins grouped in Plugins section, standalone categories as siblings."
             ;; Plugins section (same visual style as standalone categories)
             (when plugins
               (let ((indent (claude-gravity--indent)))
-                (magit-insert-section (category nil t)
+                (magit-insert-section (category "Plugins" t)
                   (magit-insert-heading
                     (format "%s%s (%d)"
                             indent
@@ -440,21 +446,12 @@ Maintained for backward compatibility."
                        (claude-gravity--insert-project-capabilities proj-cwd)))))
                projects)))
           ;; Restore semantic position
-          (if section-ident
-              (let ((section (magit-get-section section-ident))
-                    (ident-len (if (listp section-ident) (length section-ident) 0)))
-                (if section
-                    (progn
-                      (goto-char (max (oref section start)
-                                     (min (+ (oref section start) pos-in-section)
-                                          (oref section end))))
-                      (claude-gravity--log 'debug "[buffer] restored ident (depth %d) at point=%d" ident-len (point)))
-                  (progn
-                    (claude-gravity--log 'warn "[buffer] ident NOT FOUND (depth %d), going to point-min" ident-len)
-                    (goto-char (point-min)))))
-            (progn
-              (claude-gravity--log 'debug "[buffer] no ident saved, going to point-min")
-              (goto-char (point-min))))
+          (if-let* ((ident section-ident)
+                    (target (magit-get-section ident)))
+              (goto-char (max (oref target start)
+                              (min (+ (oref target start) pos-in-section)
+                                   (oref target end))))
+            (goto-char (point-min)))
           (claude-gravity--apply-visibility))))))
 
 
@@ -737,16 +734,13 @@ else current session."
 
 
 (defun claude-gravity--apply-visibility ()
-  "Apply overlay-based hiding for sections marked hidden.
-magit-section caches visibility but relies on paint hooks to apply
-overlays.  Since we render from timers, we must apply them manually."
+  "Apply visibility state and paint fringe indicators.
+magit-section caches visibility but relies on show/hide to create
+indicator overlays.  Since we render from timers (not magit-refresh-buffer),
+we must trigger this manually."
   (when magit-root-section
-    (cl-labels ((walk (section)
-                  (when (oref section hidden)
-                    (magit-section-hide section))
-                  (dolist (child (oref section children))
-                    (walk child))))
-      (walk magit-root-section))))
+    (let ((magit-section-cache-visibility nil))
+      (magit-section-show magit-root-section))))
 
 
 (defun claude-gravity--insert-session-inbox (session)
@@ -791,21 +785,12 @@ Only shows permission, question, and plan-review items (not idle)."
             (claude-gravity-insert-files session)
             (claude-gravity-insert-allow-patterns session))
           ;; Restore semantic position
-          (if section-ident
-              (let ((section (magit-get-section section-ident))
-                    (ident-len (if (listp section-ident) (length section-ident) 0)))
-                (if section
-                    (progn
-                      (goto-char (max (oref section start)
-                                     (min (+ (oref section start) pos-in-section)
-                                          (oref section end))))
-                      (claude-gravity--log 'debug "[buffer] restored ident (depth %d) at point=%d" ident-len (point)))
-                  (progn
-                    (claude-gravity--log 'warn "[buffer] ident NOT FOUND (depth %d), going to point-min" ident-len)
-                    (goto-char (point-min)))))
-            (progn
-              (claude-gravity--log 'debug "[buffer] no ident saved, going to point-min")
-              (goto-char (point-min))))
+          (if-let* ((ident section-ident)
+                    (target (magit-get-section ident)))
+              (goto-char (max (oref target start)
+                              (min (+ (oref target start) pos-in-section)
+                                   (oref target end))))
+            (goto-char (point-min)))
           (claude-gravity--apply-visibility)))
       )))
 
@@ -1053,8 +1038,8 @@ On an agent, parse transcript.  Otherwise toggle."
   (let ((section (magit-current-section)))
     (when section
       (if (eq (oref section type) 'capability-entry)
-          (let* ((cap (oref section value))
-                 (file-path (alist-get 'file-path cap)))
+          (let ((file-path (get-text-property (oref section start)
+                                              'claude-gravity-file-path)))
             (if (and file-path (file-exists-p file-path))
                 (find-file file-path)
               (message "No file path for this entry")))
