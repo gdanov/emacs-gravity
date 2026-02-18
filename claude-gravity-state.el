@@ -365,7 +365,9 @@ Uses :agent-index hash table for O(1) lookup."
         (cons 'agent-count 0)
         (cons 'frozen nil)
         (cons 'stop_text nil)
-        (cons 'stop_thinking nil)))
+        (cons 'stop_thinking nil)
+        (cons 'token-in nil)
+        (cons 'token-out nil)))
 
 (defun claude-gravity--make-cycle-node (&optional thinking text)
   "Create a new cycle node alist with optional THINKING and TEXT."
@@ -613,6 +615,14 @@ Optionally store STOP-TEXT and STOP-THINKING."
       (unless (assq 'stop_thinking last-turn)
         (nconc last-turn (list (cons 'stop_thinking nil))))
       (setf (alist-get 'stop_thinking last-turn) stop-thinking))))
+
+
+(defun claude-gravity-model-set-turn-tokens (session in-tokens out-tokens)
+  "Store per-turn token delta IN-TOKENS/OUT-TOKENS on SESSION's last turn node."
+  (let ((last-turn (claude-gravity--current-turn-node session)))
+    (when last-turn
+      (setf (alist-get 'token-in last-turn) in-tokens)
+      (setf (alist-get 'token-out last-turn) out-tokens))))
 
 
 (defun claude-gravity-model-update-prompt-answer (session tool-use-id answer)

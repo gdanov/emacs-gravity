@@ -323,6 +323,19 @@ the model mutation API to update session state."
           (alist-get 'stop_thinking data))
          (claude-gravity-model-set-token-usage
           session (alist-get 'token_usage data))
+         ;; Compute per-turn token delta and store on current turn node
+         (let* ((new-usage (alist-get 'token_usage data))
+                (prev-usage (plist-get session :prev-token-usage))
+                (new-in (+ (or (alist-get 'input_tokens new-usage) 0)
+                           (or (alist-get 'cache_read_input_tokens new-usage) 0)
+                           (or (alist-get 'cache_creation_input_tokens new-usage) 0)))
+                (new-out (or (alist-get 'output_tokens new-usage) 0))
+                (delta-in (max 0 (- new-in (or (alist-get 'total-in prev-usage) 0))))
+                (delta-out (max 0 (- new-out (or (alist-get 'total-out prev-usage) 0)))))
+           (when new-usage
+             (claude-gravity-model-set-turn-tokens session delta-in delta-out)
+             (plist-put session :prev-token-usage
+                        `((total-in . ,new-in) (total-out . ,new-out)))))
          ;; Replace any existing idle inbox item for this session
          (claude-gravity--inbox-remove-for-session session-id 'idle)
          (let* ((turn (plist-get session :current-turn))

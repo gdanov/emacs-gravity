@@ -51,6 +51,18 @@
       (insert "\n"))))
 
 
+(defun claude-gravity--format-turn-tokens (turn-node)
+  "Format per-turn token delta for TURN-NODE as '  ↓N ↑M' or empty string."
+  (let ((in (alist-get 'token-in turn-node))
+        (out (alist-get 'token-out turn-node)))
+    (if (and in out (> (+ in out) 0))
+        (propertize (format "  ↓%s ↑%s"
+                            (claude-gravity--format-token-count in)
+                            (claude-gravity--format-token-count out))
+                    'face 'claude-gravity-detail-label)
+      "")))
+
+
 (defun claude-gravity--turn-counts-from-node (turn-node)
   "Format count string from TURN-NODE's pre-computed counts."
   (let ((parts nil)
@@ -615,11 +627,12 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                               (concat "  " (propertize summary 'face 'claude-gravity-detail-label)))))
                           (magit-insert-section (turn turn-num t)
                             (magit-insert-heading
-                              (format "%s%s%s  %s%s"
+                              (format "%s%s%s  %s%s%s"
                                       (claude-gravity--indent)
                                       (propertize counts 'face 'claude-gravity-detail-label)
                                       (propertize answer-suffix 'face 'claude-gravity-detail-label)
                                       (propertize elapsed-str 'face 'claude-gravity-detail-label)
+                                      (claude-gravity--format-turn-tokens turn-node)
                                       summary-str))
                             (claude-gravity--insert-turn-children-from-tree turn-node)
                             (claude-gravity--insert-agent-completions turn-agents))
@@ -627,11 +640,12 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                       ;; Active turn: full render
                       (magit-insert-section (turn turn-num (not is-current))
                         (magit-insert-heading
-                          (format "%s%s%s  %s"
+                          (format "%s%s%s  %s%s"
                                   (claude-gravity--indent)
                                   (propertize counts 'face 'claude-gravity-detail-label)
                                   (propertize answer-suffix 'face 'claude-gravity-detail-label)
-                                  (propertize elapsed-str 'face 'claude-gravity-detail-label)))
+                                  (propertize elapsed-str 'face 'claude-gravity-detail-label)
+                                  (claude-gravity--format-turn-tokens turn-node)))
                         ;; Children from tree
                         (claude-gravity--insert-turn-children-from-tree turn-node)
                         ;; Agent completions at top level
