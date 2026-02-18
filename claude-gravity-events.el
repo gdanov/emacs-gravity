@@ -78,6 +78,35 @@ Reads the first few lines of the JSONL transcript to find the model field."
             (forward-line 1))))
     (error nil)))
 
+(defun claude-gravity--update-turn-tokens (session token-usage)
+  "Update per-turn token delta on SESSION's current turn from TOKEN-USAGE.
+Used during active turns (PostToolUse) and at turn end (Stop).
+On Stop, also updates :prev-token-usage so the next turn starts fresh."
+  (when token-usage
+    (let* ((prev-usage (plist-get session :prev-token-usage))
+           (new-in (+ (or (alist-get 'input_tokens token-usage) 0)
+                      (or (alist-get 'cache_read_input_tokens token-usage) 0)
+                      (or (alist-get 'cache_creation_input_tokens token-usage) 0)))
+           (new-out (or (alist-get 'output_tokens token-usage) 0))
+           (delta-in (max 0 (- new-in (or (alist-get 'total-in prev-usage) 0))))
+           (delta-out (max 0 (- new-out (or (alist-get 'total-out prev-usage) 0)))))
+      (claude-gravity-model-set-turn-tokens session delta-in delta-out))))
+
+(defun claude-gravity--finalize-turn-tokens (session token-usage)
+  "Finalize per-turn tokens and advance :prev-token-usage baseline.
+Called at Stop to lock in delta and set baseline for next turn."
+  (when token-usage
+    (claude-gravity--update-turn-tokens session token-usage)
+    (let* ((new-in (+ (or (alist-get 'input_tokens token-usage) 0)
+                      (or (alist-get 'cache_read_input_tokens token-usage) 0)
+                      (or (alist-get 'cache_creation_input_tokens token-usage) 0)))
+           (new-out (or (alist-get 'output_tokens token-usage) 0)))
+      (if (plist-member session :prev-token-usage)
+          (plist-put session :prev-token-usage
+                     `((total-in . ,new-in) (total-out . ,new-out)))
+        (nconc session (list :prev-token-usage
+                             `((total-in . ,new-in) (total-out . ,new-out))))))))
+
 (defun claude-gravity-handle-event (event session-id cwd data &optional pid source)
   "Handle EVENT for SESSION-ID (with CWD) carrying DATA.
 Optional PID is the Claude Code process ID.
@@ -323,19 +352,8 @@ the model mutation API to update session state."
           (alist-get 'stop_thinking data))
          (claude-gravity-model-set-token-usage
           session (alist-get 'token_usage data))
-         ;; Compute per-turn token delta and store on current turn node
-         (let* ((new-usage (alist-get 'token_usage data))
-                (prev-usage (plist-get session :prev-token-usage))
-                (new-in (+ (or (alist-get 'input_tokens new-usage) 0)
-                           (or (alist-get 'cache_read_input_tokens new-usage) 0)
-                           (or (alist-get 'cache_creation_input_tokens new-usage) 0)))
-                (new-out (or (alist-get 'output_tokens new-usage) 0))
-                (delta-in (max 0 (- new-in (or (alist-get 'total-in prev-usage) 0))))
-                (delta-out (max 0 (- new-out (or (alist-get 'total-out prev-usage) 0)))))
-           (when new-usage
-             (claude-gravity-model-set-turn-tokens session delta-in delta-out)
-             (plist-put session :prev-token-usage
-                        `((total-in . ,new-in) (total-out . ,new-out)))))
+         ;; Finalize per-turn token delta and advance baseline for next turn
+         (claude-gravity--finalize-turn-tokens session (alist-get 'token_usage data))
          ;; Replace any existing idle inbox item for this session
          (claude-gravity--inbox-remove-for-session session-id 'idle)
          (let* ((turn (plist-get session :current-turn))
@@ -497,7 +515,9 @@ the model mutation API to update session state."
                         (cons 'submitted (current-time))
                         (cons 'elapsed nil)
                         (cons 'stop_text nil)
-                        (cons 'stop_thinking nil))))))
+                        (cons 'stop_thinking nil)))))
+       ;; Update per-turn token delta (running estimate during active turn)
+       (claude-gravity--update-turn-tokens session (alist-get 'token_usage data)))
 
     ("PostToolUseFailure"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
