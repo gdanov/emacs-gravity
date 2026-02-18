@@ -391,6 +391,7 @@ If SESSION-ID is nil, uses the current buffer's session."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'claude-gravity-compose-send)
     (define-key map (kbd "C-c C-k") #'claude-gravity-compose-cancel)
+    (define-key map (kbd "C-g") #'claude-gravity-compose-cancel)
     map)
   "Keymap for `claude-gravity-compose-mode'.")
 
