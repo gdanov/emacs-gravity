@@ -9,6 +9,7 @@
 
 (defvar claude-gravity-mode-map)
 (declare-function claude-gravity--session-header-line "claude-gravity-ui")
+(declare-function claude-gravity--infer-cwd-from-section "claude-gravity-ui")
 
 
 ;;; ============================================================================
@@ -204,7 +205,11 @@ Reads marketplace.json and expands each plugin source path."
 Optional MODEL overrides the default.  PERMISSION-MODE sets the mode.
 Returns the temp session-id (re-keyed when SessionStart hook arrives)."
   (interactive
-   (list (claude-gravity--read-project-dir "Project directory: " default-directory)))
+   (list (claude-gravity--read-project-dir
+          "Project directory: "
+          (or (claude-gravity--infer-cwd-from-section)
+              claude-gravity--last-project-dir
+              default-directory))))
   (claude-gravity--tmux-check)
   (claude-gravity--ensure-server)
   (setq cwd (claude-gravity--normalize-cwd cwd))
@@ -240,6 +245,7 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
         (claude-gravity-model-set-claude-status session 'idle))
       (claude-gravity--tmux-ensure-heartbeat)
       (run-at-time 2 nil #'claude-gravity--tmux-handle-trust-prompt tmux-name)
+      (claude-gravity--record-last-project cwd)
       (claude-gravity--schedule-refresh)
       (claude-gravity--log 'debug "Claude tmux session starting in %s" cwd)
       temp-id)))

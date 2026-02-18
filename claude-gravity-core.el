@@ -117,6 +117,16 @@ Dynamically let-bound inside agent branches for nested tint selection.")
   "Name of the overview buffer.")
 
 
+(defvar claude-gravity--last-project-dir nil
+  "Directory of the most recently started claude-gravity session.
+Used as a fallback default when starting a new session with no better context.")
+
+
+(defun claude-gravity--record-last-project (dir)
+  "Record DIR as the most recently used project directory."
+  (setq claude-gravity--last-project-dir (expand-file-name dir)))
+
+
 ;;; Comments (Mock)
 
 (defun claude-gravity--make-comment-overlay (beg end text)

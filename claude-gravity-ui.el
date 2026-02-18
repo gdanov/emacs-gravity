@@ -1182,6 +1182,47 @@ Returns a list from most specific to most general, with nils removed."
                       (claude-gravity--log 'debug "Added: %s" chosen))))))))))))
 
 
+;;; Session start helpers
+
+(defun claude-gravity--infer-cwd-from-section ()
+  "Return a project CWD inferred from the current magit section, or nil.
+When point is on a session-entry section, returns that session's :cwd.
+When point is on a project section, returns the :cwd of the first matching session."
+  (let* ((section (magit-current-section))
+         (type (and section (oref section type)))
+         (value (and section (oref section value))))
+    (cond
+     ;; On a session-entry: value is the session-id string
+     ((eq type 'session-entry)
+      (let ((session (claude-gravity--get-session value)))
+        (and session (plist-get session :cwd))))
+     ;; On a project section: value is the project name; find first session's cwd
+     ((eq type 'project)
+      (let ((cwd nil))
+        (maphash (lambda (_id session)
+                   (when (and (not cwd)
+                              (equal (plist-get session :project) value))
+                     (setq cwd (plist-get session :cwd))))
+                 claude-gravity--sessions)
+        cwd)))))
+
+
+(defun claude-gravity-start-session-here ()
+  "Start a Claude session rooted at the current buffer's project.
+Detects project root via `project-current' or `vc-root-dir', then
+prompts to confirm the directory before starting."
+  (interactive)
+  (let* ((proj-root (or (and (fboundp 'project-root)
+                             (when-let ((proj (project-current)))
+                               (project-root proj)))
+                        (vc-root-dir)
+                        default-directory))
+         (dir (claude-gravity--read-project-dir
+               "Project directory: "
+               (expand-file-name proj-root))))
+    (claude-gravity-start-session dir)))
+
+
 ;;; Commands
 
 ;;;###autoload (autoload 'claude-gravity-overview-menu "claude-gravity" nil t)
@@ -1194,6 +1235,7 @@ Returns a list from most specific to most general, with nils removed."
    ["Session Management"
     ("N" "Start (Cloud)" claude-gravity-daemon-start-session)
     ("S" "Start (tmux)" claude-gravity-start-session)
+    ("H" "Start here" claude-gravity-start-session-here)
     ("r" "Resume session" claude-gravity-unified-resume)
     ("w" "Resume (picker)" claude-gravity-resume-in-tmux)
     ("D" "Remove ended" claude-gravity-cleanup-sessions)
@@ -1479,6 +1521,7 @@ in the current window."
 ;; Unified keys dispatch to the correct backend (daemon or tmux)
 (define-key claude-gravity-mode-map (kbd "N") 'claude-gravity-daemon-start-session)  ; Cloud
 (define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)          ; tmux
+(define-key claude-gravity-mode-map (kbd "H") 'claude-gravity-start-session-here)     ; start here
 (define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-unified-compose)
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-unified-resume)
 (define-key claude-gravity-mode-map (kbd "w") 'claude-gravity-resume-in-tmux)
@@ -1492,6 +1535,20 @@ in the current window."
 (define-key claude-gravity-mode-map (kbd "<backtab>") 'claude-gravity-toggle-permission-mode)
 ;; Other
 (define-key claude-gravity-mode-map (kbd "M") 'claude-gravity-debug-show)
+
+;; Global keybinding: start a session from any buffer
+;; Users can rebind by setting this before loading claude-gravity-ui
+(defcustom claude-gravity-global-start-key "C-c G"
+  "Global keybinding for `claude-gravity-start-session-here'.
+Set to nil to disable the global binding.
+Must be set before loading claude-gravity-ui to take effect,
+or call `(global-set-key (kbd NEW-KEY) #\\='claude-gravity-start-session-here)'."
+  :type '(choice string (const nil))
+  :group 'claude-gravity)
+
+(when claude-gravity-global-start-key
+  (global-set-key (kbd claude-gravity-global-start-key)
+                  #'claude-gravity-start-session-here))
 
 (provide 'claude-gravity-ui)
 ;;; claude-gravity-ui.el ends here
