@@ -133,7 +133,8 @@ Ensures :tool-index, :agent-index, and :turns exist. Idempotent."
                            :permission-mode nil
                            :slug nil
                            :branch nil
-                           :buffer nil)))
+                           :buffer nil
+                           :token-usage nil)))
         (puthash session-id session claude-gravity--sessions)
         (claude-gravity--load-allow-patterns session)
         session)))
@@ -159,6 +160,7 @@ Called when a session is restarted (e.g. via /reset or /clear)."
   (plist-put session :permission-mode nil)
   (plist-put session :slug nil)
   (plist-put session :status 'active)
+  (plist-put session :token-usage nil)
   (plist-put session :prev-token-usage nil)
   (claude-gravity--load-allow-patterns session)
   (claude-gravity--log 'debug "Claude Gravity: session %s reset" (plist-get session :session-id))
