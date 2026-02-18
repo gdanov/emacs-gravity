@@ -22,11 +22,12 @@ function getSocketPath(): string {
   if (gravitySock) {
     return gravitySock;
   }
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    return join(pluginRoot, "..", "claude-gravity.sock");
+  const sockDir = process.env.CLAUDE_GRAVITY_SOCK_DIR;
+  if (sockDir) {
+    return join(sockDir, "claude-gravity.sock");
   }
-  return join(__dirname, "..", "..", "claude-gravity.sock");
+  const home = process.env.HOME || "/tmp";
+  return join(home, ".local", "state", "claude-gravity.sock");
 }
 
 async function sendToEmacs(eventName: string, sessionId: string, cwd: string, payload: any, instancePort?: number, instanceDir?: string) {

@@ -50,13 +50,18 @@ import {
   extractTranscriptMeta,
 } from "./enrichment";
 
-// Resolve socket path from plugin root or fallback to relative location
+// Resolve socket path from CLAUDE_GRAVITY_SOCK, CLAUDE_GRAVITY_SOCK_DIR, or default location
 function getSocketPath(): string {
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-  if (pluginRoot) {
-    return join(pluginRoot, "..", "claude-gravity.sock");
+  const gravitySock = process.env.CLAUDE_GRAVITY_SOCK;
+  if (gravitySock) {
+    return gravitySock;
   }
-  return join(__dirname, "..", "..", "claude-gravity.sock");
+  const sockDir = process.env.CLAUDE_GRAVITY_SOCK_DIR;
+  if (sockDir) {
+    return join(sockDir, "claude-gravity.sock");
+  }
+  const home = process.env.HOME || "/tmp";
+  return join(home, ".local", "state", "claude-gravity.sock");
 }
 
 // Helper to send data to Emacs socket

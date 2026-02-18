@@ -100,7 +100,7 @@ If there are inbox items needing attention, shows the inbox indicator instead."
 
 
 (defvar claude-gravity-server-sock-path
-  (expand-file-name "claude-gravity.sock" (file-name-directory (or load-file-name buffer-file-name)))
+  (expand-file-name "claude-gravity.sock" (or (getenv "CLAUDE_GRAVITY_SOCK_DIR") "~/.local/state"))
   "Path to the Unix socket for Claude Gravity communication.")
 
 
@@ -227,6 +227,7 @@ Called after server restart to recover sessions that were falsely marked ended."
   (setq claude-gravity--server-stopping t)  ; suppress sentinel during restart
   (claude-gravity-server-stop)
   (setq claude-gravity--server-stopping nil)
+  (make-directory (file-name-directory claude-gravity-server-sock-path) t)
   (when (file-exists-p claude-gravity-server-sock-path)
     (delete-file claude-gravity-server-sock-path))
   (setq claude-gravity-server-process
