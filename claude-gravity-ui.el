@@ -824,7 +824,13 @@ Only shows permission, question, and plan-review items (not idle)."
 
 (define-key claude-gravity-mode-map (kbd "TAB") 'magit-section-toggle)
 
-(define-key claude-gravity-mode-map (kbd "<return>") 'claude-gravity-visit-or-toggle)
+(define-key claude-gravity-mode-map (kbd "<return>")
+  (lambda ()
+    "Visit or toggle section, but only when on a valid section."
+    (interactive)
+    (let ((section (magit-current-section)))
+      (when section
+        (claude-gravity-visit-or-toggle)))))
 
 (define-key claude-gravity-mode-map (kbd "D") 'claude-gravity-cleanup-sessions)
 

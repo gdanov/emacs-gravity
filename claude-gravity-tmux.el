@@ -18,6 +18,21 @@
 ;;; hooks via the bridge.  Prompts are sent via `tmux send-keys`.  Interactive
 ;;; Claude (no -p flag) runs inside a tmux session with TERM=dumb.
 
+(defun claude-gravity--read-project-dir (prompt &optional initial-dir)
+  "Read a project directory, with helm-compatible behavior.
+When helm-mode is active, uses `helm-read-file-name' so that the user
+can navigate into the target directory and press RET to confirm.
+Falls back to `read-directory-name' otherwise."
+  (let ((dir (if (and (bound-and-true-p helm-mode)
+                      (fboundp 'helm-read-file-name))
+                 (helm-read-file-name
+                  (concat prompt "(navigate into dir, then RET) ")
+                  :initial-input (or initial-dir default-directory)
+                  :test #'file-directory-p
+                  :must-match t)
+               (read-directory-name prompt (or initial-dir default-directory)))))
+    (file-name-as-directory (expand-file-name dir))))
+
 (defvar claude-gravity--tmux-sessions (make-hash-table :test 'equal)
   "Map of session-id → tmux session name for Emacs-managed Claude sessions.")
 
@@ -189,7 +204,7 @@ Reads marketplace.json and expands each plugin source path."
 Optional MODEL overrides the default.  PERMISSION-MODE sets the mode.
 Returns the temp session-id (re-keyed when SessionStart hook arrives)."
   (interactive
-   (list (read-directory-name "Project directory: " default-directory)))
+   (list (claude-gravity--read-project-dir "Project directory: " default-directory)))
   (claude-gravity--tmux-check)
   (claude-gravity--ensure-server)
   (setq cwd (claude-gravity--normalize-cwd cwd))
@@ -254,7 +269,7 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
          (cwd (claude-gravity--normalize-cwd
                (or cwd
                    (and existing (plist-get existing :cwd))
-                   (read-directory-name "Project directory: "))))
+                   (claude-gravity--read-project-dir "Project directory: "))))
          (temp-id (format "tmux-%s" (format-time-string "%s%3N")))
          (tmux-name (format "claude-resume-%s"
                             (substring session-id 0 (min 8 (length session-id)))))
@@ -777,7 +792,7 @@ The terminal buffer stays alive after session selection — it becomes
 the terminal view of the running session (like `$').  The gravity
 session buffer opens alongside it automatically via SessionStart."
   (interactive
-   (list (read-directory-name "Project directory: " default-directory)))
+   (list (claude-gravity--read-project-dir "Project directory: " default-directory)))
   (claude-gravity--tmux-check)
   (claude-gravity--ensure-server)
   (setq cwd (claude-gravity--normalize-cwd (or cwd default-directory)))
