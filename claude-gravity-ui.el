@@ -717,13 +717,21 @@ else current session."
            (sid (cdr (assoc choice id-map))))
       (when sid
         (claude-gravity-open-session sid)
-        ;; Auto-navigate to inbox if session has pending notifications
-        (when (cl-some (lambda (item)
-                         (and (equal (alist-get 'session-id item) sid)
-                              (memq (alist-get 'type item)
-                                    '(permission question plan-review))))
-                       claude-gravity--inbox)
-          (claude-gravity-inbox-list))))))
+        ;; Auto-open inbox pop-up if session has pending actionable items
+        (let ((first-item (cl-find-if
+                           (lambda (item)
+                             (and (equal (alist-get 'session-id item) sid)
+                                  (memq (alist-get 'type item)
+                                        '(permission question plan-review))))
+                           claude-gravity--inbox)))
+          (when first-item
+            (run-at-time 0 nil
+                         (lambda (it)
+                           (pcase (alist-get 'type it)
+                             ('permission  (claude-gravity--inbox-act-permission it))
+                             ('question    (claude-gravity--inbox-act-question it))
+                             ('plan-review (claude-gravity--inbox-act-plan-review it))))
+                         first-item)))))))
 
 
 (defun claude-gravity--apply-visibility ()
