@@ -1,8 +1,0 @@
-{
-  "name": "dev-loop",
-  "version": "0.1.0",
-  "description": "Closed-loop feature development: story authoring, architecture design, and verification agents",
-  "agents": "./agents/",
-  "commands": "./commands/",
-  "skills": "./skills/"
-}
