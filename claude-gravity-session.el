@@ -159,6 +159,7 @@ Called when a session is restarted (e.g. via /reset or /clear)."
   (plist-put session :permission-mode nil)
   (plist-put session :slug nil)
   (plist-put session :status 'active)
+  (plist-put session :prev-token-usage nil)
   (claude-gravity--load-allow-patterns session)
   (claude-gravity--log 'debug "Claude Gravity: session %s reset" (plist-get session :session-id))
   session)

@@ -67,7 +67,8 @@
       "Bash(bd *)",
       "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs:*)",
       "mcp__linear__get_issue",
-      "Bash(find /Users/gdanov/.claude/plugins -type d -name \"*dev-loop*\" 2>/dev/null | head -20)"
+      "Bash(find /Users/gdanov/.claude/plugins -type d -name \"*dev-loop*\" 2>/dev/null | head -20)",
+      "Bash(docker stop:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

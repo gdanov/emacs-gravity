@@ -124,7 +124,7 @@ export function extractTokenUsage(transcriptPath: string): {
     for (const line of lines) {
       try {
         const obj = JSON.parse(line);
-        const usage = obj.usage;
+        const usage = obj.message?.usage ?? obj.usage;
         if (usage) {
           result.input_tokens += usage.input_tokens || 0;
           result.output_tokens += usage.output_tokens || 0;
@@ -559,6 +559,11 @@ export function enrichEvent(
         const { text, thinking } = extractFollowingContent(effectiveTranscript, toolUseId);
         if (text) inputData.post_tool_text = text;
         if (thinking) inputData.post_tool_thinking = thinking;
+      } catch {}
+    }
+    if (transcriptPath) {
+      try {
+        inputData.token_usage = extractTokenUsage(transcriptPath);
       } catch {}
     }
   }

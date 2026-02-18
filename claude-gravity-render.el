@@ -43,9 +43,9 @@
            (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))
                        'face 'claude-gravity-detail-label))
          (when (and in-tokens (> in-tokens 0))
-           (propertize (format "  ↓%s ↑%s tokens"
-                               (claude-gravity--format-token-count in-tokens)
-                               (claude-gravity--format-token-count out-tokens))
+           (propertize (format "  ↑%s ↓%s tokens"
+                               (claude-gravity--format-token-count out-tokens)
+                               (claude-gravity--format-token-count in-tokens))
                        'face 'claude-gravity-detail-label))))
       (insert (propertize top-line 'face 'claude-gravity-divider) "\n")
       (insert "\n"))))
@@ -56,9 +56,9 @@
   (let ((in (alist-get 'token-in turn-node))
         (out (alist-get 'token-out turn-node)))
     (if (and in out (> (+ in out) 0))
-        (propertize (format "  ↓%s ↑%s"
-                            (claude-gravity--format-token-count in)
-                            (claude-gravity--format-token-count out))
+        (propertize (format "  ↑%s ↓%s"
+                            (claude-gravity--format-token-count out)
+                            (claude-gravity--format-token-count in))
                     'face 'claude-gravity-detail-label)
       "")))
 
