@@ -63,7 +63,15 @@ Returns the new item."
     (push item claude-gravity--inbox)
     (claude-gravity--inbox-notify item)
     (claude-gravity--schedule-refresh)
-    (claude-gravity--schedule-session-refresh session-id)
+    ;; Render session buffer unconditionally (even if buried) so inbox badge
+    ;; and item are visible when user switches to the buffer.
+    (when session
+      (let* ((owned-buf (let ((b (plist-get session :buffer)))
+                          (and b (buffer-live-p b) b)))
+             (buf (or owned-buf
+                      (get-buffer (claude-gravity--session-buffer-name session)))))
+        (when buf
+          (claude-gravity--render-session-buffer session))))
     item))
 
 

@@ -1032,7 +1032,17 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
   (setq header-line-format '(:eval (claude-gravity--session-header-line)))
   ;; tab-line-format is set dynamically by --session-header-line when overflow.
   ;; Make tab-line face match header-line so the two lines look consistent.
-  (face-remap-add-relative 'tab-line 'header-line))
+  (face-remap-add-relative 'tab-line 'header-line)
+  (add-hook 'window-selection-change-functions
+            #'claude-gravity--session-on-focus nil t))
+
+(defun claude-gravity--session-on-focus (_frame)
+  "Refresh session buffer when it gains focus."
+  (when (and (derived-mode-p 'claude-gravity-session-mode)
+             claude-gravity--buffer-session-id)
+    (let ((session (claude-gravity--get-session claude-gravity--buffer-session-id)))
+      (when session
+        (claude-gravity--render-session-buffer session)))))
 
 
 (defun claude-gravity-visit-or-toggle ()
