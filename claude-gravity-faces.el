@@ -147,7 +147,10 @@
 
 (defface claude-gravity-margin-indicator
   '((t :foreground "gray40"))
-  "Face for left margin indicators on assistant text."
+  "Fallback face for margin block indicators (▎).
+Content-type faces (thinking, assistant-text, detail-label) are
+preferred at call sites; this face is used when no content face
+is provided."
   :group 'claude-gravity)
 
 
@@ -174,7 +177,9 @@
 
 (defface claude-gravity-agent-margin
   '((t :foreground "#5599aa"))
-  "Face for margin indicator (┃) inside agent response cycles."
+  "Fallback face for margin indicator inside agent response cycles.
+Content-type faces are preferred; agent distinction is provided
+by the background tint (`claude-gravity-agent-bg')."
   :group 'claude-gravity)
 
 

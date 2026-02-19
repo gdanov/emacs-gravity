@@ -786,6 +786,10 @@ Only shows permission, question, and plan-review items (not idle)."
             (claude-gravity--insert-session-inbox session)
             (claude-gravity-insert-files session)
             (claude-gravity-insert-allow-patterns session))
+          ;; Move ▎ indicators from inline text to left display margin
+          (claude-gravity--margins-to-gutter)
+          (dolist (win (get-buffer-window-list buf nil t))
+            (set-window-margins win left-margin-width))
           ;; Restore semantic position
           (if-let* ((ident section-ident)
                     (target (magit-get-section ident)))
@@ -1034,6 +1038,8 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
   ;; tab-line-format is set dynamically by --session-header-line when overflow.
   ;; Make tab-line face match header-line so the two lines look consistent.
   (face-remap-add-relative 'tab-line 'header-line)
+  ;; Enable left display margin for gutter indicators (▎)
+  (setq left-margin-width 1)
   (add-hook 'window-selection-change-functions
             #'claude-gravity--session-on-focus nil t))
 

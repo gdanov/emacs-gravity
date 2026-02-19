@@ -166,7 +166,7 @@ Structured Claude Session  ◆ 1 tool
 ❯ Fix the bug in the login handler
   [0t 0a 1 tools]  12s
 
-  ┊ 1 tool
+  ▎ 1 tool
     [x] Fix authentication check
       Read(/src/auth/login.ts)
 ```
@@ -191,7 +191,7 @@ Structured Claude Session  ◆ 18 tools
 ── Turns (3) ────────────────────────────────────────────
 
   Pre-prompt activity  [0t 0a 2 tools]
-    ┊ 2 tools
+    ▎ 2 tools
       [x] Read codebase structure
         Glob(**/*.el)
       [x] Read main file
@@ -202,16 +202,16 @@ Structured Claude Session  ◆ 18 tools
   sections properly
   [2t 1a 8 tools]  2m34s
 
-  ┊ 3 tools                                   [collapsed]
+  ▎ 3 tools                                   [collapsed]
 
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
-  ┊ 5 tools
+  ▎ 5 tools
 
-  ┊ Thinking...                                  (purple)
+  ▎ Thinking...                                  (purple)
     I need to restructure the section insertion
     functions to handle arbitrary nesting...
 
-  ┊ I'll update the rendering functions now.     (orange)
+  ▎ I'll update the rendering functions now.     (orange)
 
     [x] Explore current rendering code
       Task(Explore · explore rendering)                4s
@@ -226,7 +226,7 @@ Structured Claude Session  ◆ 18 tools
 ? Which approach do you prefer for nesting?
   [0t 0a 1 tools]  → Option A: recursive  45s
 
-  ┊ 1 tool
+  ▎ 1 tool
     [x] Which approach do you prefer?
       AskUserQuestion
       Answer: Option A: recursive
@@ -315,12 +315,14 @@ Structured Claude Session  ◆ 18 tools
 ## 4. Response Cycles (Tool Grouping)
 
 Tools are grouped into "response cycles" — each cycle is one assistant
-message plus its tool calls. A `┊ N tools` heading groups them.
+message plus its tool calls. A `▎ N tools` heading groups them.
+The `▎` block character is colored to match the content type:
+purple for thinking, orange for assistant text, gray for structural headings.
 
 ### Single cycle (expanded, current)
 
 ```
-  ┊ 2 tools
+  ▎ 2 tools
     [x] Read project structure
       Glob(**/*.ts)
     [x] Read main module
@@ -330,11 +332,11 @@ message plus its tool calls. A `┊ N tools` heading groups them.
 ### Multiple cycles — earlier ones auto-collapsed
 
 ```
-  ┊ 3 tools                                   [collapsed]
+  ▎ 3 tools                                   [collapsed]
 
-  ┊ 2 tools
+  ▎ 2 tools
 
-  ┊ Thinking...
+  ▎ Thinking...
     Now I need to update the imports...
 
     [x] Update imports
@@ -346,13 +348,13 @@ message plus its tool calls. A `┊ N tools` heading groups them.
 ### Cycle with preceding assistant text
 
 ```
-  ┊ Thinking...                                    (purple)
+  ▎ Thinking...                                    (purple)
     The error is in the token validation. The expiry
     check is missing from the conditional...
 
-  ┊ I'll fix the authentication check now.         (orange)
+  ▎ I'll fix the authentication check now.         (orange)
 
-  ┊ 1 tool
+  ▎ 1 tool
     [x] Fix authentication check
       Edit(/src/auth/login.ts)
 ```
@@ -395,7 +397,7 @@ Work that happens before any user prompt:
 
 ```
   Pre-prompt activity  [0t 0a 2 tools]
-    ┊ 2 tools
+    ▎ 2 tools
       [x] Read codebase
         Glob(**/*.el)
       [x] Read config
@@ -407,11 +409,11 @@ Work that happens before any user prompt:
 After all tools complete, the final assistant message:
 
 ```
-  ┊ 1 tool
+  ▎ 1 tool
     [x] Run tests
       Bash(npm test)
 
-  ┊ All tests pass. The fix correctly handles       (orange)
+  ▎ All tests pass. The fix correctly handles       (orange)
     expired tokens in the authentication flow.
 ```
 
@@ -457,7 +459,7 @@ When expanded, the agent's own tool history is shown:
     [x] Search for error handling patterns
       Task(Explore · find error handlers)  → Explore (a8f2)  3.1s
 
-      ┊ 3 tools
+      ▎ 3 tools
         [x] Glob  **/*.ts
         [x] Read  /src/error-handler.ts
         [x] Grep  catch.*Error
@@ -469,10 +471,10 @@ When expanded, the agent's own tool history is shown:
     [/] Analyze test coverage                      [gold bg]
       Task(Explore · check coverage)  → Explore (b3d1)
 
-      ┊ Thinking...                                (purple)
+      ▎ Thinking...                                (purple)
         I need to check the test directory...
 
-      ┊ 2 tools
+      ▎ 2 tools
         [x] Glob  **/*.test.ts
         [/] Read  /src/tests/auth.test.ts          [gold bg]
 ```
@@ -491,12 +493,12 @@ When expanded, the agent's own tool history is shown:
     [x] Research authentication patterns
       Task(general-purpose · research auth)  → general-purpose (d5f3)  45.2s
 
-      ┊ 2 tools
+      ▎ 2 tools
         [x] Glob  **/*.ts
         [x] Explore auth implementation
           Task(Explore · find auth)  → Explore (e6g4)  12.1s
 
-          ┊ 3 tools
+          ▎ 3 tools
             [x] Grep  authenticate
             [x] Read  /src/auth/index.ts
             [x] Read  /src/auth/middleware.ts
@@ -540,10 +542,16 @@ The `──` extends to fill the window width.
 Content:
   cyan        — user prompts (❯)
   magenta     — questions (?), answers
-  orange      — assistant monologue text (┊ ...)
-  purple      — assistant thinking (┊ ...)
+  orange      — assistant monologue text (▎ ...) — orange ▎ + orange text
+  purple      — assistant thinking (▎ ...) — purple ▎ + purple text
   light green — tool description text (#88cc88)
   red         — stderr output
+
+Margin indicators (▎):
+  The ▎ block character color matches the content type:
+  purple ▎    — thinking sections
+  orange ▎    — assistant text
+  gray ▎      — tool cycle headings and structural labels
 
 Status:
   green       — done [x], idle, completed tasks
@@ -559,7 +567,7 @@ UI chrome:
 Agent demarcation:
   teal bg     — agent sub-branch background (#0a1a2a dark / #f0f5fa light)
   darker bg   — nested agent background (#0f2030 dark / #e8f0f5 light)
-  teal ┃      — agent margin indicator (#5599aa), replaces ┊ inside agents
+  (agents use same ▎ with content-type colors on teal background)
 ```
 
 ---

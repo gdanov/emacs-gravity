@@ -161,14 +161,15 @@ tables rendered regardless.  Results are cached to avoid repeated
 
 
 (defun claude-gravity--insert-wrapped-with-margin (text indent-or-nil face)
-  "Insert TEXT with word-wrap and a ┊ margin indicator.
-INDENT-OR-NIL and FACE work like `claude-gravity--insert-wrapped'."
+  "Insert TEXT with word-wrap and a ▎ margin indicator.
+INDENT-OR-NIL and FACE work like `claude-gravity--insert-wrapped'.
+The margin character inherits FACE so its color matches the content type."
   (when (and text (not (string-empty-p text)))
     (let* ((text (claude-gravity--fontify-markdown text))
            (indent (or indent-or-nil
                        (* (claude-gravity--section-depth) claude-gravity--indent-step)))
            (margin (propertize (concat claude-gravity--margin-char " ")
-                              'face claude-gravity--margin-face))
+                              'face (or face claude-gravity--margin-face)))
            (prefix (concat (make-string indent ?\s) margin))
            (fc (max 40 (- (or (window-width) 80) 2)))
            (cache-key (list text fc prefix face))
@@ -199,14 +200,14 @@ INDENT-OR-NIL and FACE work like `claude-gravity--insert-wrapped'."
 
 (defun claude-gravity--split-margin-text (text face)
   "Split TEXT into first wrapped margin line and the rest.
-Returns (FIRST-LINE . REST-STRING) where FIRST-LINE has ┊ prefix
+Returns (FIRST-LINE . REST-STRING) where FIRST-LINE has ▎ prefix
 and FACE applied.  REST-STRING contains remaining lines or nil.
 Uses current section depth for indentation."
   (when (and text (stringp text) (not (string-empty-p text)))
     (let* ((text (claude-gravity--fontify-markdown text))
            (indent (* (claude-gravity--section-depth) claude-gravity--indent-step))
            (margin (propertize (concat claude-gravity--margin-char " ")
-                              'face claude-gravity--margin-face))
+                              'face (or face claude-gravity--margin-face)))
            (prefix (concat (make-string indent ?\s) margin))
            (fc (max 40 (- (or (window-width) 80) 2)))
            (cache-key (list 'split text fc prefix face))
@@ -420,6 +421,23 @@ Only visible when :streaming-text is non-nil (during active generation)."
                               (truncate (mod seconds 60))))
    (t (format "%dh%02dm" (truncate (/ seconds 3600))
               (truncate (/ (mod seconds 3600) 60))))))
+
+
+(defun claude-gravity--margins-to-gutter ()
+  "Move inline ▎ indicators from buffer text into the left display margin.
+Post-processing step called after rendering.  Finds every ▎ character,
+preserves its face, and adds a `display' text property that renders
+it in the left margin instead of inline.  Requires `left-margin-width'
+to be set on the buffer (and window margins updated)."
+  (save-excursion
+    (goto-char (point-min))
+    (while (search-forward "▎" nil t)
+      (let* ((start (match-beginning 0))
+             (end (match-end 0))
+             (face (get-text-property start 'face)))
+        (put-text-property start end 'display
+          `((margin left-margin)
+            ,(propertize "▎" 'face (or face 'claude-gravity-margin-indicator))))))))
 
 (provide 'claude-gravity-text)
 ;;; claude-gravity-text.el ends here

@@ -107,14 +107,17 @@ EXTRA is additional spaces beyond the depth-based indent."
                ?\s))
 
 
-(defvar claude-gravity--margin-char "┊"
-  "Current margin indicator character.
-Dynamically let-bound inside agent branches to use a different character.")
+(defvar claude-gravity--margin-char "▎"
+  "Current margin indicator character (U+258E LEFT ONE QUARTER BLOCK).
+Used as gutter prefix for thinking, assistant text, and tool cycle headings.
+The character color is determined by the content-type face at each call site.")
 
 
 (defvar claude-gravity--margin-face 'claude-gravity-margin-indicator
-  "Current margin indicator face.
-Dynamically let-bound inside agent branches to use a different color.")
+  "Fallback margin indicator face.
+Used when no content-type face is passed to margin-rendering functions.
+Typically overridden at call sites by content-specific faces like
+`claude-gravity-thinking' or `claude-gravity-assistant-text'.")
 
 
 (defvar claude-gravity--agent-depth 0

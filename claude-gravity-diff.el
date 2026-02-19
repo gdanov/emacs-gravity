@@ -474,16 +474,16 @@ Called before each tool item in the rendering loop."
     ;; Trim leading/trailing whitespace
     (when athink (setq athink (string-trim athink)))
     (when atext (setq atext (string-trim atext)))
-    ;; Thinking: show "┊ Thinking..." header, then content indented below
+    ;; Thinking: show "▎ Thinking..." header, then content indented below
     (when (and athink (not (string-empty-p athink)))
       (let* ((margin (propertize (concat claude-gravity--margin-char " ")
-                                'face claude-gravity--margin-face))
+                                'face 'claude-gravity-thinking))
              (prefix (concat (make-string indent ?\s) margin)))
         (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
-        ;; Content below with plain indent (no ┊)
+        ;; Content below with plain indent (no ▎)
         (claude-gravity--insert-wrapped athink (+ indent 4) 'claude-gravity-thinking))
       (insert "\n"))
-    ;; Assistant text: show with ┊ prefix on first line
+    ;; Assistant text: show with ▎ prefix on first line
     (when (and atext (not (string-empty-p atext)))
       (claude-gravity--insert-wrapped-with-margin atext nil 'claude-gravity-assistant-text)
       (insert "\n"))))

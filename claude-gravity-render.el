@@ -109,7 +109,7 @@ Cycles are pre-computed — no dedup or grouping needed."
           (when (and athink (not (string-empty-p athink)))
             (let* ((indent (or (* (claude-gravity--section-depth) claude-gravity--indent-step) 0))
                    (margin (propertize (concat claude-gravity--margin-char " ")
-                                      'face claude-gravity--margin-face))
+                                      'face 'claude-gravity-thinking))
                    (prefix (concat (make-string indent ?\s) margin)))
               (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
               (claude-gravity--insert-wrapped athink (+ indent 4) 'claude-gravity-thinking)))
@@ -121,7 +121,7 @@ Cycles are pre-computed — no dedup or grouping needed."
                 (format "%s%s%s"
                         (claude-gravity--indent)
                         (propertize (concat claude-gravity--margin-char " ")
-                                    'face claude-gravity--margin-face)
+                                    'face 'claude-gravity-detail-label)
                         (propertize tools-label 'face 'claude-gravity-detail-label))))
             ;; Body: remaining assistant text lines
             (when (cdr split)
@@ -133,7 +133,7 @@ Cycles are pre-computed — no dedup or grouping needed."
               (insert (format "%s%s%s\n"
                               (claude-gravity--indent)
                               (propertize (concat claude-gravity--margin-char " ")
-                                          'face claude-gravity--margin-face)
+                                          'face 'claude-gravity-detail-label)
                               (propertize tools-label 'face 'claude-gravity-detail-label))))
             ;; Tools — first tool's context already rendered as heading
             (when cycle-tools
@@ -356,8 +356,7 @@ DEPTH tracks nesting level for background tint."
                                 'face 'claude-gravity-detail-label)
                     agent-suffix)))
         ;; Render agent's cycles with agent-specific styling
-        (let ((claude-gravity--margin-char "┃")
-              (claude-gravity--margin-face 'claude-gravity-agent-margin)
+        (let ((claude-gravity--margin-face 'claude-gravity-agent-margin)
               (claude-gravity--agent-depth (1+ (or depth claude-gravity--agent-depth 0)))
               (body-start (point)))
           (when agent-cycles
@@ -381,7 +380,7 @@ DEPTH tracks nesting level for background tint."
                   (when (and athink (not (string-empty-p athink)))
                     (let* ((indent (or (* (claude-gravity--section-depth) claude-gravity--indent-step) 0))
                            (margin (propertize (concat claude-gravity--margin-char " ")
-                                              'face claude-gravity--margin-face))
+                                              'face 'claude-gravity-thinking))
                            (prefix (concat (make-string indent ?\s) margin)))
                       (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
                       (claude-gravity--insert-wrapped athink (+ indent 4) 'claude-gravity-thinking)))
@@ -393,7 +392,7 @@ DEPTH tracks nesting level for background tint."
                         (format "%s%s%s"
                                 (claude-gravity--indent)
                                 (propertize (concat claude-gravity--margin-char " ")
-                                            'face claude-gravity--margin-face)
+                                            'face 'claude-gravity-detail-label)
                                 (propertize tools-label 'face 'claude-gravity-detail-label))))
                     (when (cdr split)
                       (insert (cdr split))
@@ -403,7 +402,7 @@ DEPTH tracks nesting level for background tint."
                       (insert (format "%s%s%s\n"
                                       (claude-gravity--indent)
                                       (propertize (concat claude-gravity--margin-char " ")
-                                                  'face claude-gravity--margin-face)
+                                                  'face 'claude-gravity-detail-label)
                                       (propertize tools-label 'face 'claude-gravity-detail-label))))
                     (when cycle-tools
                       (claude-gravity--insert-tool-item-from-tree (car cycle-tools))
@@ -480,7 +479,7 @@ Deduplicates against the last tool's post_text/post_thinking."
                 (magit-insert-heading
                   (format "%s%s\n"
                           (claude-gravity--indent)
-                          (propertize "┊ ⏹ " 'face 'claude-gravity-agent-stop-text)))
+                          (propertize (concat claude-gravity--margin-char " ⏹ ") 'face 'claude-gravity-agent-stop-text)))
                 (when has-think
                   (claude-gravity--insert-wrapped-with-margin
                    stop-think nil 'claude-gravity-thinking))
