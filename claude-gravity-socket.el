@@ -332,7 +332,7 @@ for those tools are auto-approved within the session.")
 
 (define-key claude-gravity-plan-review-mode-map (kbd "C-c C-l") #'claude-gravity-plan-review-approve-and-clear)
 
-(define-key claude-gravity-plan-review-mode-map (kbd "m") #'maximize-window)
+
 
 
 (transient-define-prefix claude-gravity-plan-review-menu ()

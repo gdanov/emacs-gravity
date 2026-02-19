@@ -206,16 +206,22 @@ export async function respondToQuestion(port: number, directory: string, questio
   if (answer) {
     try {
       const url = `http://localhost:${port}/question/${encodeURIComponent(questionId)}/reply?directory=${encodeURIComponent(directory)}`;
-      log(`Posting question reply: ${answer} to ${url}`, 'info');
+      // Use multi-answer format if available, else wrap single answer
+      const answersArray = emacsResponse?.answers || [answer];
+      // Flatten: each element is either a string or array of strings
+      const flatAnswers: string[] = answersArray.map((a: any) =>
+        Array.isArray(a) ? a.join(', ') : (typeof a === 'string' ? a : String(a))
+      );
+      log(`Posting question reply: ${JSON.stringify(flatAnswers)} to ${url}`, 'info');
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ answers: [answer] }),
+        body: JSON.stringify({ answers: flatAnswers }),
       });
       if (!response.ok) {
         log(`Question reply failed: ${response.status} ${response.statusText}`, 'error');
       } else {
-        log(`Question ${questionId} → ${answer}`, 'info');
+        log(`Question ${questionId} → ${JSON.stringify(flatAnswers)}`, 'info');
       }
     } catch (e) {
       log(`Failed to post question reply: ${e}`, 'error');

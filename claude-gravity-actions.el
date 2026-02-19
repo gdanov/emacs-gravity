@@ -379,16 +379,23 @@ Does not approve/deny — just writes the pattern to settings.local.json."
   "Keymap for `claude-gravity-question-action-mode'.")
 
 (define-key claude-gravity-question-action-mode-map (kbd "1") #'claude-gravity-question-action-1)
-
 (define-key claude-gravity-question-action-mode-map (kbd "2") #'claude-gravity-question-action-2)
-
 (define-key claude-gravity-question-action-mode-map (kbd "3") #'claude-gravity-question-action-3)
-
 (define-key claude-gravity-question-action-mode-map (kbd "4") #'claude-gravity-question-action-4)
-
 (define-key claude-gravity-question-action-mode-map (kbd "o") #'claude-gravity-question-action-other)
-
 (define-key claude-gravity-question-action-mode-map (kbd "q") #'claude-gravity-question-action-quit)
+(define-key claude-gravity-question-action-mode-map (kbd "]") #'claude-gravity-question-next-tab)
+(define-key claude-gravity-question-action-mode-map (kbd "[") #'claude-gravity-question-prev-tab)
+(define-key claude-gravity-question-action-mode-map (kbd "<tab>") #'claude-gravity-question-next-tab)
+(define-key claude-gravity-question-action-mode-map (kbd "<backtab>") #'claude-gravity-question-prev-tab)
+(define-key claude-gravity-question-action-mode-map (kbd "n") #'claude-gravity-question-focus-next)
+(define-key claude-gravity-question-action-mode-map (kbd "p") #'claude-gravity-question-focus-prev)
+(define-key claude-gravity-question-action-mode-map (kbd "<down>") #'claude-gravity-question-focus-next)
+(define-key claude-gravity-question-action-mode-map (kbd "<up>") #'claude-gravity-question-focus-prev)
+(define-key claude-gravity-question-action-mode-map (kbd "RET") #'claude-gravity-question-toggle-or-select)
+(define-key claude-gravity-question-action-mode-map (kbd "SPC") #'claude-gravity-question-toggle-or-select)
+(define-key claude-gravity-question-action-mode-map (kbd "C-c C-c") #'claude-gravity-question-submit)
+(define-key claude-gravity-question-action-mode-map (kbd "v") #'claude-gravity-question-preview-markdown)
 
 
 (define-minor-mode claude-gravity-question-action-mode
@@ -398,8 +405,164 @@ Does not approve/deny — just writes the pattern to settings.local.json."
   :keymap claude-gravity-question-action-mode-map)
 
 
+;; Buffer-local state for multi-question support
+
 (defvar-local claude-gravity--question-choices nil
-  "List of (label . description) choices for the current question buffer.")
+  "List of (label . description) choices for the current question tab.")
+
+(defvar-local claude-gravity--question-questions nil
+  "Vector of question alists from AskUserQuestion tool_input.")
+
+(defvar-local claude-gravity--question-current-idx 0
+  "Zero-based index of the currently displayed question tab.")
+
+(defvar-local claude-gravity--question-answers nil
+  "Hash table: question-index -> answer.
+Single-select: string.  Multi-select: list of strings.")
+
+(defvar-local claude-gravity--question-focus 0
+  "Zero-based index of the focused option (for n/p navigation and preview).")
+
+(defvar-local claude-gravity--question-label nil
+  "Session label for header display.")
+
+
+;; --- Header-line (tab bar) ---
+
+(defun claude-gravity--question-header-line ()
+  "Compute header-line showing question tabs with [done] badges.
+Only meaningful when more than one question."
+  (let ((questions claude-gravity--question-questions)
+        (idx claude-gravity--question-current-idx)
+        (answers claude-gravity--question-answers)
+        parts)
+    (when (and questions (> (length questions) 1))
+      (dotimes (i (length questions))
+        (let* ((q (aref questions i))
+               (header (or (alist-get 'header q) (format "Q%d" (1+ i))))
+               (done-p (gethash i answers))
+               (active-p (= i idx))
+               (label (concat " " header
+                               (if done-p " [done]" "")
+                               " ")))
+          (push (if active-p
+                    (propertize label 'face '(:inverse-video t :weight bold))
+                  (propertize label 'face 'claude-gravity-detail-label))
+                parts)
+          (unless (= i (1- (length questions)))
+            (push (propertize " | " 'face 'claude-gravity-divider) parts))))
+      (apply #'concat (nreverse parts)))))
+
+
+;; --- Core rendering ---
+
+(defun claude-gravity--question-current ()
+  "Return the alist for the current question tab."
+  (when (and claude-gravity--question-questions
+             (< claude-gravity--question-current-idx
+                (length claude-gravity--question-questions)))
+    (aref claude-gravity--question-questions
+          claude-gravity--question-current-idx)))
+
+
+(defun claude-gravity--question-current-options ()
+  "Return the options vector for the current question, or nil."
+  (let ((q (claude-gravity--question-current)))
+    (when q
+      (let ((opts (alist-get 'options q)))
+        (when (vectorp opts) opts)))))
+
+
+(defun claude-gravity--question-multi-select-p ()
+  "Return non-nil if the current question allows multi-select."
+  (let ((q (claude-gravity--question-current)))
+    (and q (eq (alist-get 'multiSelect q) t))))
+
+
+(defun claude-gravity--question-render-body ()
+  "Render the current question tab into the buffer.
+Erases and redraws the body while preserving buffer-local state."
+  (let* ((inhibit-read-only t)
+         (q (claude-gravity--question-current))
+         (q-text (and q (alist-get 'question q)))
+         (header (and q (alist-get 'header q)))
+         (options (claude-gravity--question-current-options))
+         (multi-p (claude-gravity--question-multi-select-p))
+         (focus claude-gravity--question-focus)
+         (n-questions (length claude-gravity--question-questions))
+         (idx claude-gravity--question-current-idx)
+         (label claude-gravity--question-label)
+         (choices nil))
+    (erase-buffer)
+    ;; Title line
+    (if (> n-questions 1)
+        (insert (propertize (format "Question %d/%d — %s\n" (1+ idx) n-questions (or label ""))
+                            'face 'claude-gravity-header-title))
+      (insert (propertize (format "Question — %s\n" (or label ""))
+                          'face 'claude-gravity-header-title)))
+    (insert (make-string 60 ?─) "\n\n")
+    ;; Header badge
+    (when header
+      (insert (propertize (format "[%s]\n" header) 'face 'claude-gravity-detail-label)))
+    ;; Question text
+    (insert (propertize (or q-text "?") 'face 'default) "\n\n")
+    ;; Options
+    (when (and options (> (length options) 0))
+      (dotimes (i (length options))
+        (let* ((opt (aref options i))
+               (opt-label (alist-get 'label opt))
+               (desc (alist-get 'description opt))
+               (focused-p (= i focus)))
+          (push (cons opt-label desc) choices)
+          (if multi-p
+              ;; Checkbox mode
+              (let* ((answer-set (gethash idx claude-gravity--question-answers))
+                     (checked-p (and (listp answer-set) (member opt-label answer-set)))
+                     (prefix (if checked-p "  [x] " "  [ ] "))
+                     (line (concat prefix opt-label
+                                   (if desc (format "  (%s)" desc) ""))))
+                (insert (if focused-p
+                            (propertize line 'face 'claude-gravity-running-bg)
+                          line)
+                        "\n"))
+            ;; Single-select: numbered
+            (let ((line (concat (propertize (format "  %d" (1+ i))
+                                            'face 'claude-gravity-tool-name)
+                                " " opt-label
+                                (if desc (format "  (%s)" desc) ""))))
+              (insert (if focused-p
+                          (propertize line 'face 'claude-gravity-running-bg)
+                        line)
+                      "\n"))))))
+    ;; Footer
+    (insert "\n" (make-string 60 ?─) "\n")
+    (let ((tab-hint (if (> n-questions 1)
+                       (concat (propertize "  ]/[" 'face 'claude-gravity-tool-name) " Tab  ")
+                     "")))
+      (if multi-p
+          (insert (propertize "  RET" 'face 'claude-gravity-tool-name) " Toggle  "
+                  (propertize "  n/p" 'face 'claude-gravity-tool-name) " Navigate  "
+                  (propertize "  C-c C-c" 'face 'claude-gravity-tool-name) " Submit  "
+                  tab-hint
+                  (propertize "  v" 'face 'claude-gravity-tool-name) " Preview  "
+                  (propertize "  o" 'face 'claude-gravity-tool-name) " Free text  "
+                  (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n")
+        (insert (propertize "  1-4" 'face 'claude-gravity-tool-name) " Select  "
+                (propertize "  n/p" 'face 'claude-gravity-tool-name) " Navigate  "
+                (propertize "  RET" 'face 'claude-gravity-tool-name) " Select focused  "
+                tab-hint
+                (propertize "  v" 'face 'claude-gravity-tool-name) " Preview  "
+                (propertize "  o" 'face 'claude-gravity-tool-name) " Free text  "
+                (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n")))
+    ;; Update backward-compat choices list
+    (setq-local claude-gravity--question-choices (nreverse choices))
+    ;; Keep cursor near top
+    (goto-char (point-min))
+    ;; Update header-line for multi-question
+    (when (> n-questions 1)
+      (setq header-line-format '(:eval (claude-gravity--question-header-line))))
+    ;; Auto-update preview if visible
+    (claude-gravity--question-update-preview-if-visible)))
 
 
 (defun claude-gravity--inbox-act-question (item)
@@ -408,114 +571,307 @@ Does not approve/deny — just writes the pattern to settings.local.json."
          (label (alist-get 'label item))
          (tool-input (alist-get 'tool_input data))
          (questions (alist-get 'questions tool-input))
-         (first-q (and (vectorp questions) (> (length questions) 0) (aref questions 0)))
-         (q-text (and first-q (alist-get 'question first-q)))
-         (header (and first-q (alist-get 'header first-q)))
-         (options (and first-q (alist-get 'options first-q)))
-         (choices (when (vectorp options)
-                    (cl-loop for i from 0 below (length options)
-                             for opt = (aref options i)
-                             for opt-label = (alist-get 'label opt)
-                             for desc = (alist-get 'description opt)
-                             collect (cons opt-label desc))))
          (item-id (alist-get 'id item))
          (buf (get-buffer-create (format "*Claude Action: Question #%d*" item-id))))
     (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize (format "Question — %s\n" label)
-                            'face 'claude-gravity-header-title))
-        (insert (make-string 60 ?─) "\n\n")
-        (when header
-          (insert (propertize (format "[%s]\n" header) 'face 'claude-gravity-detail-label)))
-        (insert (propertize (or q-text "?") 'face 'default) "\n\n")
-        (when choices
-          (cl-loop for i from 0
-                   for (clabel . desc) in choices
-                   do (insert (propertize (format "  %d" (1+ i)) 'face 'claude-gravity-tool-name)
-                              " " clabel
-                              (if desc (format "  (%s)" desc) "")
-                              "\n")))
-        (insert "\n" (make-string 60 ?─) "\n")
-        (insert (propertize "  1-4" 'face 'claude-gravity-tool-name) " Select option  "
-                (propertize "  o" 'face 'claude-gravity-tool-name) " Free text  "
-                (propertize "  q" 'face 'claude-gravity-tool-name) " Close\n"))
-      (setq buffer-read-only t)
-      (goto-char (point-min))
       (claude-gravity-question-action-mode 1)
       (setq-local claude-gravity--action-inbox-item item)
-      (setq-local claude-gravity--question-choices choices))
+      (setq-local claude-gravity--question-questions
+                  (if (vectorp questions) questions (vector)))
+      (setq-local claude-gravity--question-current-idx 0)
+      (setq-local claude-gravity--question-answers (make-hash-table :test 'eql))
+      (setq-local claude-gravity--question-focus 0)
+      (setq-local claude-gravity--question-label label)
+      (setq buffer-read-only t)
+      (claude-gravity--question-render-body))
     (puthash item-id buf claude-gravity--inbox-action-buffers)
     (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))
     (select-window (get-buffer-window buf))))
 
 
-(defun claude-gravity--question-action-respond (answer-label)
-  "Send ANSWER-LABEL as the question response and clean up."
+;; --- Tab navigation ---
+
+(defun claude-gravity-question-next-tab ()
+  "Switch to the next question tab (wraps around)."
+  (interactive)
+  (let ((n (length claude-gravity--question-questions)))
+    (when (> n 1)
+      (setq-local claude-gravity--question-current-idx
+                  (mod (1+ claude-gravity--question-current-idx) n))
+      (setq-local claude-gravity--question-focus 0)
+      (claude-gravity--question-render-body))))
+
+
+(defun claude-gravity-question-prev-tab ()
+  "Switch to the previous question tab (wraps around)."
+  (interactive)
+  (let ((n (length claude-gravity--question-questions)))
+    (when (> n 1)
+      (setq-local claude-gravity--question-current-idx
+                  (mod (+ claude-gravity--question-current-idx (1- n)) n))
+      (setq-local claude-gravity--question-focus 0)
+      (claude-gravity--question-render-body))))
+
+
+;; --- Focus navigation ---
+
+(defun claude-gravity-question-focus-next ()
+  "Move focus to the next option."
+  (interactive)
+  (let ((opts (claude-gravity--question-current-options)))
+    (when (and opts (> (length opts) 0))
+      (setq-local claude-gravity--question-focus
+                  (mod (1+ claude-gravity--question-focus) (length opts)))
+      (claude-gravity--question-render-body))))
+
+
+(defun claude-gravity-question-focus-prev ()
+  "Move focus to the previous option."
+  (interactive)
+  (let ((opts (claude-gravity--question-current-options)))
+    (when (and opts (> (length opts) 0))
+      (setq-local claude-gravity--question-focus
+                  (mod (+ claude-gravity--question-focus (1- (length opts)))
+                       (length opts)))
+      (claude-gravity--question-render-body))))
+
+
+;; --- Toggle / Select ---
+
+(defun claude-gravity-question-toggle-or-select ()
+  "RET/SPC: multi-select toggles checkbox; single-select picks focused option."
+  (interactive)
+  (let ((opts (claude-gravity--question-current-options))
+        (focus claude-gravity--question-focus)
+        (idx claude-gravity--question-current-idx))
+    (when (and opts (< focus (length opts)))
+      (if (claude-gravity--question-multi-select-p)
+          ;; Multi-select: toggle checkbox
+          (let* ((opt-label (alist-get 'label (aref opts focus)))
+                 (current (gethash idx claude-gravity--question-answers))
+                 (current-list (if (listp current) current nil)))
+            (if (member opt-label current-list)
+                (puthash idx (remove opt-label current-list)
+                         claude-gravity--question-answers)
+              (puthash idx (append current-list (list opt-label))
+                       claude-gravity--question-answers))
+            (claude-gravity--question-render-body))
+        ;; Single-select: pick focused option
+        (let ((opt-label (alist-get 'label (aref opts focus))))
+          (claude-gravity--question-answer-single idx opt-label))))))
+
+
+(defun claude-gravity--question-answer-single (question-idx answer-label)
+  "Record ANSWER-LABEL for single-select QUESTION-IDX and auto-advance."
+  (puthash question-idx answer-label claude-gravity--question-answers)
+  ;; Auto-advance: find next unanswered question, or submit if all done
+  (let ((n (length claude-gravity--question-questions))
+        (next nil))
+    (cl-loop for offset from 1 below n
+             for candidate = (mod (+ question-idx offset) n)
+             unless (gethash candidate claude-gravity--question-answers)
+             do (setq next candidate) and return nil)
+    (if next
+        (progn
+          (setq-local claude-gravity--question-current-idx next)
+          (setq-local claude-gravity--question-focus 0)
+          (claude-gravity--question-render-body))
+      ;; All answered — auto-submit
+      (claude-gravity--question-do-submit))))
+
+
+;; --- Number key handlers ---
+
+(defun claude-gravity--question-action-select (n)
+  "Select option N (1-based) from the current question."
+  (let ((opts (claude-gravity--question-current-options))
+        (idx claude-gravity--question-current-idx))
+    (when (and opts (>= n 1) (<= n (length opts)))
+      (let ((opt-label (alist-get 'label (aref opts (1- n)))))
+        (if (claude-gravity--question-multi-select-p)
+            ;; Multi-select: toggle
+            (let* ((current (gethash idx claude-gravity--question-answers))
+                   (current-list (if (listp current) current nil)))
+              (if (member opt-label current-list)
+                  (puthash idx (remove opt-label current-list)
+                           claude-gravity--question-answers)
+                (puthash idx (append current-list (list opt-label))
+                         claude-gravity--question-answers))
+              (setq-local claude-gravity--question-focus (1- n))
+              (claude-gravity--question-render-body))
+          ;; Single-select: answer + advance
+          (claude-gravity--question-answer-single idx opt-label))))))
+
+
+(defun claude-gravity-question-action-1 () "Select option 1." (interactive) (claude-gravity--question-action-select 1))
+(defun claude-gravity-question-action-2 () "Select option 2." (interactive) (claude-gravity--question-action-select 2))
+(defun claude-gravity-question-action-3 () "Select option 3." (interactive) (claude-gravity--question-action-select 3))
+(defun claude-gravity-question-action-4 () "Select option 4." (interactive) (claude-gravity--question-action-select 4))
+
+
+;; --- Submit ---
+
+(defun claude-gravity-question-submit ()
+  "Submit all answers.  Warns if unanswered questions remain."
+  (interactive)
+  (let ((n (length claude-gravity--question-questions))
+        (answers claude-gravity--question-answers)
+        unanswered)
+    ;; For multi-select current question, store empty list if nothing checked
+    (when (claude-gravity--question-multi-select-p)
+      (let ((idx claude-gravity--question-current-idx))
+        (unless (gethash idx answers)
+          (puthash idx nil answers))))
+    ;; Check for unanswered questions
+    (dotimes (i n)
+      (unless (gethash i answers)
+        (push i unanswered)))
+    (if unanswered
+        (let ((labels (mapcar (lambda (i)
+                                (let ((q (aref claude-gravity--question-questions i)))
+                                  (or (alist-get 'header q) (format "Q%d" (1+ i)))))
+                              (nreverse unanswered))))
+          (message "Unanswered: %s  (use ]/[ to switch tabs)" (string-join labels ", ")))
+      (claude-gravity--question-do-submit))))
+
+
+(defun claude-gravity--question-do-submit ()
+  "Send all answers and clean up."
   (let* ((item claude-gravity--action-inbox-item)
          (proc (alist-get 'socket-proc item))
          (data (alist-get 'data item))
-         (q-text (let* ((tool-input (alist-get 'tool_input data))
-                        (questions (alist-get 'questions tool-input))
-                        (first-q (and (vectorp questions) (> (length questions) 0) (aref questions 0))))
-                   (and first-q (alist-get 'question first-q))))
          (tid (alist-get 'tool_use_id data))
-         (session-id (alist-get 'session-id item)))
-    ;; Send deny response with the answer
-    ;; Include top-level 'answer' for OpenCode bridge extraction
+         (session-id (alist-get 'session-id item))
+         (questions claude-gravity--question-questions)
+         (answers claude-gravity--question-answers)
+         (n (length questions))
+         ;; Build answers vector: string for single-select, vector for multi-select
+         (answers-vec (let ((v (make-vector n nil)))
+                        (dotimes (i n)
+                          (let ((a (gethash i answers)))
+                            (aset v i (if (listp a) (vconcat a) a))))
+                        v))
+         ;; First question's answer (backward compat)
+         (first-answer (if (> n 0)
+                           (let ((a (aref answers-vec 0)))
+                             (if (vectorp a)
+                                 (mapconcat #'identity (append a nil) ", ")
+                               (or a "")))
+                         ""))
+         ;; Build human-readable summary
+         (summary (let (parts)
+                    (dotimes (i n)
+                      (let* ((q (aref questions i))
+                             (header (or (alist-get 'header q) (format "Q%d" (1+ i))))
+                             (a (gethash i answers)))
+                        (push (format "%s: %s" header
+                                      (if (listp a)
+                                          (mapconcat #'identity a ", ")
+                                        (or a "")))
+                              parts)))
+                    (mapconcat #'identity (nreverse parts) "\n"))))
+    ;; Send response
     (let ((response `((hookSpecificOutput
                        . ((hookEventName . "PreToolUse")
                           (permissionDecision . "deny")
                           (permissionDecisionReason
-                           . ,(format "User answered from Emacs: %s\nQuestion: %s\nAnswer: %s"
-                                      answer-label (or q-text "") answer-label))))
-                      (answer . ,answer-label))))
+                           . ,(format "User answered from Emacs:\n%s" summary))))
+                      (answer . ,first-answer)
+                      (answers . ,answers-vec))))
       (claude-gravity--send-bidirectional-response proc response))
-    ;; Update prompt entry with answer
+    ;; Update prompt entry with first answer
     (let ((session (claude-gravity--get-session session-id)))
       (when (and session tid)
-        (claude-gravity-model-update-prompt-answer session tid answer-label)))
+        (claude-gravity-model-update-prompt-answer session tid first-answer)))
     ;; Clean up
     (remhash (alist-get 'id item) claude-gravity--inbox-action-buffers)
     (claude-gravity--inbox-remove (alist-get 'id item))
+    ;; Kill preview buffer if exists
+    (let ((preview-buf (get-buffer "*Claude Question Preview*")))
+      (when (and preview-buf (buffer-live-p preview-buf))
+        (kill-buffer preview-buf)))
     (let ((buf (current-buffer)))
       (quit-window)
       (kill-buffer buf))
-    (claude-gravity--log 'debug "Answered: %s" answer-label)
+    (claude-gravity--log 'debug "Answered: %s" summary)
     (claude-gravity--inbox-pop-next session-id)))
 
 
-(defun claude-gravity--question-action-select (n)
-  "Select option N (1-based) from the question choices."
-  (let ((choices claude-gravity--question-choices))
-    (if (and choices (>= n 1) (<= n (length choices)))
-        (claude-gravity--question-action-respond (car (nth (1- n) choices)))
-      (claude-gravity--log 'debug "No option %d" n))))
-
-
-(defun claude-gravity-question-action-1 () "Select option 1." (interactive) (claude-gravity--question-action-select 1))
-
-(defun claude-gravity-question-action-2 () "Select option 2." (interactive) (claude-gravity--question-action-select 2))
-
-(defun claude-gravity-question-action-3 () "Select option 3." (interactive) (claude-gravity--question-action-select 3))
-
-(defun claude-gravity-question-action-4 () "Select option 4." (interactive) (claude-gravity--question-action-select 4))
-
+;; --- Free text / quit ---
 
 (defun claude-gravity-question-action-other ()
-  "Enter free text answer."
+  "Enter free text answer for the current question."
   (interactive)
-  (let ((answer (read-string "Your answer: ")))
+  (let ((answer (read-string "Your answer: "))
+        (idx claude-gravity--question-current-idx))
     (unless (string-empty-p answer)
-      (claude-gravity--question-action-respond answer))))
+      (if (claude-gravity--question-multi-select-p)
+          (progn
+            (puthash idx (list answer) claude-gravity--question-answers)
+            ;; For multi-select with free text, auto-advance
+            (claude-gravity--question-advance-or-submit idx))
+        (claude-gravity--question-answer-single idx answer)))))
+
+
+(defun claude-gravity--question-advance-or-submit (from-idx)
+  "Advance to next unanswered question from FROM-IDX, or submit if all done."
+  (let ((n (length claude-gravity--question-questions))
+        (next nil))
+    (cl-loop for offset from 1 below n
+             for candidate = (mod (+ from-idx offset) n)
+             unless (gethash candidate claude-gravity--question-answers)
+             do (setq next candidate) and return nil)
+    (if next
+        (progn
+          (setq-local claude-gravity--question-current-idx next)
+          (setq-local claude-gravity--question-focus 0)
+          (claude-gravity--question-render-body))
+      (claude-gravity--question-do-submit))))
 
 
 (defun claude-gravity-question-action-quit ()
   "Close question action buffer without responding."
   (interactive)
+  (let ((preview-buf (get-buffer "*Claude Question Preview*")))
+    (when (and preview-buf (buffer-live-p preview-buf))
+      (kill-buffer preview-buf)))
   (let ((buf (current-buffer)))
     (quit-window)
     (kill-buffer buf)))
+
+
+;; --- Markdown preview ---
+
+(defun claude-gravity-question-preview-markdown ()
+  "Show markdown preview for the focused option in a side window."
+  (interactive)
+  (let* ((opts (claude-gravity--question-current-options))
+         (focus claude-gravity--question-focus)
+         (opt (when (and opts (< focus (length opts))) (aref opts focus)))
+         (md (when opt (alist-get 'markdown opt)))
+         (opt-label (when opt (alist-get 'label opt))))
+    (if (and md (stringp md) (not (string-empty-p md)))
+        (let ((buf (get-buffer-create "*Claude Question Preview*")))
+          (with-current-buffer buf
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert (propertize (format "Preview: %s\n" (or opt-label ""))
+                                  'face 'claude-gravity-header-title))
+              (insert (make-string 40 ?─) "\n\n")
+              (insert (claude-gravity--fontify-markdown md)))
+            (setq buffer-read-only t)
+            (goto-char (point-min)))
+          (display-buffer buf '((display-buffer-in-side-window)
+                                (side . right)
+                                (window-width . 0.4))))
+      (message "No markdown preview for this option"))))
+
+
+(defun claude-gravity--question-update-preview-if-visible ()
+  "Update the preview window if it is currently visible."
+  (let ((preview-buf (get-buffer "*Claude Question Preview*")))
+    (when (and preview-buf (get-buffer-window preview-buf))
+      (claude-gravity-question-preview-markdown))))
 
 
 ;; --- Plan Review Action (reuse existing) ---
