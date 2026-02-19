@@ -1,0 +1,19 @@
+{
+  "name": "local-emacs-marketplace",
+  "owner": {
+    "name": "gdanov",
+    "email": "gdanov@example.com"
+  },
+  "plugins": [
+    {
+      "name": "emacs-bridge",
+      "description": "Bridge to Emacs via Unix Socket",
+      "source": "./emacs-bridge"
+    },
+    {
+      "name": "dev-loop",
+      "description": "Closed-loop feature development: story, architecture, verification",
+      "source": "./dev-loop"
+    }
+  ]
+}
