@@ -515,9 +515,9 @@ the model mutation API to update session state."
                         (cons 'submitted (current-time))
                         (cons 'elapsed nil)
                         (cons 'stop_text nil)
-                        (cons 'stop_thinking nil)))))
+                        (cons 'stop_thinking nil))))
        ;; Update per-turn token delta (running estimate during active turn)
-       (claude-gravity--update-turn-tokens session (alist-get 'token_usage data)))
+       (claude-gravity--update-turn-tokens session (alist-get 'token_usage data))))
 
     ("PostToolUseFailure"
      (let* ((session (claude-gravity--ensure-session session-id cwd))

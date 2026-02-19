@@ -171,16 +171,17 @@ EXTRA-DATA is an alist merged into the event data."
       (should (= 2 (alist-get 'turn (cg-test--tool-by-id sid "t2"))))
       (should (= 4 (alist-get 'turn (cg-test--tool-by-id sid "t4")))))))
 
-(ert-deftest cg-test-stop-attaches-to-last-prompt ()
-  "Stop handler attaches stop_text to the last prompt, including phase-boundary."
+(ert-deftest cg-test-stop-attaches-to-last-turn ()
+  "Stop handler attaches stop_text to the last turn node."
   (let ((sid (cg-test--fresh-session "test-6")))
     (cg-test--prompt-submit sid "plan")
     (cg-test--pre-tool sid "ExitPlanMode" "t1")
     (cg-test--post-tool sid "ExitPlanMode" "t1")
     (cg-test--stop sid (list (cons 'stop_text "Done")))
-    (let ((prompts (cg-test--all-prompts sid)))
-      ;; stop_text on the phase-boundary prompt (last one)
-      (should (equal "Done" (alist-get 'stop_text (nth 1 prompts)))))))
+    ;; stop_text is stored on the turn node (not the prompt)
+    (let* ((session (cg-test--get sid))
+           (last-turn (claude-gravity--current-turn-node session)))
+      (should (equal "Done" (alist-get 'stop_text last-turn))))))
 
 (ert-deftest cg-test-permission-mode-stored-on-tool ()
   "PreToolUse stores permission_mode on the tool entry and session."
@@ -269,8 +270,9 @@ This test simulates the flow:
 
     ;; === Phase 4: Verify Turn Separation ===
     (let ((session (cg-test--get sid)))
-      ;; Verify final turn counter
-      (should (= 2 (plist-get session :current-turn)))
+      ;; Final turn counter: 3 because AskUserQuestion creates a question
+      ;; prompt which advances the turn (prompt-1=1, prompt-2=2, question=3)
+      (should (= 3 (plist-get session :current-turn)))
       (should (eq 'idle (plist-get session :claude-status))))
 
     ;; Verify all tools and their turn attribution
@@ -279,27 +281,33 @@ This test simulates the flow:
       ;; First tool from first turn
       (should (= 1 (alist-get 'turn (nth 0 all-tools))))
       (should (equal "t1" (alist-get 'tool_use_id (nth 0 all-tools))))
-      ;; Second tool from second turn
+      ;; AskUserQuestion tool on turn 2 (before it advances to turn 3)
       (should (= 2 (alist-get 'turn (nth 1 all-tools))))
       (should (equal "t2" (alist-get 'tool_use_id (nth 1 all-tools)))))
 
-    ;; Verify turn nodes exist and are separate
+    ;; Verify turn nodes: 4 total (turn 0 pre-prompt + 3 turns)
     (let ((turn-nodes (cg-test--turn-nodes sid)))
-      (should (= 2 (length turn-nodes)))
-      ;; Turn 1
-      (let ((turn1 (nth 0 turn-nodes)))
+      (should (= 4 (length turn-nodes)))
+      ;; Turn 0: pre-prompt activity (SessionStart creates it)
+      (let ((turn0 (nth 0 turn-nodes)))
+        (should (= 0 (alist-get 'turn-number turn0))))
+      (let ((turn1 (nth 1 turn-nodes)))
         (should (= 1 (alist-get 'turn-number turn1)))
         (should (alist-get 'prompt turn1)))
-      ;; Turn 2
-      (let ((turn2 (nth 1 turn-nodes)))
+      (let ((turn2 (nth 2 turn-nodes)))
         (should (= 2 (alist-get 'turn-number turn2)))
-        (should (alist-get 'prompt turn2))))
+        (should (alist-get 'prompt turn2)))
+      (let ((turn3 (nth 3 turn-nodes)))
+        (should (= 3 (alist-get 'turn-number turn3)))
+        ;; Turn 3 is the AskUserQuestion question prompt
+        (should (eq 'question (alist-get 'type (alist-get 'prompt turn3))))))
 
-    ;; Verify prompts are correct
+    ;; Verify prompts: user prompt, user prompt, question prompt
     (let ((prompts (cg-test--all-prompts sid)))
-      (should (= 2 (length prompts)))
+      (should (= 3 (length prompts)))
       (should (equal "List files in current directory" (alist-get 'text (nth 0 prompts))))
-      (should (equal "What is 2 + 2?" (alist-get 'text (nth 1 prompts)))))))
+      (should (equal "What is 2 + 2?" (alist-get 'text (nth 1 prompts))))
+      (should (equal "2+2=" (alist-get 'text (nth 2 prompts)))))))
 
 (ert-deftest cg-test-tmux-manual-prompt-rapid-succession ()
   "Multiple manual prompts in rapid succession track turns correctly.
@@ -386,15 +394,16 @@ The tmux-prompt-sent flag should prevent duplicates."
     (should session)
     (should (eq 'idle (plist-get session :claude-status)))))
 
-(ert-deftest cg-test-replay-stop-text-on-prompt ()
-  "Stop event attaches stop_text and stop_thinking to the last prompt."
+(ert-deftest cg-test-replay-stop-text-on-turn ()
+  "Stop event attaches stop_text and stop_thinking to the last turn node."
   (let* ((sid (cg-test--replay-stop-text))
-         (prompts (cg-test--all-prompts sid)))
-    (should (= 1 (length prompts)))
+         (session (cg-test--get sid))
+         (last-turn (claude-gravity--current-turn-node session)))
+    (should last-turn)
     (should (equal "All verified, nothing to implement."
-                   (alist-get 'stop_text (car prompts))))
+                   (alist-get 'stop_text last-turn)))
     (should (equal "The code looks correct, no changes needed."
-                   (alist-get 'stop_thinking (car prompts))))))
+                   (alist-get 'stop_thinking last-turn)))))
 
 (ert-deftest cg-test-replay-stop-text-tool-count ()
   "stop_text replay produces 2 Read tools, both completed."
@@ -431,6 +440,202 @@ The tmux-prompt-sent flag should prevent duplicates."
     (let ((tools (cg-test--all-root-tools sid)))
       (should (= 1 (alist-get 'turn (nth 0 tools))))
       (should (= 1 (alist-get 'turn (nth 1 tools)))))))
+
+;;; Multi-agent tests
+
+(defun cg-test--subagent-start (sid agent-id agent-type)
+  "Send a SubagentStart event for SID with AGENT-ID and AGENT-TYPE."
+  (claude-gravity-handle-event
+   "SubagentStart" sid "/tmp/test"
+   (list (cons 'agent_id agent-id)
+         (cons 'agent_type agent-type))))
+
+(defun cg-test--subagent-stop (sid agent-id)
+  "Send a SubagentStop event for SID with AGENT-ID."
+  (claude-gravity-handle-event
+   "SubagentStop" sid "/tmp/test"
+   (list (cons 'agent_id agent-id))))
+
+(defun cg-test--agent-tools (sid agent-id)
+  "Collect all tools in AGENT-ID's cycles for session SID."
+  (let* ((session (cg-test--get sid))
+         (agent (claude-gravity--find-agent session agent-id))
+         (result nil))
+    (when agent
+      (dolist (cycle (claude-gravity--tlist-items (alist-get 'cycles agent)))
+        (dolist (tool (claude-gravity--tlist-items (alist-get 'tools cycle)))
+          (push tool result))))
+    (nreverse result)))
+
+(ert-deftest cg-test-multi-agent-separate-tool-streams ()
+  "Two agents in same turn get separate tool streams in the model."
+  (let ((sid (cg-test--fresh-session "test-multi-agent")))
+    (cg-test--session-start sid)
+    (cg-test--prompt-submit sid "Do two things in parallel")
+
+    ;; Claude calls two Task tools (root level, no agents active yet)
+    (cg-test--pre-tool sid "Task" "task1"
+                       (list (cons 'tool_input
+                                   (list (cons 'subagent_type "Explore")
+                                         (cons 'description "find X")
+                                         (cons 'prompt "find X")))))
+    (cg-test--pre-tool sid "Task" "task2"
+                       (list (cons 'tool_input
+                                   (list (cons 'subagent_type "Explore")
+                                         (cons 'description "find Y")
+                                         (cons 'prompt "find Y")))))
+
+    ;; Both Task tools should be in root cycles
+    (let ((root-tools (cg-test--all-root-tools sid)))
+      (should (= 2 (length root-tools)))
+      (should (equal "Task" (alist-get 'name (nth 0 root-tools))))
+      (should (equal "Task" (alist-get 'name (nth 1 root-tools)))))
+
+    ;; SubagentStart for both agents
+    (cg-test--subagent-start sid "agent-aaa" "Explore")
+    (cg-test--subagent-start sid "agent-bbb" "Explore")
+
+    ;; Verify agents exist
+    (let ((session (cg-test--get sid)))
+      (should (claude-gravity--find-agent session "agent-aaa"))
+      (should (claude-gravity--find-agent session "agent-bbb")))
+
+    ;; Verify Task tools are linked to agents (bidirectional)
+    (let* ((session (cg-test--get sid))
+           (agent-a (claude-gravity--find-agent session "agent-aaa"))
+           (agent-b (claude-gravity--find-agent session "agent-bbb")))
+      ;; Both agents should have task-tool links
+      (should (alist-get 'task-tool agent-a))
+      (should (alist-get 'task-tool agent-b))
+      ;; The task tools should point to different tools
+      (should-not (eq (alist-get 'task-tool agent-a)
+                      (alist-get 'task-tool agent-b)))
+      ;; Each task tool should have an agent pointer back
+      (should (alist-get 'agent (alist-get 'task-tool agent-a)))
+      (should (alist-get 'agent (alist-get 'task-tool agent-b))))
+
+    ;; Agent A runs tools (parent_agent_id = "agent-aaa")
+    (cg-test--pre-tool sid "Glob" "a-t1"
+                       (list (cons 'parent_agent_id "agent-aaa")
+                             (cons 'tool_input '((pattern . "**/*.ts")))))
+    (cg-test--post-tool sid "Glob" "a-t1"
+                        (list (cons 'parent_agent_id "agent-aaa")))
+    (cg-test--pre-tool sid "Read" "a-t2"
+                       (list (cons 'parent_agent_id "agent-aaa")
+                             (cons 'tool_input '((file_path . "/src/foo.ts")))))
+    (cg-test--post-tool sid "Read" "a-t2"
+                        (list (cons 'parent_agent_id "agent-aaa")))
+
+    ;; Agent B runs tools (parent_agent_id = "agent-bbb")
+    (cg-test--pre-tool sid "Grep" "b-t1"
+                       (list (cons 'parent_agent_id "agent-bbb")
+                             (cons 'tool_input '((pattern . "error")))))
+    (cg-test--post-tool sid "Grep" "b-t1"
+                        (list (cons 'parent_agent_id "agent-bbb")))
+    (cg-test--pre-tool sid "Read" "b-t2"
+                       (list (cons 'parent_agent_id "agent-bbb")
+                             (cons 'tool_input '((file_path . "/src/bar.ts")))))
+    (cg-test--post-tool sid "Read" "b-t2"
+                        (list (cons 'parent_agent_id "agent-bbb")))
+
+    ;; CRITICAL: Verify tools went to the correct agent, not root
+    (let ((agent-a-tools (cg-test--agent-tools sid "agent-aaa"))
+          (agent-b-tools (cg-test--agent-tools sid "agent-bbb"))
+          (root-tools (cg-test--all-root-tools sid)))
+      ;; Root should still have only the 2 Task tools
+      (should (= 2 (length root-tools)))
+      ;; Agent A should have 2 tools (Glob + Read)
+      (should (= 2 (length agent-a-tools)))
+      (should (equal "Glob" (alist-get 'name (nth 0 agent-a-tools))))
+      (should (equal "Read" (alist-get 'name (nth 1 agent-a-tools))))
+      ;; Agent B should have 2 tools (Grep + Read)
+      (should (= 2 (length agent-b-tools)))
+      (should (equal "Grep" (alist-get 'name (nth 0 agent-b-tools))))
+      (should (equal "Read" (alist-get 'name (nth 1 agent-b-tools))))
+
+      ;; Verify agents have correct tool counts
+      (let* ((session (cg-test--get sid))
+             (agent-a (claude-gravity--find-agent session "agent-aaa"))
+             (agent-b (claude-gravity--find-agent session "agent-bbb")))
+        (should (= 2 (alist-get 'tool-count agent-a)))
+        (should (= 2 (alist-get 'tool-count agent-b)))))))
+
+(ert-deftest cg-test-multi-agent-rendering-has-separate-branches ()
+  "Rendering of multi-agent turn produces separate agent branches."
+  (let ((sid (cg-test--fresh-session "test-multi-render")))
+    (cg-test--session-start sid)
+    (cg-test--prompt-submit sid "Parallel tasks")
+
+    ;; Two Task tools
+    (cg-test--pre-tool sid "Task" "task1"
+                       (list (cons 'tool_input
+                                   (list (cons 'subagent_type "Explore")
+                                         (cons 'description "find X")))))
+    (cg-test--pre-tool sid "Task" "task2"
+                       (list (cons 'tool_input
+                                   (list (cons 'subagent_type "general-purpose")
+                                         (cons 'description "research Y")))))
+
+    ;; SubagentStart for both
+    (cg-test--subagent-start sid "agent-exp" "Explore")
+    (cg-test--subagent-start sid "agent-gp" "general-purpose")
+
+    ;; Agent tools
+    (cg-test--pre-tool sid "Glob" "e-t1"
+                       (list (cons 'parent_agent_id "agent-exp")))
+    (cg-test--post-tool sid "Glob" "e-t1"
+                        (list (cons 'parent_agent_id "agent-exp")))
+    (cg-test--pre-tool sid "Read" "g-t1"
+                       (list (cons 'parent_agent_id "agent-gp")))
+    (cg-test--post-tool sid "Read" "g-t1"
+                        (list (cons 'parent_agent_id "agent-gp")))
+
+    ;; Complete agents
+    (cg-test--subagent-stop sid "agent-exp")
+    (cg-test--subagent-stop sid "agent-gp")
+    (cg-test--post-tool sid "Task" "task1")
+    (cg-test--post-tool sid "Task" "task2")
+
+    ;; Render to a buffer and inspect output
+    (let* ((session (cg-test--get sid))
+           (buf (generate-new-buffer " *test-multi-render*")))
+      (unwind-protect
+          (with-current-buffer buf
+            (let ((inhibit-read-only t))
+              (magit-insert-section (root)
+                (claude-gravity-insert-turns session)))
+            (let ((content (buffer-string)))
+              ;; Both agent types should appear in the rendered output
+              (should (string-match-p "Explore" content))
+              (should (string-match-p "general-purpose" content))
+              ;; Should see the robot emoji for agent branches
+              (should (string-match-p "🤖" content))))
+        (kill-buffer buf)))))
+
+(ert-deftest cg-test-multi-agent-ambiguous-goes-to-root ()
+  "Tools with parent_agent_id='ambiguous' go to root, not agent cycles."
+  (let ((sid (cg-test--fresh-session "test-ambiguous")))
+    (cg-test--session-start sid)
+    (cg-test--prompt-submit sid "work")
+
+    ;; Task tool and agent
+    (cg-test--pre-tool sid "Task" "task1"
+                       (list (cons 'tool_input
+                                   (list (cons 'subagent_type "Explore")))))
+    (cg-test--subagent-start sid "agent-x" "Explore")
+
+    ;; Tool with ambiguous attribution
+    (cg-test--pre-tool sid "Glob" "amb-t1"
+                       (list (cons 'parent_agent_id "ambiguous")
+                             (cons 'candidate_agent_ids '("agent-x"))))
+
+    ;; Ambiguous tool should be in root, not agent
+    (let ((root-tools (cg-test--all-root-tools sid))
+          (agent-tools (cg-test--agent-tools sid "agent-x")))
+      ;; Root: Task + ambiguous Glob = 2
+      (should (= 2 (length root-tools)))
+      ;; Agent: empty
+      (should (= 0 (length agent-tools))))))
 
 (provide 'claude-gravity-test)
 ;;; claude-gravity-test.el ends here
