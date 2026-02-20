@@ -1659,17 +1659,99 @@ Returns nil if no meaningful content is available."
             (insert (format "# Tool: %s\n\n" (or name "?")))
             (insert (format "`%s`\n\n" (claude-gravity--tool-signature name input)))
             (insert (format "**Status:** %s\n\n" (or status "unknown")))
-            (claude-gravity--popup-insert-tool-input name input)
+            (claude-gravity--popup-insert-tool-input name input result status)
             (claude-gravity--popup-insert-tool-result name input result status)
             (when (and post-think (not (string-empty-p post-think)))
-              (insert "## Thinking\n\n" post-think "\n\n"))
+              (insert "## Thinking\n\n" (claude-gravity--render-tables-in-text post-think) "\n\n"))
             (when (and post-text (not (string-empty-p post-text)))
-              (insert "## Assistant\n\n" post-text "\n\n"))
+              (insert "## Assistant\n\n" (claude-gravity--render-tables-in-text post-text) "\n\n"))
             (buffer-string)))))))
 
 
-(defun claude-gravity--popup-insert-tool-input (name input)
-  "Insert full tool INPUT for tool NAME into current buffer as markdown."
+(defun claude-gravity--popup-insert-edit-diff (input result status)
+  "Insert fontified unified diff for an Edit tool into the popup buffer.
+Uses structuredPatch from RESULT when available (STATUS \"done\"),
+otherwise falls back to old_string/new_string from INPUT.
+Lines are propertized with diff faces for colored display."
+  (let (old-str new-str patch)
+    (cond
+     ((equal status "done")
+      (setq patch (and (listp result) (alist-get 'structuredPatch result)))
+      (unless patch
+        (setq old-str (or (and (listp result) (alist-get 'oldString result))
+                          (alist-get 'old_string input))
+              new-str (or (and (listp result) (alist-get 'newString result))
+                          (alist-get 'new_string input)))))
+     (t
+      (setq old-str (alist-get 'old_string input)
+            new-str (alist-get 'new_string input))))
+    (cond
+     ;; structuredPatch — render hunks with diff faces
+     (patch
+      (insert "### Diff\n\n")
+      (let ((hunks (if (vectorp patch) (append patch nil) patch)))
+        (dolist (hunk hunks)
+          (let ((old-start (alist-get 'oldStart hunk))
+                (old-lines (alist-get 'oldLines hunk))
+                (new-start (alist-get 'newStart hunk))
+                (new-lines (alist-get 'newLines hunk))
+                (lines-vec (alist-get 'lines hunk)))
+            (insert (propertize (format "@@ -%s,%s +%s,%s @@"
+                                        (or old-start "?") (or old-lines "?")
+                                        (or new-start "?") (or new-lines "?"))
+                                'face 'claude-gravity-diff-header)
+                    "\n")
+            (let* ((raw-lines (if (vectorp lines-vec) (append lines-vec nil) lines-vec))
+                   (i 0)
+                   (n (length raw-lines)))
+              (while (< i n)
+                (let ((line (nth i raw-lines)))
+                  (cond
+                   ((string-prefix-p " " line)
+                    (insert (propertize line 'face 'claude-gravity-diff-context) "\n")
+                    (setq i (1+ i)))
+                   ((string-prefix-p "-" line)
+                    (let (removed-lines added-lines)
+                      (while (and (< i n) (string-prefix-p "-" (nth i raw-lines)))
+                        (push (nth i raw-lines) removed-lines)
+                        (setq i (1+ i)))
+                      (setq removed-lines (nreverse removed-lines))
+                      (while (and (< i n) (string-prefix-p "+" (nth i raw-lines)))
+                        (push (nth i raw-lines) added-lines)
+                        (setq i (1+ i)))
+                      (setq added-lines (nreverse added-lines))
+                      (if (and removed-lines added-lines)
+                          (claude-gravity--insert-refined-hunk-lines
+                           removed-lines added-lines "")
+                        (dolist (rl removed-lines)
+                          (insert (propertize rl 'face 'claude-gravity-diff-removed) "\n"))
+                        (dolist (al added-lines)
+                          (insert (propertize al 'face 'claude-gravity-diff-added) "\n")))))
+                   ((string-prefix-p "+" line)
+                    (insert (propertize line 'face 'claude-gravity-diff-added) "\n")
+                    (setq i (1+ i)))
+                   (t
+                    (insert line "\n")
+                    (setq i (1+ i))))))))))
+      (insert "\n"))
+     ;; old/new strings — simple before/after diff with faces
+     ((and new-str (stringp new-str) (not (string-empty-p new-str)))
+      (let ((old-lines (if (and old-str (stringp old-str))
+                           (split-string old-str "\n")
+                         nil))
+            (new-lines (split-string new-str "\n")))
+        (insert "### Diff\n\n")
+        (dolist (line old-lines)
+          (insert (propertize (concat "- " line) 'face 'claude-gravity-diff-removed) "\n"))
+        (dolist (line new-lines)
+          (insert (propertize (concat "+ " line) 'face 'claude-gravity-diff-added) "\n"))
+        (insert "\n")))
+     (t nil))))
+
+
+(defun claude-gravity--popup-insert-tool-input (name input &optional result status)
+  "Insert full tool INPUT for tool NAME into current buffer as markdown.
+RESULT and STATUS are optional, used for Edit tools to show structured diffs."
   (pcase name
     ("Bash"
      (let ((cmd (alist-get 'command input)))
@@ -1679,16 +1761,18 @@ Returns nil if no meaningful content is available."
      (let ((path (alist-get 'file_path input)))
        (when path
          (insert (format "**File:** `%s`\n\n" path)))))
-    ((or "Edit" "Write")
+    ("Edit"
+     (let ((path (alist-get 'file_path input)))
+       (when path
+         (insert (format "**File:** `%s`\n\n" path))))
+     (claude-gravity--popup-insert-edit-diff input result status))
+    ("Write"
      (let ((path (alist-get 'file_path input))
-           (old (alist-get 'old_string input))
            (new (alist-get 'new_string input)))
        (when path
          (insert (format "**File:** `%s`\n\n" path)))
-       (when (and old (equal name "Edit"))
-         (insert "### Old\n\n```\n" old "\n```\n\n"))
        (when new
-         (insert "### New\n\n```\n" new "\n```\n\n"))))
+         (insert "### Content\n\n```\n" new "\n```\n\n"))))
     ((or "Grep" "Glob")
      (let ((pattern (alist-get 'pattern input))
            (path (alist-get 'path input)))
@@ -1766,9 +1850,9 @@ NAME, INPUT used for context. STATUS for error display."
                        (with-temp-buffer
                          (insert (format "# Response Cycle %d\n\n" cycle-idx))
                          (when (and athink (not (string-empty-p (string-trim athink))))
-                           (insert "## Thinking\n\n" (string-trim athink) "\n\n"))
+                           (insert "## Thinking\n\n" (claude-gravity--render-tables-in-text (string-trim athink)) "\n\n"))
                          (when (and atext (not (string-empty-p (string-trim atext))))
-                           (insert "## Assistant\n\n" (string-trim atext) "\n\n"))
+                           (insert "## Assistant\n\n" (claude-gravity--render-tables-in-text (string-trim atext)) "\n\n"))
                          (when tools
                            (insert (format "## Tools (%d)\n\n" (length tools)))
                            (dolist (tool tools)
@@ -1796,9 +1880,9 @@ NAME, INPUT used for context. STATUS for error display."
             (with-temp-buffer
               (insert "# Stop Message\n\n")
               (when (and stop-think (not (string-empty-p stop-think)))
-                (insert "## Thinking\n\n" stop-think "\n\n"))
+                (insert "## Thinking\n\n" (claude-gravity--render-tables-in-text stop-think) "\n\n"))
               (when (and stop-text (not (string-empty-p stop-text)))
-                (insert "## Text\n\n" stop-text "\n\n"))
+                (insert "## Text\n\n" (claude-gravity--render-tables-in-text stop-text) "\n\n"))
               (buffer-string))))))))
 
 
@@ -1826,9 +1910,9 @@ NAME, INPUT used for context. STATUS for error display."
                       (tools (claude-gravity--tlist-items (alist-get 'tools cycle))))
                   (insert (format "## Cycle %d\n\n" ci))
                   (when (and athink (not (string-empty-p (string-trim athink))))
-                    (insert "### Thinking\n\n" (string-trim athink) "\n\n"))
+                    (insert "### Thinking\n\n" (claude-gravity--render-tables-in-text (string-trim athink)) "\n\n"))
                   (when (and atext (not (string-empty-p (string-trim atext))))
-                    (insert (string-trim atext) "\n\n"))
+                    (insert (claude-gravity--render-tables-in-text (string-trim atext)) "\n\n"))
                   (when tools
                     (dolist (tool tools)
                       (insert (format "%s `%s`\n"
@@ -1840,9 +1924,9 @@ NAME, INPUT used for context. STATUS for error display."
                     (insert "\n")))
                 (cl-incf ci)))
             (when (and stop-think (not (string-empty-p stop-think)))
-              (insert "## Stop Thinking\n\n" stop-think "\n\n"))
+              (insert "## Stop Thinking\n\n" (claude-gravity--render-tables-in-text stop-think) "\n\n"))
             (when (and stop-text (not (string-empty-p stop-text)))
-              (insert "## Stop Text\n\n" stop-text "\n\n"))
+              (insert "## Stop Text\n\n" (claude-gravity--render-tables-in-text stop-text) "\n\n"))
             (buffer-string)))))))
 
 
