@@ -57,9 +57,11 @@ Falls back to `read-directory-name' otherwise."
 
 
 (defun claude-gravity--tmux-check ()
-  "Check that tmux is available; signal error if not."
+  "Check that tmux is available and a server is running; signal error if not."
   (unless (executable-find "tmux")
-    (error "tmux is required for managed sessions but not found in PATH")))
+    (error "tmux is required for managed sessions but not found in PATH"))
+  (unless (= 0 (call-process "tmux" nil nil nil "list-sessions"))
+    (user-error "No tmux sessions found.  Start a tmux session from an interactive terminal first to avoid macOS security prompts")))
 
 
 (defun claude-gravity--tmux-alive-p (tmux-name)
@@ -204,9 +206,12 @@ Reads marketplace.json and expands each plugin source path."
       (list "--plugin-dir" (expand-file-name "emacs-bridge" plugin-root)))))
 
 
-(defun claude-gravity-start-session (cwd &optional model permission-mode)
+(defun claude-gravity-start-session (cwd &optional model permission-mode
+                                         max-budget max-turns)
   "Start a new Claude session in CWD via tmux.
 Optional MODEL overrides the default.  PERMISSION-MODE sets the mode.
+MAX-BUDGET is a string for --max-budget-usd.  MAX-TURNS is a string
+for --max-turns.
 Returns the temp session-id (re-keyed when SessionStart hook arrives)."
   (interactive
    (list (claude-gravity--read-project-dir
@@ -246,6 +251,10 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
       (setq cmd-parts (append cmd-parts (list "--model" model))))
     (when permission-mode
       (setq cmd-parts (append cmd-parts (list "--permission-mode" permission-mode))))
+    (when max-budget
+      (setq cmd-parts (append cmd-parts (list "--max-budget-usd" max-budget))))
+    (when max-turns
+      (setq cmd-parts (append cmd-parts (list "--max-turns" max-turns))))
     (when (cdr sl-parts)
       (setq cmd-parts (append cmd-parts (cdr sl-parts))))
     (let ((result (apply #'call-process "tmux" nil nil nil
@@ -683,31 +692,72 @@ MODE is one of \"default\", \"auto-edit\", or \"plan\"."
     (claude-gravity--log 'debug "Sent Escape to %s" tmux-name)))
 
 
+(defvar claude-gravity--tmux-stop-timeout 5
+  "Seconds to wait for graceful /quit before force-killing tmux session.")
+
+(defun claude-gravity--tmux-resolve-session-id (&optional session-id)
+  "Resolve SESSION-ID from context: argument, buffer, section, or first alive."
+  (or session-id
+      claude-gravity--buffer-session-id
+      (let ((section (magit-current-section)))
+        (when (and section (eq (oref section type) 'session-entry))
+          (oref section value)))
+      (let ((found nil))
+        (maphash (lambda (id tmux-name)
+                   (when (and (not found)
+                              (claude-gravity--tmux-alive-p tmux-name))
+                     (setq found id)))
+                 claude-gravity--tmux-sessions)
+        found)))
+
 (defun claude-gravity-stop-session (&optional session-id)
-  "Stop the tmux Claude session for SESSION-ID."
+  "Gracefully stop the tmux Claude session for SESSION-ID.
+Sends /quit to Claude Code first.  If the session doesn't exit
+within `claude-gravity--tmux-stop-timeout' seconds, force-kills it."
   (interactive)
-  (let* ((sid (or session-id
-                  claude-gravity--buffer-session-id
-                  (let ((section (magit-current-section)))
-                    (when (and section (eq (oref section type) 'session-entry))
-                      (oref section value)))
-                  (let ((found nil))
-                    (maphash (lambda (id tmux-name)
-                               (when (and (not found)
-                                          (claude-gravity--tmux-alive-p tmux-name))
-                                 (setq found id)))
-                             claude-gravity--tmux-sessions)
-                    found)))
+  (let* ((sid (claude-gravity--tmux-resolve-session-id session-id))
          (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions))))
     (when tmux-name
-      (when (claude-gravity--tmux-alive-p tmux-name)
-        (call-process "tmux" nil nil nil "kill-session" "-t" tmux-name))
-      (remhash sid claude-gravity--tmux-sessions)
-      (let ((session (claude-gravity--get-session sid)))
-        (when session
-          (claude-gravity-model-session-end session)))
-      (claude-gravity--schedule-refresh)
-      (claude-gravity--log 'debug "Stopped tmux Claude session [%s]" sid))))
+      (if (not (claude-gravity--tmux-alive-p tmux-name))
+          ;; Already dead — just clean up
+          (claude-gravity--tmux-finalize-stop sid tmux-name)
+        ;; Set stopping status
+        (let ((session (claude-gravity--get-session sid)))
+          (when session
+            (plist-put session :claude-status 'stopping)))
+        (claude-gravity--schedule-refresh)
+        (claude-gravity--log 'info "Sending Escape + /quit to tmux session [%s]" sid)
+        ;; Send Escape first to interrupt any active generation
+        (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "Escape")
+        ;; Delay before /quit so Escape is processed and input field is ready
+        (run-at-time 2 nil #'claude-gravity--tmux-send-quit sid tmux-name)
+        ;; Force-kill timeout starts after the /quit delay
+        (run-at-time (+ 2 claude-gravity--tmux-stop-timeout) nil
+                     #'claude-gravity--tmux-force-stop sid tmux-name)))))
+
+(defun claude-gravity--tmux-send-quit (sid tmux-name)
+  "Send /quit to tmux session TMUX-NAME for SID."
+  (when (claude-gravity--tmux-alive-p tmux-name)
+    (claude-gravity--log 'info "Sending /quit to tmux session [%s]" sid)
+    (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "-l" "/quit")
+    (call-process "tmux" nil nil nil "send-keys" "-t" tmux-name "Enter")))
+
+(defun claude-gravity--tmux-force-stop (sid tmux-name)
+  "Force-kill tmux session TMUX-NAME for SID if still alive."
+  (when (claude-gravity--tmux-alive-p tmux-name)
+    (claude-gravity--log 'info "Force-killing tmux session [%s] after timeout" sid)
+    (call-process "tmux" nil nil nil "kill-session" "-t" tmux-name))
+  (claude-gravity--tmux-finalize-stop sid tmux-name))
+
+(defun claude-gravity--tmux-finalize-stop (sid tmux-name)
+  "Clean up state after tmux session TMUX-NAME for SID has stopped."
+  (ignore tmux-name)
+  (remhash sid claude-gravity--tmux-sessions)
+  (let ((session (claude-gravity--get-session sid)))
+    (when session
+      (claude-gravity-model-session-end session)))
+  (claude-gravity--schedule-refresh)
+  (claude-gravity--log 'debug "Finalized stop for tmux session [%s]" sid))
 
 
 ;;; Tmux window size sync — keep tmux width = Emacs window width
@@ -1106,6 +1156,145 @@ Downcases, replaces non-alphanumeric with hyphens, trims hyphens."
             (plist-put session :tmux-session new-tmux)))))
     (claude-gravity--schedule-refresh)
     (message "Session renamed to: %s" sanitized)))
+
+
+;;; ============================================================================
+;;; Worktree Session Start (claude --tmux -w)
+;;; ============================================================================
+
+(defun claude-gravity-start-worktree-session (cwd branch &optional model
+                                                   permission-mode max-budget
+                                                   max-turns)
+  "Start a Claude session with a git worktree via `claude --tmux -w BRANCH'.
+CWD is the project directory.  BRANCH is the worktree branch name.
+Optional MODEL, PERMISSION-MODE, MAX-BUDGET, MAX-TURNS configure the session."
+  (claude-gravity--tmux-check)
+  (claude-gravity--ensure-server)
+  (setq cwd (claude-gravity--normalize-cwd cwd))
+  (let* ((temp-id (format "tmux-%s" (format-time-string "%s%3N")))
+         (plugin-root (file-name-directory
+                       (or load-file-name
+                           (locate-library "claude-gravity")
+                           (error "Cannot locate claude-gravity.el for --plugin-dir"))))
+         (sl-parts (claude-gravity--statusline-parts plugin-root))
+         (cmd-args (append (claude-gravity--plugin-dirs plugin-root)
+                           (list "--tmux" "-w" branch)))
+         (process-environment
+          (append (list (format "CLAUDE_GRAVITY_TEMP_ID=%s" temp-id))
+                  (when (car sl-parts)
+                    (car sl-parts))
+                  process-environment)))
+    (when model
+      (setq cmd-args (append cmd-args (list "--model" model))))
+    (when permission-mode
+      (setq cmd-args (append cmd-args (list "--permission-mode" permission-mode))))
+    (when max-budget
+      (setq cmd-args (append cmd-args (list "--max-budget-usd" max-budget))))
+    (when max-turns
+      (setq cmd-args (append cmd-args (list "--max-turns" max-turns))))
+    (when (cdr sl-parts)
+      (setq cmd-args (append cmd-args (cdr sl-parts))))
+    ;; Launch async — claude --tmux creates its own tmux session
+    (let ((proc (apply #'start-process "claude-worktree" nil
+                       "claude" cmd-args)))
+      (set-process-sentinel
+       proc (lambda (_proc event)
+              (claude-gravity--log 'debug "claude --tmux -w process: %s"
+                                   (string-trim event)))))
+    ;; Register pending re-key; tmux session name resolved on SessionStart
+    (puthash temp-id 'worktree claude-gravity--tmux-pending)
+    ;; Create session with temp ID
+    (let ((session (claude-gravity--ensure-session temp-id cwd)))
+      (plist-put session :temp-id temp-id)
+      (plist-put session :worktree-branch branch)
+      (claude-gravity-model-set-claude-status session 'idle))
+    (claude-gravity--tmux-ensure-heartbeat)
+    (claude-gravity--record-last-project cwd)
+    (claude-gravity--schedule-refresh)
+    (claude-gravity--log 'debug "Claude worktree session starting: branch=%s cwd=%s"
+                         branch cwd)
+    temp-id))
+
+
+(defun claude-gravity--find-tmux-session-by-temp-id (temp-id)
+  "Find the tmux session name that has TEMP-ID in its environment.
+Returns the session name or nil."
+  (let ((sessions (split-string
+                   (with-temp-buffer
+                     (call-process "tmux" nil t nil
+                                   "list-sessions" "-F" "#{session_name}")
+                     (buffer-string))
+                   "\n" t))
+        (found nil))
+    (dolist (name sessions found)
+      (unless found
+        (let ((env-out (with-temp-buffer
+                         (call-process "tmux" nil t nil
+                                       "show-environment" "-t" name
+                                       "CLAUDE_GRAVITY_TEMP_ID")
+                         (buffer-string))))
+          (when (string-match (regexp-quote temp-id) env-out)
+            (setq found name)))))))
+
+
+;;; ============================================================================
+;;; Transient Start Menu
+;;; ============================================================================
+
+(defun claude-gravity--read-project-dir-for-transient (prompt _initial-input _history)
+  "Read a project directory for the transient menu.
+PROMPT is the prompt string.  _INITIAL-INPUT and _HISTORY are ignored."
+  (claude-gravity--read-project-dir prompt
+                                    (or (claude-gravity--infer-cwd-from-section)
+                                        claude-gravity--last-project-dir
+                                        default-directory)))
+
+;;;###autoload (autoload 'claude-gravity-start-menu "claude-gravity-tmux" nil t)
+(transient-define-prefix claude-gravity-start-menu ()
+  "Configure and start a new Claude session."
+  ["Project"
+   ("-d" "Directory" "--directory="
+    :reader claude-gravity--read-project-dir-for-transient)]
+  ["Parameters"
+   ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku"))
+   ("-p" "Permission mode" "--permission-mode="
+    :choices ("default" "auto-edit" "plan" "full-auto"))
+   ("-b" "Max budget (USD)" "--max-budget=")
+   ("-t" "Max turns" "--max-turns=")]
+  ["Worktree"
+   ("-w" "Branch name" "--worktree=")]
+  ["Actions"
+   ("s" "Start" claude-gravity--start-session-from-transient)
+   ("q" "Quit" transient-quit-one)])
+
+(defun claude-gravity--transient-get-value (args flag)
+  "Extract value for FLAG from transient ARGS list.
+FLAG should be like \"--model=\"."
+  (cl-some (lambda (arg)
+             (when (string-prefix-p flag arg)
+               (substring arg (length flag))))
+           args))
+
+(transient-define-suffix claude-gravity--start-session-from-transient ()
+  "Start a Claude session using transient parameters."
+  :transient nil
+  (interactive)
+  (let* ((args (transient-args 'claude-gravity-start-menu))
+         (dir (claude-gravity--transient-get-value args "--directory="))
+         (model (claude-gravity--transient-get-value args "--model="))
+         (perm (claude-gravity--transient-get-value args "--permission-mode="))
+         (budget (claude-gravity--transient-get-value args "--max-budget="))
+         (turns (claude-gravity--transient-get-value args "--max-turns="))
+         (worktree (claude-gravity--transient-get-value args "--worktree="))
+         (cwd (or dir
+                  (claude-gravity--read-project-dir
+                   "Project directory: "
+                   (or (claude-gravity--infer-cwd-from-section)
+                       claude-gravity--last-project-dir
+                       default-directory)))))
+    (if worktree
+        (claude-gravity-start-worktree-session cwd worktree model perm budget turns)
+      (claude-gravity-start-session cwd model perm budget turns))))
 
 
 (provide 'claude-gravity-tmux)

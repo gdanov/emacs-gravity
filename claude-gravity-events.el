@@ -16,6 +16,7 @@
 (defvar claude-gravity--resume-picker-init-seen nil
   "Non-nil after the init SessionStart from the resume picker has been seen.")
 (declare-function claude-gravity--bury-resume-picker "claude-gravity-tmux")
+(declare-function claude-gravity--find-tmux-session-by-temp-id "claude-gravity-tmux")
 (declare-function claude-gravity--handle-tool-permission "claude-gravity-socket")
 (declare-function claude-gravity--handle-ask-user-question "claude-gravity-socket")
 (declare-function claude-gravity--handle-plan-review "claude-gravity-socket")
@@ -157,6 +158,14 @@ the model mutation API to update session state."
      ;; Re-key tmux pending session: match temp-id from bridge payload
      (let* ((temp-id (alist-get 'temp_id data))
             (tmux-name (and temp-id (gethash temp-id claude-gravity--tmux-pending))))
+       ;; Worktree sessions: resolve actual tmux name from env var
+       (when (eq tmux-name 'worktree)
+         (setq tmux-name
+               (or (claude-gravity--find-tmux-session-by-temp-id temp-id)
+                   (progn
+                     (claude-gravity--log 'warn
+                       "Could not find tmux session for worktree temp-id %s" temp-id)
+                     nil))))
        (when tmux-name
          (remhash temp-id claude-gravity--tmux-pending)
          ;; Resume picker: the init SessionStart (source=startup) consumes
@@ -228,6 +237,10 @@ the model mutation API to update session state."
            (when (and model-id (stringp model-id) (not (string-empty-p model-id)))
              (plist-put session :model-name
                         (or (claude-gravity--short-model-name model-id) model-id))))
+         ;; Store effort level from bridge enrichment
+         (let ((effort (alist-get 'effort_level data)))
+           (when (and effort (stringp effort) (not (string-empty-p effort)))
+             (plist-put session :effort-level effort)))
          (when (and source (equal source "opencode"))
            (claude-gravity--session-set-source session "opencode"
              (alist-get 'instance_port data)

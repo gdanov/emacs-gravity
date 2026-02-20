@@ -611,16 +611,17 @@ else current session."
                 (badges (claude-gravity--inbox-badges sid))
                 (last-ev (plist-get session :last-event-time))
                 (idle-secs (and last-ev (float-time (time-subtract (current-time) last-ev))))
-                (status-str (if (eq claude-st 'responding) "responding"
-                              (cond
-                               ((null idle-secs) "idle")
-                               ((< idle-secs 60) "idle")
-                               ((< idle-secs 3600) (format "idle %dm" (truncate (/ idle-secs 60))))
-                               (t (format "idle %dh" (truncate (/ idle-secs 3600)))))))
-                (dot (if (eq claude-st 'responding)
+                (status-str (cond
+                             ((eq claude-st 'stopping) "stopping...")
+                             ((eq claude-st 'responding) "responding")
+                             ((null idle-secs) "idle")
+                             ((< idle-secs 60) "idle")
+                             ((< idle-secs 3600) (format "idle %dm" (truncate (/ idle-secs 60))))
+                             (t (format "idle %dh" (truncate (/ idle-secs 3600))))))
+                (dot (if (memq claude-st '(responding stopping))
                          (propertize "●" 'face 'claude-gravity-status-responding)
                        (propertize "●" 'face 'claude-gravity-status-idle)))
-                (status-face (if (eq claude-st 'responding)
+                (status-face (if (memq claude-st '(responding stopping))
                                  'claude-gravity-status-responding
                                'claude-gravity-status-idle))
                 (elapsed (claude-gravity--session-total-elapsed session))
@@ -646,8 +647,12 @@ else current session."
                                                'face 'claude-gravity-detail-label))))
                 (tail nil))
            (when (and model-name (not (string-empty-p model-name)))
-             (push (propertize (format "  %s" model-name)
-                               'face 'claude-gravity-detail-label) tail))
+             (let ((effort (plist-get session :effort-level)))
+               (push (propertize
+                      (if (and effort (not (equal effort "high")))
+                          (format "  %s [%s]" model-name effort)
+                        (format "  %s" model-name))
+                      'face 'claude-gravity-detail-label) tail)))
            (when elapsed
              (push (propertize (format "  ⏱ %s" (claude-gravity--format-elapsed elapsed))
                                'face 'claude-gravity-detail-label) tail))
@@ -949,6 +954,8 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
          (dot (cond
                ((eq status 'ended)
                 (propertize "○" 'face 'claude-gravity-session-ended))
+               ((eq claude-st 'stopping)
+                (propertize "●" 'face 'claude-gravity-status-responding))
                ((eq claude-st 'responding)
                 (propertize "●" 'face 'claude-gravity-status-responding))
                (t
@@ -956,6 +963,8 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
          (status-word (cond
                        ((eq status 'ended)
                         (propertize "ended" 'face 'claude-gravity-session-ended))
+                       ((eq claude-st 'stopping)
+                        (propertize "stopping..." 'face 'claude-gravity-status-responding))
                        ((eq claude-st 'responding)
                         (propertize "responding" 'face 'claude-gravity-status-responding))
                        (t
@@ -993,8 +1002,12 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
       (push (propertize (format "  [%s]" perm-mode)
                         'face 'claude-gravity-detail-label) segments))
     (when model-name
-      (push (propertize (format "  %s" model-name)
-                        'face 'claude-gravity-detail-label) segments))
+      (let ((effort (plist-get session :effort-level)))
+        (push (propertize
+               (if (and effort (not (equal effort "high")))
+                   (format "  %s [%s]" model-name effort)
+                 (format "  %s" model-name))
+               'face 'claude-gravity-detail-label) segments)))
     (push (propertize (format "  ◆ %d tools" tool-count)
                       'face 'claude-gravity-detail-label) segments)
     (when elapsed
@@ -1262,7 +1275,7 @@ prompts to confirm the directory before starting."
     ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)]
    ["Session Management"
     ("N" "Start (Cloud)" claude-gravity-daemon-start-session)
-    ("S" "Start (tmux)" claude-gravity-start-session)
+    ("S" "Start (tmux)" claude-gravity-start-menu)
     ("H" "Start here" claude-gravity-start-session-here)
     ("r" "Resume session" claude-gravity-unified-resume)
     ("w" "Resume (picker)" claude-gravity-resume-in-tmux)
@@ -1551,7 +1564,7 @@ in the current window."
 ;; Keybindings for session commands
 ;; Unified keys dispatch to the correct backend (daemon or tmux)
 (define-key claude-gravity-mode-map (kbd "N") 'claude-gravity-daemon-start-session)  ; Cloud
-(define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-session)          ; tmux
+(define-key claude-gravity-mode-map (kbd "S") 'claude-gravity-start-menu)              ; tmux
 (define-key claude-gravity-mode-map (kbd "H") 'claude-gravity-start-session-here)     ; start here
 (define-key claude-gravity-mode-map (kbd "s") 'claude-gravity-unified-compose)
 (define-key claude-gravity-mode-map (kbd "r") 'claude-gravity-unified-resume)
@@ -1669,6 +1682,35 @@ Returns nil if no meaningful content is available."
               (insert "## Thinking\n\n" (claude-gravity--render-tables-in-text post-think) "\n\n"))
             (when (and post-text (not (string-empty-p post-text)))
               (insert "## Assistant\n\n" (claude-gravity--render-tables-in-text post-text) "\n\n"))
+            ;; Agent content (for Task tools with linked agent)
+            (let ((agent (alist-get 'agent tool)))
+              (when agent
+                (let ((stop-think (alist-get 'stop_thinking agent))
+                      (stop-text (alist-get 'stop_text agent))
+                      (cycles (claude-gravity--tlist-items (alist-get 'cycles agent))))
+                  (when (and stop-think (stringp stop-think) (not (string-empty-p stop-think)))
+                    (insert "## Agent Thinking\n\n" (claude-gravity--render-tables-in-text stop-think) "\n\n"))
+                  (when (and stop-text (stringp stop-text) (not (string-empty-p stop-text)))
+                    (insert "## Agent Summary\n\n" (claude-gravity--render-tables-in-text stop-text) "\n\n"))
+                  (when cycles
+                    (insert "## Agent Tool History\n\n")
+                    (dolist (cycle cycles)
+                      (let ((tools (claude-gravity--tlist-items (alist-get 'tools cycle)))
+                            (athink (alist-get 'thinking cycle))
+                            (atext (alist-get 'text cycle)))
+                        (when (and athink (not (string-empty-p (string-trim athink))))
+                          (insert "### Thinking\n\n" (string-trim athink) "\n\n"))
+                        (when (and atext (not (string-empty-p (string-trim atext))))
+                          (insert (string-trim atext) "\n\n"))
+                        (when tools
+                          (dolist (atool tools)
+                            (insert (format "%s `%s`\n"
+                                            (claude-gravity--popup-tool-status-mark
+                                             (alist-get 'status atool))
+                                            (claude-gravity--tool-signature
+                                             (alist-get 'name atool)
+                                             (alist-get 'input atool)))))
+                          (insert "\n"))))))))
             (buffer-string)))))))
 
 
