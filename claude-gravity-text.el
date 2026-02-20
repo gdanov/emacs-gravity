@@ -189,8 +189,8 @@ The margin character inherits FACE so its color matches the content type."
                                   (> (length para) (- fc indent 2))
                                   (not (claude-gravity--table-line-p para)))
                          (fill-region para-start (point))))))
-                 (when face
-                   (add-face-text-property (point-min) (point-max) face))
+                 ;; Face is applied only to the ▎ margin char (via propertize above),
+                ;; not to the text body — keeps content in default color.
                  (buffer-string))))
           (when (> (hash-table-count claude-gravity--wrap-cache) 512)
             (clrhash claude-gravity--wrap-cache))

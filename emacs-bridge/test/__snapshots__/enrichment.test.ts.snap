@@ -7,6 +7,12 @@ exports[`Event enrichment snapshots > PostToolUse: Read with following text 1`] 
   "post_tool_thinking": "This is a simple module that exports a hello function.",
   "session_id": "test-session-001",
   "slug": "test-slug-posttool",
+  "token_usage": {
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+  },
   "tool_input": {
     "file_path": "/test/project/src/index.ts",
   },
@@ -88,10 +94,10 @@ Since you're building an Emacs UI that already receives tool events via hooks, y
 
 The cleanest solution would be the \`PreAskUserQuestion\` hook from that issue, but it doesn't appear to be available yet.",
   "token_usage": {
-    "cache_creation_input_tokens": 0,
-    "cache_read_input_tokens": 0,
-    "input_tokens": 0,
-    "output_tokens": 0,
+    "cache_creation_input_tokens": 25576,
+    "cache_read_input_tokens": 100788,
+    "input_tokens": 10,
+    "output_tokens": 31,
   },
   "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/at_first_stop.jsonl",
 }
@@ -145,10 +151,10 @@ But it cannot return a selected answer that bypasses the user prompt. So for you
 
 There's also a noted bug ([#13439](https://github.com/anthropics/claude-code/issues/13439)) where \`PreToolUse\` on \`AskUserQuestion\` can sometimes cause empty responses.",
   "token_usage": {
-    "cache_creation_input_tokens": 0,
-    "cache_read_input_tokens": 0,
-    "input_tokens": 0,
-    "output_tokens": 0,
+    "cache_creation_input_tokens": 34442,
+    "cache_read_input_tokens": 231972,
+    "input_tokens": 20,
+    "output_tokens": 687,
   },
   "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/at_second_stop.jsonl",
 }

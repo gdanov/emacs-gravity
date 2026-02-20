@@ -451,13 +451,9 @@ Deduplicates against the last tool's post_text/post_thinking."
                              (alist-get 'stop_text prompt-entry)))))
     ;; Find the last tool across all cycles for dedup
     (when (or stop-think stop-text)
-      (let* ((cycles (claude-gravity--tlist-items (alist-get 'cycles turn-node)))
-             (last-tool nil))
-        ;; Find last tool in last cycle
-        (when cycles
-          (let* ((last-cycle (car (last cycles)))
-                 (tools (claude-gravity--tlist-items (alist-get 'tools last-cycle))))
-            (setq last-tool (car (last tools)))))
+      (let* ((last-cycle (claude-gravity--tlist-last-item (alist-get 'cycles turn-node)))
+             (last-tool (when last-cycle
+                          (claude-gravity--tlist-last-item (alist-get 'tools last-cycle)))))
         (let ((last-post-text (when last-tool (alist-get 'post_text last-tool)))
               (last-post-think (when last-tool (alist-get 'post_thinking last-tool))))
           ;; Dedup stop_thinking vs last tool's post_thinking
@@ -613,7 +609,8 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                           (insert prompt-text "\n")
                           (when (> (length prompt-text) (- fill-column cont-indent))
                             (fill-region start (point)))
-                          (add-face-text-property start (point) prompt-face))))
+                          ;; Prompt indicator (❯/?) already propertized; text stays default color.
+                          )))
                     (if frozen
                         ;; Frozen turn: collapsed section with children
                         (let* ((stop (alist-get 'stop_text turn-node))

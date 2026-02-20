@@ -324,6 +324,17 @@ async function main() {
       } catch {}
     }
 
+    // Read effort level from Claude Code settings
+    try {
+      const settingsPath = join(process.env.HOME || "", ".claude", "settings.json");
+      if (existsSync(settingsPath)) {
+        const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+        if (settings.effortLevel) {
+          (inputData as any).effort_level = settings.effortLevel;
+        }
+      }
+    } catch {}
+
     // Dump raw input if dump mode enabled
     const dumpDir = process.env.CLAUDE_GRAVITY_DUMP_DIR;
     let dumpSeq: number | undefined;
@@ -562,22 +573,25 @@ async function main() {
           } catch { /* file may not exist yet */ }
 
           let { text, thinking } = extractTrailingText(transcriptPath, snapshotBytes);
-          // Retry if text is missing, even if thinking was found.
-          // The text message is typically the last to be flushed and contains
-          // the actual assistant response (stop_text). Thinking may arrive earlier,
-          // causing the initial extraction to miss the subsequent text message.
-          if (!text) {
-            const maxRetries = 3;
-            const delayMs = 100;
-            for (let retry = 0; retry < maxRetries && !text; retry++) {
-              await new Promise(r => setTimeout(r, delayMs));
-              // Re-stat to get updated size (file may be flushing)
-              try { snapshotBytes = statSync(transcriptPath).size; } catch {}
+          // Always retry if the transcript file grows — the assistant's final
+          // text may not be flushed yet when Stop fires.  The old logic only
+          // retried when `text` was empty, but when the snapshot ends right
+          // after the user prompt the extraction crosses the turn boundary and
+          // returns the *previous* turn's text (non-empty but wrong).
+          const maxRetries = 3;
+          const delayMs = 150;
+          for (let retry = 0; retry < maxRetries; retry++) {
+            await new Promise(r => setTimeout(r, delayMs));
+            let newSize: number | undefined;
+            try { newSize = statSync(transcriptPath).size; } catch {}
+            if (newSize && newSize > (snapshotBytes ?? 0)) {
+              snapshotBytes = newSize;
               const extracted = extractTrailingText(transcriptPath, snapshotBytes);
               if (extracted.text) text = extracted.text;
-              // Only update thinking if we didn't find it in the first attempt
-              if (!thinking && extracted.thinking) thinking = extracted.thinking;
-              log(`Stop retry ${retry + 1}: ${text.length} chars text, ${thinking.length} chars thinking`, 'warn');
+              if (extracted.thinking) thinking = extracted.thinking;
+              log(`Stop retry ${retry + 1}: file grew to ${newSize}, ${text.length} chars text, ${thinking.length} chars thinking`, 'warn');
+            } else {
+              break;  // file didn't grow, no point retrying
             }
           }
           if (text) {

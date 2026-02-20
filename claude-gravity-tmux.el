@@ -757,6 +757,7 @@ within `claude-gravity--tmux-stop-timeout' seconds, force-kills it."
     (when session
       (claude-gravity-model-session-end session)))
   (claude-gravity--schedule-refresh)
+  (claude-gravity--schedule-session-refresh sid)
   (claude-gravity--log 'debug "Finalized stop for tmux session [%s]" sid))
 
 

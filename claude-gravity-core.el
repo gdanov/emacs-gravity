@@ -1,5 +1,7 @@
 ;;; claude-gravity-core.el --- Core utilities for Claude Gravity  -*- lexical-binding: t; -*-
 
+;; Core module: utilities, logging, custom variables
+
 ;;; Code:
 
 (require 'magit-section)
