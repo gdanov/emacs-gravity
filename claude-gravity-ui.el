@@ -1682,6 +1682,7 @@ Returns nil if no meaningful content is available."
     ('turn (claude-gravity--popup-turn-content value session))
     ('task (claude-gravity--popup-task-content value session))
     ('agent (claude-gravity--popup-agent-content value session))
+    ('file-entry (claude-gravity--popup-file-diff-content value session))
     (_ nil)))
 
 
@@ -2076,6 +2077,41 @@ NAME, INPUT used for context. STATUS for error display."
                                          (alist-get 'input tool)))))
                       (insert "\n"))))))
             (buffer-string)))))))
+
+(defun claude-gravity--popup-file-diff-content (file-path session)
+  "Generate aggregated diff content for FILE-PATH from Edit/Write tools in SESSION."
+  (when (and file-path session)
+    (let ((edit-tools (claude-gravity-model-file-edit-tools session file-path)))
+      (if (null edit-tools)
+          (format "# %s\n\nNo edits recorded for this file.\n"
+                  (file-name-nondirectory file-path))
+        (with-temp-buffer
+          (insert (format "# %s\n\n" (file-name-nondirectory file-path)))
+          (insert (format "`%s`\n\n" file-path))
+          (insert (format "%d change%s in this session\n\n"
+                          (length edit-tools)
+                          (if (= (length edit-tools) 1) "" "s")))
+          (dolist (pair edit-tools)
+            (let* ((turn-num (car pair))
+                   (tool (cdr pair))
+                   (name (alist-get 'name tool))
+                   (input (alist-get 'input tool))
+                   (result (alist-get 'result tool))
+                   (status (alist-get 'status tool))
+                   (desc (alist-get 'description tool)))
+              (insert (format "---\n\n## Turn %d" (or turn-num 0)))
+              (when (and desc (not (string-empty-p desc)))
+                (insert (format ": %s" desc)))
+              (insert "\n\n")
+              (pcase name
+                ("Edit"
+                 (claude-gravity--popup-insert-edit-diff input result status))
+                ("Write"
+                 (let ((content (alist-get 'content input)))
+                   (if (and content (stringp content) (not (string-empty-p content)))
+                       (insert "### File written\n\n```\n" content "\n```\n\n")
+                     (insert "### File written\n\n*(content not available)*\n\n")))))))
+          (buffer-string))))))
 
 (provide 'claude-gravity-ui)
 ;;; claude-gravity-ui.el ends here

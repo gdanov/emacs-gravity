@@ -692,6 +692,27 @@ _AGENT-ID is accepted for API compatibility but not used (tree routes at inserti
       (setf (alist-get 'result tool) result))))
 
 
+(defun claude-gravity-model-file-edit-tools (session file-path)
+  "Collect all Edit and Write tools for FILE-PATH from SESSION's turn tree.
+Returns a list of (TURN-NUMBER . TOOL) pairs sorted by turn order."
+  (let ((result nil))
+    (dolist (turn-node (claude-gravity--tlist-items (plist-get session :turns)))
+      (let ((turn-num (alist-get 'number turn-node)))
+        (cl-labels
+            ((collect-from-cycles (cycles-tl)
+               (dolist (cycle (when cycles-tl (claude-gravity--tlist-items cycles-tl)))
+                 (dolist (tool (claude-gravity--tlist-items (alist-get 'tools cycle)))
+                   (when (and (member (alist-get 'name tool) '("Edit" "Write"))
+                              (equal (alist-get 'file_path (alist-get 'input tool))
+                                     file-path))
+                     (push (cons turn-num tool) result))
+                   ;; Check agent sub-tools
+                   (let ((agent (alist-get 'agent tool)))
+                     (when agent
+                       (collect-from-cycles (alist-get 'cycles agent))))))))
+          (collect-from-cycles (alist-get 'cycles turn-node)))))
+    (nreverse result)))
+
 (defun claude-gravity-model-find-tool (session tool-use-id)
   "Find and return tool alist in SESSION matching TOOL-USE-ID, or nil.
 Uses the :tool-index hash table for O(1) lookup."

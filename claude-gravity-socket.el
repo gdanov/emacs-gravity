@@ -540,11 +540,12 @@ SESSION-ID identifies the Claude Code session."
                                  `((type . "toolAlwaysAllow") (tool . ,tool)))
                                tools)))))
       ;; Compute and apply revision diff margin indicators asynchronously.
-      ;; Use :last-reviewed-plan (set on every review open, not just approval)
-      ;; so deny-revise-resubmit flow also shows diffs.
-      (let ((prev-content (when session
-                            (or (plist-get session :last-reviewed-plan)
-                                (plist-get (plist-get session :plan) :content)))))
+      ;; Only diff within the same planning turn — cross-turn diffs are noise.
+      (let* ((current-turn (when session (length (plist-get session :turns))))
+             (prev-turn (when session (plist-get session :last-reviewed-plan-turn)))
+             (prev-content (when (and current-turn prev-turn
+                                      (= prev-turn current-turn))
+                             (plist-get session :last-reviewed-plan))))
         (when prev-content
           (claude-gravity--plan-revision-diff-async prev-content plan-content
             (lambda (diff-data)
@@ -552,9 +553,10 @@ SESSION-ID identifies the Claude Code session."
                 (with-current-buffer buf
                   (claude-gravity--plan-review-apply-margin-indicators diff-data)
                   (setq-local claude-gravity--plan-review-prev-content prev-content))))))
-        ;; Always store current plan for next review's diff
+        ;; Always store current plan and turn for next review's diff
         (when session
-          (plist-put session :last-reviewed-plan plan-content)))
+          (plist-put session :last-reviewed-plan plan-content)
+          (plist-put session :last-reviewed-plan-turn current-turn)))
       ;; Kill hook to handle buffer closed without decision
       (add-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill nil t)
       (goto-char (point-min))
