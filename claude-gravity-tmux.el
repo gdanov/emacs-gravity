@@ -1288,11 +1288,9 @@ FLAG should be like \"--model=\"."
          (turns (claude-gravity--transient-get-value args "--max-turns="))
          (worktree (claude-gravity--transient-get-value args "--worktree="))
          (cwd (or dir
-                  (claude-gravity--read-project-dir
-                   "Project directory: "
-                   (or (claude-gravity--infer-cwd-from-section)
-                       claude-gravity--last-project-dir
-                       default-directory)))))
+                  (claude-gravity--infer-cwd-from-section)
+                  claude-gravity--last-project-dir
+                  default-directory)))
     (if worktree
         (claude-gravity-start-worktree-session cwd worktree model perm budget turns)
       (claude-gravity-start-session cwd model perm budget turns))))
