@@ -1027,6 +1027,7 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
 (define-key claude-gravity-session-mode-map (kbd "o") 'claude-gravity-return-to-overview)
 (define-key claude-gravity-session-mode-map (kbd "l") 'claude-gravity-set-permission-mode)
 (define-key claude-gravity-session-mode-map (kbd "?") 'claude-gravity-session-menu)
+(define-key claude-gravity-session-mode-map (kbd "SPC") 'claude-gravity-popup-at-point)
 
 
 (define-derived-mode claude-gravity-session-mode claude-gravity-mode "Claude"
@@ -1283,6 +1284,7 @@ prompts to confirm the directory before starting."
   [["View & Navigate"
     ("g" "Refresh" claude-gravity-refresh)
     ("t" "Tail" claude-gravity-tail)
+    ("SPC" "Detail popup" claude-gravity-popup-at-point)
     ("o" "Return to overview" claude-gravity-return-to-overview)
     ("f" "Follow mode" claude-gravity-follow-mode)
     ("TAB" "Toggle section" magit-section-toggle)]
@@ -1576,6 +1578,342 @@ or call `(global-set-key (kbd NEW-KEY) #\\='claude-gravity-start-session-here)'.
 (when claude-gravity-global-start-key
   (global-set-key (kbd claude-gravity-global-start-key)
                   #'claude-gravity-start-session-here))
+
+;;; Popup Detail View
+
+(defvar-local claude-gravity--popup-wconf nil
+  "Saved window configuration before popup was shown.")
+
+(defvar claude-gravity-popup-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "q") #'claude-gravity-popup-dismiss)
+    (define-key map (kbd "SPC") #'claude-gravity-popup-dismiss)
+    map)
+  "Keymap for `claude-gravity-popup-mode'.")
+
+(define-derived-mode claude-gravity-popup-mode markdown-view-mode "Claude Detail"
+  "Major mode for Claude detail popup buffers.
+Uses markdown-mode for rendering, with dismiss keybindings."
+  (use-local-map claude-gravity-popup-mode-map))
+
+
+(defun claude-gravity-popup-dismiss ()
+  "Dismiss the popup and restore the previous window layout."
+  (interactive)
+  (let ((wconf claude-gravity--popup-wconf))
+    (kill-buffer (current-buffer))
+    (when wconf
+      (set-window-configuration wconf))))
+
+
+(defun claude-gravity-popup-at-point ()
+  "Show full detail for the section at point in a maximized popup.
+Press `q' or `SPC' to dismiss and restore the previous layout."
+  (interactive)
+  (let* ((section (magit-current-section))
+         (type (and section (oref section type)))
+         (value (and section (oref section value)))
+         (session (when claude-gravity--buffer-session-id
+                    (claude-gravity--get-session claude-gravity--buffer-session-id)))
+         (wconf (current-window-configuration))
+         (content (claude-gravity--popup-content-for type value session)))
+    (if (not content)
+        (user-error "No detail available for this section")
+      (let ((buf (get-buffer-create "*Claude Detail*")))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert content))
+          (claude-gravity-popup-mode)
+          (setq claude-gravity--popup-wconf wconf)
+          (goto-char (point-min)))
+        (pop-to-buffer buf)
+        (delete-other-windows)))))
+
+
+(defun claude-gravity--popup-content-for (type value session)
+  "Generate popup content string for section TYPE with VALUE in SESSION.
+Returns nil if no meaningful content is available."
+  (pcase type
+    ('tool (claude-gravity--popup-tool-content value session))
+    ('response-cycle (claude-gravity--popup-cycle-content value session))
+    ('stop-message (claude-gravity--popup-stop-content value session))
+    ('turn (claude-gravity--popup-turn-content value session))
+    ('task (claude-gravity--popup-task-content value session))
+    ('agent (claude-gravity--popup-agent-content value session))
+    (_ nil)))
+
+
+(defun claude-gravity--popup-tool-content (tool-use-id session)
+  "Generate full tool detail for TOOL-USE-ID in SESSION."
+  (when (and session tool-use-id)
+    (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
+      (when tool
+        (let* ((name (alist-get 'name tool))
+               (input (alist-get 'input tool))
+               (result (alist-get 'result tool))
+               (status (alist-get 'status tool))
+               (post-think (alist-get 'post_thinking tool))
+               (post-text (alist-get 'post_text tool)))
+          (with-temp-buffer
+            (insert (format "# Tool: %s\n\n" (or name "?")))
+            (insert (format "`%s`\n\n" (claude-gravity--tool-signature name input)))
+            (insert (format "**Status:** %s\n\n" (or status "unknown")))
+            (claude-gravity--popup-insert-tool-input name input)
+            (claude-gravity--popup-insert-tool-result name input result status)
+            (when (and post-think (not (string-empty-p post-think)))
+              (insert "## Thinking\n\n" post-think "\n\n"))
+            (when (and post-text (not (string-empty-p post-text)))
+              (insert "## Assistant\n\n" post-text "\n\n"))
+            (buffer-string)))))))
+
+
+(defun claude-gravity--popup-insert-tool-input (name input)
+  "Insert full tool INPUT for tool NAME into current buffer as markdown."
+  (pcase name
+    ("Bash"
+     (let ((cmd (alist-get 'command input)))
+       (when cmd
+         (insert "**Command:**\n\n```bash\n" cmd "\n```\n\n"))))
+    ("Read"
+     (let ((path (alist-get 'file_path input)))
+       (when path
+         (insert (format "**File:** `%s`\n\n" path)))))
+    ((or "Edit" "Write")
+     (let ((path (alist-get 'file_path input))
+           (old (alist-get 'old_string input))
+           (new (alist-get 'new_string input)))
+       (when path
+         (insert (format "**File:** `%s`\n\n" path)))
+       (when (and old (equal name "Edit"))
+         (insert "### Old\n\n```\n" old "\n```\n\n"))
+       (when new
+         (insert "### New\n\n```\n" new "\n```\n\n"))))
+    ((or "Grep" "Glob")
+     (let ((pattern (alist-get 'pattern input))
+           (path (alist-get 'path input)))
+       (when pattern
+         (insert (format "**Pattern:** `%s`\n\n" pattern)))
+       (when path
+         (insert (format "**Path:** `%s`\n\n" path)))))
+    ("AskUserQuestion"
+     (let ((questions (alist-get 'questions input)))
+       (when (vectorp questions)
+         (dotimes (i (length questions))
+           (let* ((q (aref questions i))
+                  (text (alist-get 'question q))
+                  (opts (alist-get 'options q)))
+             (insert (format "### Question %d\n\n%s\n\n" (1+ i) (or text "")))
+             (when (vectorp opts)
+               (dotimes (j (length opts))
+                 (let ((opt (aref opts j)))
+                   (insert (format "%d. **%s**" (1+ j) (or (alist-get 'label opt) ""))
+                           (let ((desc (alist-get 'description opt)))
+                             (if desc (format " — %s" desc) ""))
+                           "\n")))
+               (insert "\n")))))))
+    (_
+     (when input
+       (insert "**Input:**\n\n```\n" (pp-to-string input) "```\n\n")))))
+
+
+(defun claude-gravity--popup-insert-tool-result (_name _input result status)
+  "Insert full tool RESULT into current buffer as markdown.
+NAME, INPUT used for context. STATUS for error display."
+  (when result
+    ;; Normalize MCP-style vector results
+    (when (vectorp result)
+      (let* ((first (and (> (length result) 0) (aref result 0)))
+             (text (and (listp first) (alist-get 'text first))))
+        (setq result (when text (list (cons 'stdout text))))))
+    (let ((stdout (and (listp result) (alist-get 'stdout result)))
+          (stderr (and (listp result) (alist-get 'stderr result)))
+          (file-data (and (listp result) (alist-get 'file result))))
+      (when (and stdout (not (string-empty-p stdout)))
+        (insert "## Output\n\n```\n" stdout "\n```\n\n"))
+      (when file-data
+        (let ((content (alist-get 'content file-data)))
+          (when (and content (not (string-empty-p content)))
+            (insert "## Content\n\n```\n" content "\n```\n\n"))))
+      (when (and stderr (not (string-empty-p stderr)))
+        (insert "## Stderr\n\n```\n" stderr "\n```\n\n"))
+      (when (and (equal status "error") (stringp result))
+        (insert "## Error\n\n```\n" result "\n```\n\n")))))
+
+
+(defun claude-gravity--popup-tool-status-mark (status)
+  "Return markdown checkbox for tool STATUS."
+  (cond ((equal status "done") "- [x]")
+        ((equal status "error") "- [!]")
+        (t "- [ ]")))
+
+
+(defun claude-gravity--popup-cycle-content (cycle-idx session)
+  "Generate full content for response cycle CYCLE-IDX in SESSION."
+  (when session
+    (let* ((turns-tl (plist-get session :turns))
+           (turn-nodes (when turns-tl (claude-gravity--tlist-items turns-tl))))
+      (catch 'found
+        (dolist (tn turn-nodes)
+          (let* ((cycles-tl (alist-get 'cycles tn))
+                 (cycles (when cycles-tl (claude-gravity--tlist-items cycles-tl))))
+            (when (and cycles (< cycle-idx (length cycles)))
+              (let* ((cycle (nth cycle-idx cycles))
+                     (athink (alist-get 'thinking cycle))
+                     (atext (alist-get 'text cycle))
+                     (tools (claude-gravity--tlist-items (alist-get 'tools cycle))))
+                (throw 'found
+                       (with-temp-buffer
+                         (insert (format "# Response Cycle %d\n\n" cycle-idx))
+                         (when (and athink (not (string-empty-p (string-trim athink))))
+                           (insert "## Thinking\n\n" (string-trim athink) "\n\n"))
+                         (when (and atext (not (string-empty-p (string-trim atext))))
+                           (insert "## Assistant\n\n" (string-trim atext) "\n\n"))
+                         (when tools
+                           (insert (format "## Tools (%d)\n\n" (length tools)))
+                           (dolist (tool tools)
+                             (insert (format "%s `%s`\n"
+                                             (claude-gravity--popup-tool-status-mark
+                                              (alist-get 'status tool))
+                                             (claude-gravity--tool-signature
+                                              (alist-get 'name tool)
+                                              (alist-get 'input tool))))))
+                         (buffer-string)))))))
+        nil))))
+
+
+(defun claude-gravity--popup-stop-content (_value session)
+  "Generate full stop message content for SESSION at current turn."
+  (when session
+    (let* ((turns-tl (plist-get session :turns))
+           (turn-nodes (when turns-tl (claude-gravity--tlist-items turns-tl)))
+           (last-tn (car (last turn-nodes))))
+      (when last-tn
+        (let ((stop-think (alist-get 'stop_thinking last-tn))
+              (stop-text (alist-get 'stop_text last-tn)))
+          (when (or stop-think stop-text)
+            (with-temp-buffer
+              (insert "# Stop Message\n\n")
+              (when (and stop-think (not (string-empty-p stop-think)))
+                (insert "## Thinking\n\n" stop-think "\n\n"))
+              (when (and stop-text (not (string-empty-p stop-text)))
+                (insert "## Text\n\n" stop-text "\n\n"))
+              (buffer-string))))))))
+
+
+(defun claude-gravity--popup-turn-content (turn-num session)
+  "Generate full content for turn TURN-NUM in SESSION."
+  (when session
+    (let* ((turns-tl (plist-get session :turns))
+           (turn-nodes (when turns-tl (claude-gravity--tlist-items turns-tl)))
+           (tn (cl-find-if (lambda (n) (= (alist-get 'turn-number n) turn-num))
+                           turn-nodes)))
+      (when tn
+        (let* ((prompt (alist-get 'prompt tn))
+               (prompt-text (when prompt (claude-gravity--prompt-text prompt)))
+               (cycles (claude-gravity--tlist-items (alist-get 'cycles tn)))
+               (stop-think (alist-get 'stop_thinking tn))
+               (stop-text (alist-get 'stop_text tn)))
+          (with-temp-buffer
+            (insert (format "# Turn %d\n\n" turn-num))
+            (when (and prompt-text (not (string-empty-p prompt-text)))
+              (insert "## Prompt\n\n> " (replace-regexp-in-string "\n" "\n> " prompt-text) "\n\n"))
+            (let ((ci 0))
+              (dolist (cycle cycles)
+                (let ((athink (alist-get 'thinking cycle))
+                      (atext (alist-get 'text cycle))
+                      (tools (claude-gravity--tlist-items (alist-get 'tools cycle))))
+                  (insert (format "## Cycle %d\n\n" ci))
+                  (when (and athink (not (string-empty-p (string-trim athink))))
+                    (insert "### Thinking\n\n" (string-trim athink) "\n\n"))
+                  (when (and atext (not (string-empty-p (string-trim atext))))
+                    (insert (string-trim atext) "\n\n"))
+                  (when tools
+                    (dolist (tool tools)
+                      (insert (format "%s `%s`\n"
+                                      (claude-gravity--popup-tool-status-mark
+                                       (alist-get 'status tool))
+                                      (claude-gravity--tool-signature
+                                       (alist-get 'name tool)
+                                       (alist-get 'input tool)))))
+                    (insert "\n")))
+                (cl-incf ci)))
+            (when (and stop-think (not (string-empty-p stop-think)))
+              (insert "## Stop Thinking\n\n" stop-think "\n\n"))
+            (when (and stop-text (not (string-empty-p stop-text)))
+              (insert "## Stop Text\n\n" stop-text "\n\n"))
+            (buffer-string)))))))
+
+
+(defun claude-gravity--popup-task-content (task-id session)
+  "Generate full detail for TASK-ID in SESSION."
+  (when session
+    (let* ((turns-tl (plist-get session :turns))
+           (turn-nodes (when turns-tl (claude-gravity--tlist-items turns-tl))))
+      (catch 'found
+        (dolist (tn turn-nodes)
+          (dolist (task (alist-get 'tasks tn))
+            (when (equal (alist-get 'taskId task) task-id)
+              (throw 'found
+                     (with-temp-buffer
+                       (insert "# Task\n\n")
+                       (insert (format "**Subject:** %s\n\n" (or (alist-get 'subject task) "(none)")))
+                       (insert (format "**Status:** %s\n\n" (or (alist-get 'status task) "pending")))
+                       (let ((af (alist-get 'activeForm task)))
+                         (when af
+                           (insert (format "**Active:** %s\n\n" af))))
+                       (let ((desc (alist-get 'description task)))
+                         (when (and desc (not (string-empty-p desc)))
+                           (insert "## Description\n\n" desc "\n")))
+                       (buffer-string))))))
+        nil))))
+
+
+(defun claude-gravity--popup-agent-content (value session)
+  "Generate full detail for agent VALUE in SESSION."
+  (when (and value (listp value) session)
+    (let* ((aid (alist-get 'agent_id value))
+           (agent (when aid (claude-gravity--find-agent session aid))))
+      (when agent
+        (let ((atype (alist-get 'type agent))
+              (astatus (alist-get 'status agent))
+              (adur (alist-get 'duration agent))
+              (stop-think (alist-get 'stop_thinking agent))
+              (stop-text (alist-get 'stop_text agent))
+              (tp (alist-get 'transcript_path agent)))
+          (with-temp-buffer
+            (insert (format "# Agent: %s\n\n" (or atype "unknown")))
+            (insert (format "**ID:** `%s`\n\n" (or aid "?")))
+            (insert (format "**Status:** %s\n\n" (or astatus "?")))
+            (when adur
+              (insert (format "**Duration:** %s\n\n" (claude-gravity--format-duration adur))))
+            (when tp
+              (insert (format "**Transcript:** `%s`\n\n" tp)))
+            (when (and stop-think (not (string-empty-p stop-think)))
+              (insert "## Thinking\n\n" stop-think "\n\n"))
+            (when (and stop-text (not (string-empty-p stop-text)))
+              (insert "## Summary\n\n" stop-text "\n\n"))
+            (let ((cycles (claude-gravity--tlist-items (alist-get 'cycles agent))))
+              (when cycles
+                (insert "## Tool History\n\n")
+                (dolist (cycle cycles)
+                  (let ((tools (claude-gravity--tlist-items (alist-get 'tools cycle)))
+                        (athink (alist-get 'thinking cycle))
+                        (atext (alist-get 'text cycle)))
+                    (when (and athink (not (string-empty-p (string-trim athink))))
+                      (insert "### Thinking\n\n" (string-trim athink) "\n\n"))
+                    (when (and atext (not (string-empty-p (string-trim atext))))
+                      (insert (string-trim atext) "\n\n"))
+                    (when tools
+                      (dolist (tool tools)
+                        (insert (format "%s `%s`\n"
+                                        (claude-gravity--popup-tool-status-mark
+                                         (alist-get 'status tool))
+                                        (claude-gravity--tool-signature
+                                         (alist-get 'name tool)
+                                         (alist-get 'input tool)))))
+                      (insert "\n"))))))
+            (buffer-string)))))))
 
 (provide 'claude-gravity-ui)
 ;;; claude-gravity-ui.el ends here
