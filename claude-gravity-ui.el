@@ -1269,7 +1269,8 @@ prompts to confirm the directory before starting."
     ("D" "Remove ended" claude-gravity-cleanup-sessions)
     ("X" "Detect dead" claude-gravity-detect-dead-sessions)
     ("R" "Reset all idle" claude-gravity-reset-status)
-    ("d" "Delete session" claude-gravity-delete-session)]
+    ("d" "Delete session" claude-gravity-delete-session)
+    ("," "Rename session" claude-gravity-rename-session)]
    ["Navigation"
     ("TAB" "Toggle section" magit-section-toggle)
     ("e" "Edit entry" claude-gravity-edit-entry)
@@ -1298,7 +1299,8 @@ prompts to confirm the directory before starting."
     ("m" "Set model" claude-gravity-set-model
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("l" "Set permission mode" claude-gravity-set-permission-mode
-     :inapt-if-not claude-gravity--current-session-managed-p)]
+     :inapt-if-not claude-gravity--current-session-managed-p)
+    ("," "Rename session" claude-gravity-rename-session)]
    ["Plan & Transcript"
     ("P" "Show Plan" claude-gravity-show-plan)
     ("F" "Open plan file" claude-gravity-open-plan-file)
@@ -1562,6 +1564,7 @@ in the current window."
 (define-key claude-gravity-mode-map (kbd "C") 'claude-gravity-reset-session)
 (define-key claude-gravity-mode-map (kbd "$") 'claude-gravity-terminal-session)
 (define-key claude-gravity-mode-map (kbd "<backtab>") 'claude-gravity-toggle-permission-mode)
+(define-key claude-gravity-mode-map (kbd ",") 'claude-gravity-rename-session)
 ;; Other
 (define-key claude-gravity-mode-map (kbd "M") 'claude-gravity-debug-show)
 

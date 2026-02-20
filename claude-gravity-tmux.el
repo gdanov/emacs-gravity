@@ -217,8 +217,22 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
   (claude-gravity--tmux-check)
   (claude-gravity--ensure-server)
   (setq cwd (claude-gravity--normalize-cwd cwd))
+  ;; Warn if another alive tmux session already runs in the same cwd
+  (let ((existing-in-cwd nil))
+    (maphash (lambda (sid tmux-name)
+               (when (and (claude-gravity--tmux-alive-p tmux-name)
+                          (let ((s (claude-gravity--get-session sid)))
+                            (and s (equal (plist-get s :project) cwd))))
+                 (setq existing-in-cwd tmux-name)))
+             claude-gravity--tmux-sessions)
+    (when existing-in-cwd
+      (unless (y-or-n-p (format "Session already running in %s. Start another? " cwd))
+        (user-error "Aborted"))))
   (let* ((temp-id (format "tmux-%s" (format-time-string "%s%3N")))
-         (tmux-name (format "claude-%s" temp-id))
+         (project-base (file-name-nondirectory (directory-file-name cwd)))
+         (tmux-name (format "claude-%s-%s"
+                            project-base
+                            (substring (md5 (format "%s%s" (float-time) temp-id)) 0 4)))
          (plugin-root (file-name-directory
                        (or load-file-name
                            (locate-library "claude-gravity")
@@ -287,7 +301,13 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
                    (and existing (plist-get existing :cwd))
                    (claude-gravity--read-project-dir "Project directory: "))))
          (temp-id (format "tmux-%s" (format-time-string "%s%3N")))
-         (tmux-name (format "claude-resume-%s"
+         (project-base (file-name-nondirectory
+                        (directory-file-name
+                         (or cwd
+                             (and existing (plist-get existing :cwd))
+                             default-directory))))
+         (tmux-name (format "claude-resume-%s-%s"
+                            project-base
                             (substring session-id 0 (min 8 (length session-id)))))
          (plugin-root (file-name-directory
                        (or load-file-name
@@ -343,13 +363,29 @@ Signals error if no session found or not alive."
                   (let ((section (magit-current-section)))
                     (when (and section (eq (oref section type) 'session-entry))
                       (oref section value)))
-                  (let ((found nil))
+                  (let ((alive nil))
                     (maphash (lambda (id tmux-name)
-                               (when (and (not found)
-                                          (claude-gravity--tmux-alive-p tmux-name))
-                                 (setq found id)))
+                               (when (claude-gravity--tmux-alive-p tmux-name)
+                                 (push (cons id tmux-name) alive)))
                              claude-gravity--tmux-sessions)
-                    found)))
+                    (cond
+                     ((null alive) nil)
+                     ((= (length alive) 1) (caar alive))
+                     (t ;; Multiple alive sessions — let user pick
+                      (let* ((candidates
+                              (mapcar (lambda (pair)
+                                        (let* ((id (car pair))
+                                               (tn (cdr pair))
+                                               (s (claude-gravity--get-session id))
+                                               (label (if s
+                                                          (format "%s [%s]"
+                                                                  (or (plist-get s :slug) id)
+                                                                  tn)
+                                                        (format "%s [%s]" id tn))))
+                                          (cons label id)))
+                                      alive))
+                             (choice (completing-read "Select session: " candidates nil t)))
+                        (cdr (assoc choice candidates))))))))
          (tmux-name (and sid (gethash sid claude-gravity--tmux-sessions))))
     (unless tmux-name
       (error "No tmux Claude session found for %s" (or sid "any")))
@@ -1020,6 +1056,57 @@ Cycle order: default -> auto-edit -> plan -> default."
      ((claude-gravity--current-session-daemon-p)
       (claude-gravity-daemon-set-permission-mode next-mode sid))
      (t (user-error "No managed session at point")))))
+
+(defun claude-gravity--sanitize-session-name (name)
+  "Sanitize NAME for use as tmux session name and display label.
+Downcases, replaces non-alphanumeric with hyphens, trims hyphens."
+  (let ((s (downcase (string-trim name))))
+    (setq s (replace-regexp-in-string "[^a-z0-9]+" "-" s))
+    (setq s (replace-regexp-in-string "^-+\\|-+$" "" s))
+    (if (string-empty-p s) "session" s)))
+
+
+(defun claude-gravity-rename-session (new-name &optional session-id)
+  "Rename session to NEW-NAME (updates display-name, tmux name, and buffer)."
+  (interactive
+   (let* ((sid (or claude-gravity--buffer-session-id
+                   (let ((section (magit-current-section)))
+                     (when (and section (eq (oref section type) 'session-entry))
+                       (oref section value)))))
+          (session (and sid (claude-gravity--get-session sid)))
+          (current (if session (claude-gravity--session-label session) "")))
+     (list (read-string "New session name: " current) sid)))
+  (let* ((sanitized (claude-gravity--sanitize-session-name new-name))
+         (sid (or session-id
+                  claude-gravity--buffer-session-id
+                  (let ((section (magit-current-section)))
+                    (when (and section (eq (oref section type) 'session-entry))
+                      (oref section value)))))
+         (session (and sid (claude-gravity--get-session sid))))
+    (unless session
+      (user-error "No session found"))
+    ;; Update display-name
+    (plist-put session :display-name sanitized)
+    ;; Rename buffer
+    (let ((buf (or (plist-get session :buffer)
+                   (get-buffer (format "*Claude: %s*"
+                                       (or (plist-get session :slug)
+                                           (claude-gravity--session-short-id sid)))))))
+      (when (and buf (buffer-live-p buf))
+        (with-current-buffer buf
+          (rename-buffer (claude-gravity--session-buffer-name session) t))))
+    ;; Rename tmux session if exists
+    (let ((old-tmux (gethash sid claude-gravity--tmux-sessions)))
+      (when (and old-tmux (claude-gravity--tmux-alive-p old-tmux))
+        (let ((new-tmux (format "claude-%s" sanitized)))
+          (when (= 0 (call-process "tmux" nil nil nil
+                                    "rename-session" "-t" old-tmux new-tmux))
+            (remhash sid claude-gravity--tmux-sessions)
+            (puthash sid new-tmux claude-gravity--tmux-sessions)
+            (plist-put session :tmux-session new-tmux)))))
+    (claude-gravity--schedule-refresh)
+    (message "Session renamed to: %s" sanitized)))
+
 
 (provide 'claude-gravity-tmux)
 ;;; claude-gravity-tmux.el ends here

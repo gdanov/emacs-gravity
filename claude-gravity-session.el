@@ -77,7 +77,8 @@ because external processes like tmux do not expand tilde."
 
 (defun claude-gravity--session-label (session)
   "Return display label: slug if available, else short session-id."
-  (or (plist-get session :slug)
+  (or (plist-get session :display-name)
+      (plist-get session :slug)
       (claude-gravity--session-short-id (plist-get session :session-id))))
 
 
@@ -132,6 +133,7 @@ Ensures :tool-index, :agent-index, and :turns exist. Idempotent."
                            :header-line-cache nil
                            :permission-mode nil
                            :slug nil
+                           :display-name nil
                            :branch nil
                            :buffer nil
                            :token-usage nil)))
