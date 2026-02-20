@@ -1625,6 +1625,7 @@ Press `q' or `SPC' to dismiss and restore the previous layout."
             (erase-buffer)
             (insert content))
           (claude-gravity-popup-mode)
+          (claude-gravity--popup-fontify-diffs)
           (setq claude-gravity--popup-wconf wconf)
           (goto-char (point-min)))
         (pop-to-buffer buf)
@@ -1668,11 +1669,49 @@ Returns nil if no meaningful content is available."
             (buffer-string)))))))
 
 
+(defun claude-gravity--popup-overlay-face (start end face)
+  "Create an overlay from START to END with FACE, prioritized over font-lock."
+  (let ((ov (make-overlay start end)))
+    (overlay-put ov 'face face)
+    (overlay-put ov 'evaporate t)))
+
+(defun claude-gravity--popup-fontify-diffs ()
+  "Apply diff overlays in the current popup buffer after mode setup.
+Scans for lines between ### Diff headings and next heading or end,
+applying faces based on line prefix."
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward "^### Diff$" nil t)
+      (forward-line 1)
+      ;; skip blank line after heading
+      (when (looking-at-p "^$") (forward-line 1))
+      (let ((end-bound (save-excursion
+                         (if (re-search-forward "^#" nil t)
+                             (line-beginning-position)
+                           (point-max)))))
+        (while (< (point) end-bound)
+          (let ((bol (line-beginning-position))
+                (eol (line-end-position))
+                (line-text (buffer-substring-no-properties
+                            (line-beginning-position)
+                            (min (+ (line-beginning-position) 2)
+                                 (line-end-position)))))
+            (cond
+             ((string-prefix-p "@@" line-text)
+              (claude-gravity--popup-overlay-face bol eol 'claude-gravity-diff-header))
+             ((string-prefix-p "-" line-text)
+              (claude-gravity--popup-overlay-face bol eol 'claude-gravity-diff-removed))
+             ((string-prefix-p "+" line-text)
+              (claude-gravity--popup-overlay-face bol eol 'claude-gravity-diff-added))
+             ((string-prefix-p " " line-text)
+              (claude-gravity--popup-overlay-face bol eol 'claude-gravity-diff-context))))
+          (forward-line 1))))))
+
 (defun claude-gravity--popup-insert-edit-diff (input result status)
-  "Insert fontified unified diff for an Edit tool into the popup buffer.
+  "Insert plain-text unified diff for an Edit tool into the popup buffer.
 Uses structuredPatch from RESULT when available (STATUS \"done\"),
 otherwise falls back to old_string/new_string from INPUT.
-Lines are propertized with diff faces for colored display."
+Diff coloring is applied later by `claude-gravity--popup-fontify-diffs'."
   (let (old-str new-str patch)
     (cond
      ((equal status "done")
@@ -1686,7 +1725,7 @@ Lines are propertized with diff faces for colored display."
       (setq old-str (alist-get 'old_string input)
             new-str (alist-get 'new_string input))))
     (cond
-     ;; structuredPatch — render hunks with diff faces
+     ;; structuredPatch — render hunks as plain text
      (patch
       (insert "### Diff\n\n")
       (let ((hunks (if (vectorp patch) (append patch nil) patch)))
@@ -1696,45 +1735,14 @@ Lines are propertized with diff faces for colored display."
                 (new-start (alist-get 'newStart hunk))
                 (new-lines (alist-get 'newLines hunk))
                 (lines-vec (alist-get 'lines hunk)))
-            (insert (propertize (format "@@ -%s,%s +%s,%s @@"
-                                        (or old-start "?") (or old-lines "?")
-                                        (or new-start "?") (or new-lines "?"))
-                                'face 'claude-gravity-diff-header)
-                    "\n")
-            (let* ((raw-lines (if (vectorp lines-vec) (append lines-vec nil) lines-vec))
-                   (i 0)
-                   (n (length raw-lines)))
-              (while (< i n)
-                (let ((line (nth i raw-lines)))
-                  (cond
-                   ((string-prefix-p " " line)
-                    (insert (propertize line 'face 'claude-gravity-diff-context) "\n")
-                    (setq i (1+ i)))
-                   ((string-prefix-p "-" line)
-                    (let (removed-lines added-lines)
-                      (while (and (< i n) (string-prefix-p "-" (nth i raw-lines)))
-                        (push (nth i raw-lines) removed-lines)
-                        (setq i (1+ i)))
-                      (setq removed-lines (nreverse removed-lines))
-                      (while (and (< i n) (string-prefix-p "+" (nth i raw-lines)))
-                        (push (nth i raw-lines) added-lines)
-                        (setq i (1+ i)))
-                      (setq added-lines (nreverse added-lines))
-                      (if (and removed-lines added-lines)
-                          (claude-gravity--insert-refined-hunk-lines
-                           removed-lines added-lines "")
-                        (dolist (rl removed-lines)
-                          (insert (propertize rl 'face 'claude-gravity-diff-removed) "\n"))
-                        (dolist (al added-lines)
-                          (insert (propertize al 'face 'claude-gravity-diff-added) "\n")))))
-                   ((string-prefix-p "+" line)
-                    (insert (propertize line 'face 'claude-gravity-diff-added) "\n")
-                    (setq i (1+ i)))
-                   (t
-                    (insert line "\n")
-                    (setq i (1+ i))))))))))
+            (insert (format "@@ -%s,%s +%s,%s @@\n"
+                            (or old-start "?") (or old-lines "?")
+                            (or new-start "?") (or new-lines "?")))
+            (let ((raw-lines (if (vectorp lines-vec) (append lines-vec nil) lines-vec)))
+              (dolist (line raw-lines)
+                (insert line "\n"))))))
       (insert "\n"))
-     ;; old/new strings — simple before/after diff with faces
+     ;; old/new strings — simple before/after
      ((and new-str (stringp new-str) (not (string-empty-p new-str)))
       (let ((old-lines (if (and old-str (stringp old-str))
                            (split-string old-str "\n")
@@ -1742,9 +1750,9 @@ Lines are propertized with diff faces for colored display."
             (new-lines (split-string new-str "\n")))
         (insert "### Diff\n\n")
         (dolist (line old-lines)
-          (insert (propertize (concat "- " line) 'face 'claude-gravity-diff-removed) "\n"))
+          (insert "- " line "\n"))
         (dolist (line new-lines)
-          (insert (propertize (concat "+ " line) 'face 'claude-gravity-diff-added) "\n"))
+          (insert "+ " line "\n"))
         (insert "\n")))
      (t nil))))
 
