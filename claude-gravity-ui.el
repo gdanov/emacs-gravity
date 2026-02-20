@@ -1494,13 +1494,16 @@ Disables when you manually scroll or navigate."
 
 
 (defun claude-gravity-copy-section ()
-  "Copy the text of the current section to the kill ring."
+  "Copy the text of the current section to the kill ring.
+Strips gutter indicators (▎) that are used for display margins."
   (interactive)
   (let ((section (magit-current-section)))
     (if section
-        (let ((text (buffer-substring-no-properties
+        (let* ((raw (buffer-substring-no-properties
                      (oref section start)
-                     (oref section end))))
+                     (oref section end)))
+               (text (replace-regexp-in-string
+                      (regexp-quote claude-gravity--margin-char) "" raw)))
           (kill-new text)
           (message "Copied %d chars" (length text)))
       (user-error "No section at point"))))
