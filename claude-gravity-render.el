@@ -475,7 +475,7 @@ Deduplicates against the last tool's post_text/post_thinking."
           (let ((has-think (and stop-think (not (string-empty-p stop-think))))
                 (has-text (and stop-text (not (string-empty-p stop-text)))))
             (when (or has-think has-text)
-              (magit-insert-section (stop-message nil t)
+              (magit-insert-section (stop-message (alist-get 'turn-number turn-node) t)
                 (magit-insert-heading
                   (format "%s%s\n"
                           (claude-gravity--indent)

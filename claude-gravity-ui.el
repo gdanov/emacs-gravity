@@ -1782,15 +1782,16 @@ NAME, INPUT used for context. STATUS for error display."
         nil))))
 
 
-(defun claude-gravity--popup-stop-content (_value session)
-  "Generate full stop message content for SESSION at current turn."
+(defun claude-gravity--popup-stop-content (value session)
+  "Generate full stop message content for SESSION at turn VALUE."
   (when session
     (let* ((turns-tl (plist-get session :turns))
            (turn-nodes (when turns-tl (claude-gravity--tlist-items turns-tl)))
-           (last-tn (car (last turn-nodes))))
-      (when last-tn
-        (let ((stop-think (alist-get 'stop_thinking last-tn))
-              (stop-text (alist-get 'stop_text last-tn)))
+           (tn (or (cl-find-if (lambda (n) (eql (alist-get 'turn-number n) value)) turn-nodes)
+                   (car (last turn-nodes)))))
+      (when tn
+        (let ((stop-think (alist-get 'stop_thinking tn))
+              (stop-text (alist-get 'stop_text tn)))
           (when (or stop-think stop-text)
             (with-temp-buffer
               (insert "# Stop Message\n\n")
