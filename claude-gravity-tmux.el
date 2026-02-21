@@ -42,6 +42,11 @@ Falls back to `read-directory-name' otherwise."
   "Map of temp-id → tmux-name for tmux sessions awaiting SessionStart re-keying.")
 
 
+(defvar claude-gravity--tmux-rekey-sessions (make-hash-table :test 'equal)
+  "Map of tmux-session-name → session plist, for /clear re-keying of sessions
+without CLAUDE_GRAVITY_TEMP_ID (auto-registered tmux sessions not launched by gravity).")
+
+
 (defvar claude-gravity--tmux-heartbeat-timer nil
   "Timer for periodic tmux session liveness checks.")
 

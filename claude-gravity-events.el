@@ -9,6 +9,7 @@
 ; Forward declarations for functions/vars in modules loaded later
 (defvar claude-gravity--tmux-sessions)
 (defvar claude-gravity--tmux-pending)
+(defvar claude-gravity--tmux-rekey-sessions)
 (defvar claude-gravity--daemon-pending)
 (defvar claude-gravity--daemon-sessions)
 (defvar claude-gravity--resume-picker-buffer)
@@ -216,6 +217,43 @@ the model mutation API to update session state."
                                      (claude-gravity--ensure-session session-id cwd))))
                (plist-put real-session :temp-id temp-id)
                (puthash session-id tmux-name claude-gravity--tmux-sessions))))))
+     ;; Fallback: re-key via tmux-name for auto-registered sessions
+     ;; (sessions not launched by gravity that have no CLAUDE_GRAVITY_TEMP_ID).
+     ;; SessionEnd stored these in claude-gravity--tmux-rekey-sessions keyed by
+     ;; the stable tmux session name, which appears in every hook payload.
+     (let* ((data-tmux-name (alist-get 'tmux_session data))
+            (old-session (and data-tmux-name
+                              (gethash data-tmux-name claude-gravity--tmux-rekey-sessions))))
+       (when old-session
+         (remhash data-tmux-name claude-gravity--tmux-rekey-sessions)
+         ;; Re-key: update identity and register under new session-id
+         (plist-put old-session :session-id session-id)
+         (puthash session-id old-session claude-gravity--sessions)
+         (puthash session-id data-tmux-name claude-gravity--tmux-sessions)
+         ;; Rename buffer to reflect new session-id
+         (let ((old-buf (plist-get old-session :buffer)))
+           (when (and old-buf (buffer-live-p old-buf))
+             (let ((new-name (claude-gravity--session-buffer-name old-session)))
+               (with-current-buffer old-buf
+                 (rename-buffer new-name t)
+                 (setq claude-gravity--buffer-session-id session-id)))))
+         ;; Clear-and-proceed: preserve turns/tools/agents, just re-key identity.
+         ;; Normal /clear: full state reset.
+         (if (plist-get old-session :awaiting-clear)
+             (let ((plan-path (plist-get old-session :clear-plan-path)))
+               (claude-gravity--soft-rekey-session old-session session-id)
+               (when (and data-tmux-name plan-path)
+                 (run-at-time 2 nil
+                   (lambda ()
+                     (when (claude-gravity--tmux-alive-p data-tmux-name)
+                       (claude-gravity--send-prompt-core
+                        (format "Implement the plan in @%s" plan-path)
+                        session-id data-tmux-name))))))
+           (claude-gravity--reset-session old-session))
+         ;; Apply slug now — the pre-pcase update missed it
+         ;; because the session was stored under tmux-name, not session-id.
+         (claude-gravity-model-update-session-meta
+          old-session :pid pid :slug (alist-get 'slug data))))
      ;; Re-key daemon pending session (same pattern as tmux above)
      (let ((temp-id (alist-get 'temp_id data)))
        (when (and temp-id
@@ -273,12 +311,21 @@ the model mutation API to update session state."
          ;; for SessionStart re-keying.  Otherwise clean up.
          (let ((tmux-name (gethash session-id claude-gravity--tmux-sessions)))
            (if (and tmux-name (claude-gravity--tmux-alive-p tmux-name))
-               ;; /clear — put temp-id back into pending for next SessionStart
+               ;; /clear — preserve session for SessionStart re-keying
                (let ((temp-id (plist-get session :temp-id)))
-                 (when temp-id
-                   (puthash temp-id tmux-name claude-gravity--tmux-pending)
-                   ;; Move session back under temp-id so SessionStart re-keying finds it
-                   (puthash temp-id session claude-gravity--sessions)
+                 (if temp-id
+                     ;; Primary path: gravity-launched session (CLAUDE_GRAVITY_TEMP_ID set)
+                     (progn
+                       (puthash temp-id tmux-name claude-gravity--tmux-pending)
+                       ;; Move session back under temp-id so SessionStart re-keying finds it
+                       (puthash temp-id session claude-gravity--sessions)
+                       (remhash session-id claude-gravity--sessions)
+                       (remhash session-id claude-gravity--tmux-sessions))
+                   ;; Fallback path: auto-registered session (no temp-id).
+                   ;; Use the stable tmux-name as secondary re-key key so
+                   ;; SessionStart can find and re-key this session even without
+                   ;; a CLAUDE_GRAVITY_TEMP_ID match.
+                   (puthash tmux-name session claude-gravity--tmux-rekey-sessions)
                    (remhash session-id claude-gravity--sessions)
                    (remhash session-id claude-gravity--tmux-sessions)))
              (remhash session-id claude-gravity--tmux-sessions)))))
