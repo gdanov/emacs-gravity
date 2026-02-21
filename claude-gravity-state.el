@@ -689,7 +689,11 @@ _AGENT-ID is accepted for API compatibility but not used (tree routes at inserti
   (let ((tool (claude-gravity-model-find-tool session tool-use-id)))
     (when tool
       (setf (alist-get 'status tool) "done")
-      (setf (alist-get 'result tool) result))))
+      (setf (alist-get 'result tool) result)
+      (let ((ts (alist-get 'timestamp tool)))
+        (when ts
+          (setf (alist-get 'duration tool)
+                (float-time (time-subtract (current-time) ts))))))))
 
 
 (defun claude-gravity-model-file-edit-tools (session file-path)

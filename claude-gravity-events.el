@@ -486,7 +486,8 @@ the model mutation API to update session state."
                             (cons 'model (alist-get 'model data))
                             (cons 'requested_model (alist-get 'requested_model data))
                             (cons 'post_text nil)
-                            (cons 'post_thinking nil))))
+                            (cons 'post_thinking nil)
+                            (cons 'duration nil))))
        (claude-gravity-model-add-tool
         session new-tool parent-agent-id
         (alist-get 'candidate_agent_ids data))

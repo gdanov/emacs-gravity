@@ -223,12 +223,17 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
                               dur-str))
                   ""))
                (agent-icon (if agent "🤖 " ""))
+               (tool-dur (alist-get 'duration item))
+               (dur-str (if (and (or done-p error-p) tool-dur (not agent))
+                            (propertize (format "  %s" (claude-gravity--format-duration tool-dur))
+                                        'face 'claude-gravity-detail-label)
+                          ""))
                (tool-use-id (alist-get 'tool_use_id item))
                (section-start (point)))
           (magit-insert-section (tool tool-use-id t)
             (magit-insert-heading
               (if desc
-                  (format "%s%s%s %s\n%s%s%s%s"
+                  (format "%s%s%s %s\n%s%s%s%s%s"
                           (claude-gravity--indent)
                           agent-icon
                           indicator
@@ -237,15 +242,17 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
                           (propertize (claude-gravity--tool-signature name input)
                                       'face 'claude-gravity-tool-signature)
                           (if (string-empty-p agent-suffix) model-badge "")
-                          agent-suffix)
-                (format "%s%s%s %s  %s%s%s"
+                          agent-suffix
+                          dur-str)
+                (format "%s%s%s %s  %s%s%s%s"
                         (claude-gravity--indent)
                         agent-icon
                         indicator
                         tool-face
                         (propertize summary 'face 'claude-gravity-detail-label)
                         (if (string-empty-p agent-suffix) model-badge "")
-                        agent-suffix)))
+                        agent-suffix
+                        dur-str)))
             ;; Show permission-format signature in detail
             (unless desc
               (let ((sig (claude-gravity--tool-signature name input)))
@@ -329,11 +336,19 @@ DEPTH tracks nesting level for background tint."
                 (propertize (format "  %s" short)
                             'face 'claude-gravity-detail-label)
               "")))
-         (agent-suffix (format "  %s %s (%s)%s%s"
+         (agent-tool-count (or (alist-get 'tool-count agent) 0))
+         (tool-count-str (if (> agent-tool-count 0)
+                             (propertize (format "  %d tool%s"
+                                                 agent-tool-count
+                                                 (if (= agent-tool-count 1) "" "s"))
+                                         'face 'claude-gravity-detail-label)
+                           ""))
+         (agent-suffix (format "  %s %s (%s)%s%s%s"
                                (propertize "→" 'face 'claude-gravity-detail-label)
                                (propertize (or atype "?") 'face 'claude-gravity-tool-name)
                                (propertize short-id 'face 'claude-gravity-detail-label)
                                model-badge
+                               tool-count-str
                                dur-str))
          (agent-cycles (claude-gravity--tlist-items (alist-get 'cycles agent)))
          (collapsed (and agent-done-p (not (null agent-cycles))))
