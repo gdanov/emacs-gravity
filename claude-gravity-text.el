@@ -49,14 +49,21 @@ Use as the argument to `magit-insert-heading'."
                     (let ((cells (split-string
                                  (string-trim line "\\s-*|" "|\\s-*") "|")))
                       (mapcar #'string-trim cells)))
-                  (seq-remove (lambda (l) (string-match-p "^\\s-*|[-:|]+|" l))
+                  (seq-remove (lambda (l) (string-match-p "^\\s-*|[ \t-:|]+|" l))
                               table-lines)))
          (ncols (if data-rows (length (car data-rows)) 0))
+         (display-width (lambda (cell)
+                          (length (replace-regexp-in-string
+                                   "\\*\\*\\(.*?\\)\\*\\*\\|\\*\\(.*?\\)\\*\\|`\\(.*?\\)`\\|_\\(.*?\\)_"
+                                   (lambda (m)
+                                     (or (match-string 1 m) (match-string 2 m)
+                                         (match-string 3 m) (match-string 4 m) ""))
+                                   cell))))
          (widths (let ((ws (make-list ncols 0)))
                    (dolist (row data-rows ws)
                      (dotimes (i (min ncols (length row)))
                        (setf (nth i ws)
-                             (max (nth i ws) (length (nth i row))))))))
+                             (max (nth i ws) (funcall display-width (nth i row))))))))
          (make-sep (lambda (left mid right)
                      (concat left
                              (mapconcat (lambda (w) (make-string (+ w 2) ?─))
@@ -68,7 +75,7 @@ Use as the argument to `magit-insert-heading'."
                              (lambda (pair)
                                (let ((cell (car pair)) (w (cdr pair)))
                                  (concat " " cell
-                                         (make-string (max 0 (- w (length cell))) ?\s)
+                                         (make-string (max 0 (- w (funcall display-width cell))) ?\s)
                                          " ")))
                              (cl-mapcar #'cons row widths) "│")
                             "│"))))
