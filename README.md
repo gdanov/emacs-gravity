@@ -177,6 +177,11 @@ RET                          — visit session or file
 - [docs/emacs-driven-sessions.md](docs/emacs-driven-sessions.md) — Managed session architecture
 - [docs/tmux-interactive-sessions.md](docs/tmux-interactive-sessions.md) — Tmux integration
 
+## On Hold
+
+- **OpenCode support** — Basic infrastructure exists for [OpenCode](https://github.com/opencode-ai/opencode) integration, but it's on hold pending further development on their side.
+- **Anthropic Agent SDK bridge** — A near-complete bridge using `@anthropic-ai/claude-agent-sdk` for a long-running daemon mode (no hooks needed). On hold because the SDK requires a pay-per-use API key — using it with a Claude Max/Pro subscription violates Anthropic's TOS. See [#6536](https://github.com/anthropics/claude-code/issues/6536). Code lives in `daemon.ts` / `daemon-session.ts` / `claude-gravity-daemon.el`.
+
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
