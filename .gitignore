@@ -4,3 +4,5 @@ emacs-bridge-agents.json
 .claude/
 */.claude/
 /.opencode/
+result
+.direnv
