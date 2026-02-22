@@ -371,10 +371,9 @@ The tmux-prompt-sent flag should prevent duplicates."
 
 ;;; Replay tests — feed JSONL transcripts through managed process filter
 
-(defvar cg-test--dir
+(setq cg-test--dir
   (file-name-directory (or load-file-name buffer-file-name
-                           "/Users/gdanov/work/playground/emacs-gravity/test/claude-gravity-test.el"))
-  "Directory containing test files, captured at load time.")
+                           (expand-file-name "test/claude-gravity-test.el" default-directory))))
 
 (require 'cg-test-replay nil :noerror)
 
