@@ -525,7 +525,8 @@ SESSION-ID identifies the Claude Code session."
       (claude-gravity-plan-review-mode 1)
       ;; Store buffer-local state
       (setq-local claude-gravity--plan-review-proc proc)
-      (setq-local claude-gravity--plan-review-original plan-content)
+      (setq-local claude-gravity--plan-review-original
+                  (buffer-substring-no-properties (point-min) (point-max)))
       (setq-local claude-gravity--plan-review-session-id session-id)
       ;; Build session-scoped permissions from allowedPrompts tool names.
       ;; Each unique tool becomes a toolAlwaysAllow entry so subsequent
