@@ -269,10 +269,11 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
       (unless (= result 0)
         (error "Failed to create tmux session %s" tmux-name))
       ;; Set initial tmux window width
-      (let ((cols (claude-gravity--tmux-initial-width)))
-        (call-process "tmux" nil nil nil
-                      "resize-window" "-t" tmux-name
-                      "-x" (number-to-string cols)))
+      (when claude-gravity-tmux-sync-width
+        (let ((cols (claude-gravity--tmux-initial-width)))
+          (call-process "tmux" nil nil nil
+                        "resize-window" "-t" tmux-name
+                        "-x" (number-to-string cols))))
       ;; Register pending re-key by temp-id (allows multiple sessions per cwd)
       (puthash temp-id tmux-name claude-gravity--tmux-pending)
       ;; Create session with temp ID
@@ -347,10 +348,11 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
         (remhash temp-id claude-gravity--tmux-pending)
         (error "Failed to create tmux session %s" tmux-name))
       ;; Set initial tmux window width
-      (let ((cols (claude-gravity--tmux-initial-width)))
-        (call-process "tmux" nil nil nil
-                      "resize-window" "-t" tmux-name
-                      "-x" (number-to-string cols)))
+      (when claude-gravity-tmux-sync-width
+        (let ((cols (claude-gravity--tmux-initial-width)))
+          (call-process "tmux" nil nil nil
+                        "resize-window" "-t" tmux-name
+                        "-x" (number-to-string cols))))
       (puthash session-id tmux-name claude-gravity--tmux-sessions)
       ;; Update or create session
       (let ((session (claude-gravity--ensure-session session-id cwd)))
@@ -801,11 +803,12 @@ Uses the width of BUF's window.  Debounces at 0.3s per session."
 
 (defun claude-gravity--tmux-on-window-size-change (frame)
   "Sync tmux width for any session buffers visible on FRAME."
-  (dolist (win (window-list frame 'no-minibuf))
-    (let ((buf (window-buffer win)))
-      (when (and (buffer-live-p buf)
-                 (buffer-local-value 'claude-gravity--buffer-session-id buf))
-        (claude-gravity--tmux-sync-width-for-buffer buf)))))
+  (when claude-gravity-tmux-sync-width
+    (dolist (win (window-list frame 'no-minibuf))
+      (let ((buf (window-buffer win)))
+        (when (and (buffer-live-p buf)
+                   (buffer-local-value 'claude-gravity--buffer-session-id buf))
+          (claude-gravity--tmux-sync-width-for-buffer buf))))))
 
 
 (add-hook 'window-size-change-functions #'claude-gravity--tmux-on-window-size-change)
@@ -989,10 +992,11 @@ session buffer opens alongside it automatically via SessionStart."
       (unless (= result 0)
         (error "Failed to create tmux session %s" tmux-name))
       ;; Set initial tmux window width
-      (let ((cols (claude-gravity--tmux-initial-width)))
-        (call-process "tmux" nil nil nil
-                      "resize-window" "-t" tmux-name
-                      "-x" (number-to-string cols)))
+      (when claude-gravity-tmux-sync-width
+        (let ((cols (claude-gravity--tmux-initial-width)))
+          (call-process "tmux" nil nil nil
+                        "resize-window" "-t" tmux-name
+                        "-x" (number-to-string cols))))
       ;; Register pending re-key so SessionStart hooks can find this.
       ;; NOTE: `claude --resume` fires SessionStart immediately during init
       ;; (before picker).  That first SessionStart creates a session that

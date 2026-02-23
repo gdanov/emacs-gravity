@@ -66,6 +66,15 @@ visible, the tmux width tracks the Emacs window width."
   :group 'claude-gravity)
 
 
+(defcustom claude-gravity-tmux-sync-width nil
+  "Whether to sync tmux window width to the Emacs session buffer width.
+When non-nil, resizes the tmux window whenever the Emacs window
+displaying the session buffer changes size, and sets the initial
+width on session creation."
+  :type 'boolean
+  :group 'claude-gravity)
+
+
 (defvar claude-gravity-log-level 'warn
   "Minimum log level.  One of: debug, info, warn, error.
 Messages below this level are suppressed.")
