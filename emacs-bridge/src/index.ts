@@ -300,6 +300,15 @@ async function main() {
 
     log(`Payload: ${JSON.stringify(inputData)}`);
 
+    // Early exit: if the Emacs socket doesn't exist, skip all enrichment
+    // and pass through immediately so hooks don't block Claude Code.
+    const socketPath = getSocketPath();
+    if (!existsSync(socketPath)) {
+      log(`Socket not found at ${socketPath}, passing through`);
+      console.log(JSON.stringify({}));
+      return;
+    }
+
     // Snapshot raw hook input before any enrichment mutations.
     // Sent alongside enriched data so Emacs debug viewer can show both.
     const rawHookInput = JSON.parse(JSON.stringify(inputData));
