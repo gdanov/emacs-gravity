@@ -78,8 +78,12 @@ async function sendToEmacs(eventName: string, sessionId: string, cwd: string, pi
       const msg: any = { event: eventName, session_id: sessionId, cwd: cwd, pid: pid, data: payload };
       if (hookInput) msg.hook_input = hookInput;
       const message = JSON.stringify(msg) + "\n";
-      client.write(message);
-      client.end();
+      const flushed = client.write(message);
+      if (flushed) {
+        client.end();
+      } else {
+        client.once("drain", () => client.end());
+      }
     });
 
     client.on("error", (err) => {

@@ -153,7 +153,10 @@ Accumulates partial data per connection until complete lines arrive."
                                                        (alist-get 'tool_name payload)))
                               (claude-gravity--inbox-add 'permission session-id payload proc))))))
                     (when event
-                      (claude-gravity-handle-event event session-id cwd payload pid source)))))
+                      (condition-case err
+                          (claude-gravity-handle-event event session-id cwd payload pid source)
+                        (error
+                         (claude-gravity--log 'error "Event handler error for %s: %s" event err)))))))
             (error
              (when claude-gravity--debug-messages-enabled
                (claude-gravity--debug-capture-message line nil err))
@@ -233,7 +236,7 @@ Called after server restart to recover sessions that were falsely marked ended."
   (setq claude-gravity-server-process
         (make-network-process
          :name "claude-gravity-server"
-         :server t
+         :server 128
          :family 'local
          :service claude-gravity-server-sock-path
          :filter 'claude-gravity--server-filter
