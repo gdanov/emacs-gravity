@@ -109,24 +109,34 @@ Returns the new item."
 (defun claude-gravity--dismiss-stale-inbox-items (session-id)
   "Dismiss stale bidirectional inbox items for SESSION-ID.
 Called on turn/session boundaries (Stop, UserPromptSubmit, SessionEnd).
-When the turn has finished, any remaining pending permission/question/
-plan-review items were handled outside Emacs and are now orphaned.
-Closes the bridge socket proc and kills associated action buffers."
+
+An inbox item is genuinely stale only when the bridge process has
+already exited (socket proc is dead).  This happens when:
+  - The user handled the action in the TUI (bridge got a response and exited)
+  - The bridge crashed or timed out
+  - Claude Code killed the hook process (e.g. Ctrl-C)
+
+If the socket proc is ALIVE, the bridge is still waiting for our
+response — do NOT kill it.  Killing live procs causes a race
+condition: a late-arriving Stop event can dismiss a plan-review
+item that was just added for the NEXT tool call."
   (let ((stale (cl-remove-if-not
                 (lambda (item)
                   (and (equal (alist-get 'session-id item) session-id)
                        (memq (alist-get 'type item)
-                             '(permission question plan-review))))
+                             '(permission question plan-review))
+                       ;; Only stale if proc is dead (bridge already exited)
+                       (let ((proc (alist-get 'socket-proc item)))
+                         (not (and proc (process-live-p proc))))))
                 claude-gravity--inbox)))
     (when stale
       (dolist (item stale)
         (claude-gravity--dismiss-single-inbox-item item)
         (claude-gravity--log 'debug "Auto-dismissed stale %s for session %s"
                              (alist-get 'type item) session-id))
-      ;; Remove all stale items from inbox
-      (claude-gravity--inbox-remove-for-session session-id 'permission)
-      (claude-gravity--inbox-remove-for-session session-id 'question)
-      (claude-gravity--inbox-remove-for-session session-id 'plan-review))))
+      ;; Remove dismissed items from inbox
+      (dolist (item stale)
+        (claude-gravity--inbox-remove (alist-get 'id item))))))
 
 
 (defun claude-gravity--dismiss-single-inbox-item (item)
@@ -777,6 +787,38 @@ PROPS is a plist with optional keys:
 (defun claude-gravity-model-clear-streaming-text (session)
   "Clear SESSION's :streaming-text accumulator."
   (plist-put session :streaming-text nil))
+
+
+(defun claude-gravity-model-toggle-ignored (session)
+  "Toggle SESSION's :ignored flag and persist the ignore list to disk."
+  (let ((new-val (not (plist-get session :ignored))))
+    (plist-put session :ignored new-val)
+    (claude-gravity--write-ignored-sessions (plist-get session :cwd))
+    (claude-gravity--log 'debug "Session %s %s"
+                         (plist-get session :session-id)
+                         (if new-val "ignored" "un-ignored"))))
+
+
+(defun claude-gravity--write-ignored-sessions (cwd)
+  "Write the list of ignored session IDs to CWD/.claude/gravity-ignored-sessions.json.
+Scans all sessions matching CWD and collects those with :ignored t."
+  (when (and cwd (not (string-empty-p cwd)))
+    (let ((ignored-ids nil))
+      (maphash (lambda (_id session)
+                 (when (and (plist-get session :ignored)
+                            (equal (plist-get session :cwd) cwd))
+                   (push (plist-get session :session-id) ignored-ids)))
+               claude-gravity--sessions)
+      (let* ((dir (expand-file-name ".claude" cwd))
+             (file (expand-file-name "gravity-ignored-sessions.json" dir)))
+        (if ignored-ids
+            (progn
+              (unless (file-exists-p dir) (make-directory dir t))
+              (with-temp-file file
+                (insert (json-encode (vconcat ignored-ids)))))
+          ;; No ignored sessions — remove the file if it exists
+          (when (file-exists-p file)
+            (delete-file file)))))))
 
 
 (defun claude-gravity-model-update-session-meta (session &rest props)
