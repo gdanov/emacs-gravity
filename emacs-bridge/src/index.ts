@@ -138,13 +138,13 @@ async function sendToEmacsAndWait(eventName: string, sessionId: string, cwd: str
           clearTimeout(timer);
           try {
             const response = JSON.parse(line);
-            log(`Received response: ${JSON.stringify(response)}`);
+            log(`Received response: ${JSON.stringify(response).substring(0, 200)}`, 'warn');
             resolve(response);
           } catch (e) {
             log(`Failed to parse response: ${e}`, 'error');
             resolve({});
           }
-          client.end();
+          client.destroy();
         }
       }
     });
@@ -287,6 +287,9 @@ function attributeToolToAgent(
 
 async function main() {
   log(`Process started: ${process.argv.join(" ")}`);
+  process.stdout.on('error', (err) => {
+    log(`stdout error: ${err.message}`, 'error');
+  });
   try {
     const eventName = process.argv[2]; // e.g., "PreToolUse"
 
@@ -653,18 +656,58 @@ async function main() {
       return;
     }
 
+    // Check if session is ignored — pass bidirectional hooks through to TUI
+    if ((eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept")) {
+      const ignoreFile = join(cwd, ".claude", "gravity-ignored-sessions.json");
+      if (existsSync(ignoreFile)) {
+        try {
+          const ignored = JSON.parse(readFileSync(ignoreFile, "utf-8"));
+          if (Array.isArray(ignored) && ignored.includes(sessionId)) {
+            log(`Session ${sessionId} is ignored, passing ${eventName} through to TUI`);
+            // Still send fire-and-forget event to Emacs for tracking
+            await sendToEmacs(eventName, sessionId, cwd, pid, inputData, rawHookInput);
+            console.log(JSON.stringify({}));
+            return;
+          }
+        } catch (e) {
+          log(`Failed to read ignore list: ${e}`, 'error');
+        }
+      }
+    }
+
     // Send to Emacs — PermissionRequest and AskUserQuestionIntercept use bidirectional wait
     if (eventName === "PermissionRequest") {
+      const toolName = (inputData as any).tool_name || "unknown";
+      log(`PermissionRequest: waiting for Emacs response [tool=${toolName}, session=${sessionId}]`, 'warn');
       const response = await sendToEmacsAndWait(eventName, sessionId, cwd, pid, inputData, undefined, rawHookInput);
-      console.log(JSON.stringify(response));
-    } else if (eventName === "AskUserQuestionIntercept") {
-      const response = await sendToEmacsAndWait("PreToolUse", sessionId, cwd, pid, inputData, undefined, rawHookInput);
-      if (response && response.hookSpecificOutput) {
-        console.log(JSON.stringify(response));
-      } else {
-        // Fallback: allow terminal execution
-        console.log(JSON.stringify({}));
+      // Guard against empty response — Emacs socket may have closed before sending
+      if (!response || Object.keys(response).length === 0) {
+        log(`PermissionRequest: empty response from Emacs [tool=${toolName}, session=${sessionId}] — writing {} to stdout`, 'error');
       }
+      // Force exit after flushing stdout — prevents bridge process from hanging
+      // with open pipe in Claude Code's plugin loader environment.
+      // Critical for ExitPlanMode "allow" responses (see #15755, #12176).
+      const responseStr = JSON.stringify(response) + '\n';
+      // Hard timeout: ensure process exits even if stdout write callback never fires
+      const hardExit = setTimeout(() => {
+        log(`PermissionRequest: hard exit timeout [tool=${toolName}]`, 'error');
+        process.exit(1);
+      }, 5000);
+      hardExit.unref();
+      process.stdout.write(responseStr, () => {
+        log(`PermissionRequest: stdout write callback OK [tool=${toolName}]`, 'warn');
+        // Small delay to let the pipe consumer read before we exit
+        setTimeout(() => process.exit(0), 50);
+      });
+    } else if (eventName === "AskUserQuestionIntercept") {
+      log(`AskUserQuestionIntercept: waiting for Emacs response`, 'warn');
+      const response = await sendToEmacsAndWait("PreToolUse", sessionId, cwd, pid, inputData, undefined, rawHookInput);
+      const output = (response && response.hookSpecificOutput)
+        ? JSON.stringify(response)
+        : JSON.stringify({});
+      process.stdout.write(output + '\n', () => {
+        process.exit(0);
+      });
     } else {
       // Debug: log what we're sending for SubagentStop
       if (eventName === "SubagentStop") {

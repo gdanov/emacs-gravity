@@ -134,24 +134,36 @@ Accumulates partial data per connection until complete lines arrive."
                       ;; Do NOT call handle-event "PreToolUse" here — the generic
                       ;; PreToolUse hook already fires for every tool and will
                       ;; register it in session state separately.
-                      (let ((tool-name (alist-get 'tool_name payload)))
+                      ;;
+                      ;; If session is ignored, auto-respond with empty JSON
+                      ;; so the TUI handles it instead of Emacs.
+                      (let ((tool-name (alist-get 'tool_name payload))
+                            (ignored-session (let ((s (claude-gravity--get-session session-id)))
+                                               (and s (plist-get s :ignored)))))
                         (claude-gravity--ensure-session session-id cwd)
-                        (cond
-                         ((equal tool-name "AskUserQuestion")
-                          (claude-gravity--inbox-add 'question session-id payload proc))
-                         ((equal tool-name "ExitPlanMode")
-                          (claude-gravity--inbox-add 'plan-review session-id payload proc))
-                         (t
-                          (let ((auto (assoc session-id claude-gravity--turn-auto-approve)))
-                            (if (and auto
-                                     (let ((session (claude-gravity--get-session session-id)))
-                                       (and session
-                                            (eql (cdr auto) (plist-get session :current-turn)))))
-                                (progn
-                                  (claude-gravity--send-permission-response proc "allow")
-                                  (claude-gravity--log 'debug "Turn auto-approved: %s"
-                                                       (alist-get 'tool_name payload)))
-                              (claude-gravity--inbox-add 'permission session-id payload proc))))))
+                        (if ignored-session
+                            ;; Ignored: send empty response so TUI handles it
+                            (progn
+                              (claude-gravity--send-bidirectional-response proc '())
+                              (claude-gravity--log 'debug "Ignored session %s: passing %s to TUI"
+                                                   (claude-gravity--session-short-id session-id)
+                                                   (or tool-name "bidirectional hook")))
+                          (cond
+                           ((equal tool-name "AskUserQuestion")
+                            (claude-gravity--inbox-add 'question session-id payload proc))
+                           ((equal tool-name "ExitPlanMode")
+                            (claude-gravity--inbox-add 'plan-review session-id payload proc))
+                           (t
+                            (let ((auto (assoc session-id claude-gravity--turn-auto-approve)))
+                              (if (and auto
+                                       (let ((session (claude-gravity--get-session session-id)))
+                                         (and session
+                                              (eql (cdr auto) (plist-get session :current-turn)))))
+                                  (progn
+                                    (claude-gravity--send-permission-response proc "allow")
+                                    (claude-gravity--log 'debug "Turn auto-approved: %s"
+                                                         (alist-get 'tool_name payload)))
+                                (claude-gravity--inbox-add 'permission session-id payload proc)))))))
                     (when event
                       (condition-case err
                           (claude-gravity-handle-event event session-id cwd payload pid source)
@@ -574,15 +586,27 @@ SESSION-ID identifies the Claude Code session."
 
 (defun claude-gravity--send-bidirectional-response (proc response)
   "Send RESPONSE JSON to the bridge via socket PROC, then close."
+  (let ((json-str (json-encode response)))
+    (claude-gravity--log 'warn "Bidirectional response: proc=%s live=%s response=%s"
+                         proc (and proc (process-live-p proc))
+                         (substring json-str 0 (min 200 (length json-str)))))
   (if (and proc (process-live-p proc))
-      (progn
-        (process-send-string proc (concat (json-encode response) "\n"))
-        (run-at-time 0.1 nil (lambda (p) (when (process-live-p p) (delete-process p))) proc))
+      (condition-case err
+          (progn
+            (process-send-string proc (concat (json-encode response) "\n"))
+            (run-at-time 0.5 nil (lambda (p) (when (process-live-p p) (delete-process p))) proc))
+        (error
+         (claude-gravity--log 'error "Bidirectional response send failed: %s" err)))
     (claude-gravity--log 'error "Claude Gravity: bridge connection lost. Response not sent.")))
 
 
 (defun claude-gravity--plan-review-send-response (response)
   "Send RESPONSE JSON to the bridge via the stored socket proc."
+  (claude-gravity--log 'warn "Plan review sending response: proc=%s live=%s session=%s"
+                       claude-gravity--plan-review-proc
+                       (and claude-gravity--plan-review-proc
+                            (process-live-p claude-gravity--plan-review-proc))
+                       claude-gravity--plan-review-session-id)
   (claude-gravity--send-bidirectional-response claude-gravity--plan-review-proc response)
   (setq-local claude-gravity--plan-review-proc nil))
 
@@ -770,6 +794,11 @@ incorporate the feedback (the allow channel cannot carry feedback)."
           (claude-gravity--enable-session-follow-mode session-id)
           (claude-gravity--log 'debug "Feedback detected — denied for revision"))
       ;; No feedback — clean approve with session-scoped permissions
+      (claude-gravity--log 'warn "Plan approve: proc=%s live=%s session=%s"
+                           claude-gravity--plan-review-proc
+                           (and claude-gravity--plan-review-proc
+                                (process-live-p claude-gravity--plan-review-proc))
+                           session-id)
       (let* ((perms claude-gravity--plan-review-session-permissions)
              (decision (if (and perms (> (length perms) 0))
                            `((behavior . "allow")
