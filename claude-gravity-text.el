@@ -43,7 +43,9 @@ Use as the argument to `magit-insert-heading'."
 
 
 (defun claude-gravity--render-markdown-table (table-lines)
-  "Render TABLE-LINES (list of markdown pipe-delimited strings) as a box-drawn table."
+  "Render TABLE-LINES (list of markdown pipe-delimited strings) as a box-drawn table.
+Column widths are capped so the table fits within the window width.
+Cells that exceed their column's width are truncated with `…'."
   (let* ((data-rows
           (mapcar (lambda (line)
                     (let ((cells (split-string
@@ -64,6 +66,32 @@ Use as the argument to `magit-insert-heading'."
                      (dotimes (i (min ncols (length row)))
                        (setf (nth i ws)
                              (max (nth i ws) (funcall display-width (nth i row))))))))
+         ;; Cap column widths to fit within available space
+         (available (- (or (window-width) 80) 4))
+         ;; Table overhead: ncols+1 borders + ncols*2 padding
+         (overhead (+ ncols 1 (* ncols 2)))
+         (content-budget (- available overhead))
+         (content-total (apply #'+ widths))
+         (widths (if (or (<= content-total content-budget) (<= content-budget 0))
+                     widths
+                   (let ((min-col 6))
+                     (mapcar (lambda (w)
+                               (max min-col
+                                    (min w (/ (* w content-budget) content-total))))
+                             widths))))
+         (strip-markup (lambda (cell)
+                         (replace-regexp-in-string
+                          "\\*\\*\\(.*?\\)\\*\\*\\|\\*\\(.*?\\)\\*\\|`\\(.*?\\)`\\|_\\(.*?\\)_"
+                          (lambda (m)
+                            (or (match-string 1 m) (match-string 2 m)
+                                (match-string 3 m) (match-string 4 m) ""))
+                          cell)))
+         (truncate-cell (lambda (cell w)
+                          (let ((dw (funcall display-width cell)))
+                            (if (<= dw w) cell
+                              (concat (substring (funcall strip-markup cell)
+                                                 0 (max 1 (- w 1)))
+                                      "…")))))
          (make-sep (lambda (left mid right)
                      (concat left
                              (mapconcat (lambda (w) (make-string (+ w 2) ?─))
@@ -73,7 +101,8 @@ Use as the argument to `magit-insert-heading'."
                     (concat "│"
                             (mapconcat
                              (lambda (pair)
-                               (let ((cell (car pair)) (w (cdr pair)))
+                               (let* ((cell (funcall truncate-cell (car pair) (cdr pair)))
+                                      (w (cdr pair)))
                                  (concat " " cell
                                          (make-string (max 0 (- w (funcall display-width cell))) ?\s)
                                          " ")))
