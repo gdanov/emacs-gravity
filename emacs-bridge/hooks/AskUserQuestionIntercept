@@ -1,2 +1,2 @@
 #!/bin/sh
-CLAUDE_PID=$PPID node "$(dirname "$0")/../dist/index.js" AskUserQuestionIntercept
+exec env CLAUDE_PID=$PPID node "$(dirname "$0")/../dist/index.js" AskUserQuestionIntercept

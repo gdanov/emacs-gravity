@@ -416,15 +416,20 @@ Maintained for backward compatibility."
                                (uuid-prefix (propertize
                                             (format " %s" (substring sid 0 (min 7 (length sid))))
                                             'face 'claude-gravity-detail-label))
-                               (inbox-badge (claude-gravity--inbox-badges sid)))
+                               (inbox-badge (claude-gravity--inbox-badges sid))
+                               (ignored-badge
+                                (if (plist-get session :ignored)
+                                    (propertize " [ignored]"
+                                                'face 'claude-gravity-detail-label)
+                                  "")))
                           (magit-insert-section (session-entry sid)
                             (magit-insert-heading
-                              (format "%s%s %s %s %s%s %s  %s%s  [%d tools]%s"
+                              (format "%s%s %s %s %s%s %s  %s%s%s  [%d tools]%s"
                                       (claude-gravity--indent)
                                       indicator branch-str source-str label
                                       uuid-prefix tmux-badge
                                       (or status-label "")
-                                      mode-badge
+                                      mode-badge ignored-badge
                                       n-tools inbox-badge))
                            ;; Inline inbox items for this session
                            (let ((session-items
@@ -1306,7 +1311,8 @@ prompts to confirm the directory before starting."
     ("D" "Remove ended" claude-gravity-cleanup-sessions)
     ("X" "Detect dead" claude-gravity-detect-dead-sessions)
     ("R" "Reset all idle" claude-gravity-reset-status)
-    ("d" "Delete session" claude-gravity-delete-session)]
+    ("d" "Delete session" claude-gravity-delete-session)
+    ("I" "Toggle ignored" claude-gravity-toggle-ignored-session)]
    ["Navigation"
     ("TAB" "Toggle section" magit-section-toggle)
     ("e" "Edit entry" claude-gravity-edit-entry)
@@ -1441,6 +1447,29 @@ Checks PID liveness when available, falls back to last-event-time staleness."
       (claude-gravity--inbox-remove-for-session id))
     (claude-gravity--log 'debug "Marked %d dead session(s) as ended" count)
     (claude-gravity--render-overview)))
+
+
+(defun claude-gravity-toggle-ignored-session ()
+  "Toggle the ignored flag on the session at point.
+Ignored sessions pass bidirectional hooks (permissions, questions, plans)
+through to the TUI instead of queuing them in the Emacs inbox."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (when section
+      (let ((sid (and (eq (oref section type) 'session-entry)
+                      (oref section value))))
+        (if (not sid)
+            (claude-gravity--log 'debug "No session at point")
+          (let ((session (claude-gravity--get-session sid)))
+            (if (not session)
+                (claude-gravity--log 'debug "Session not found: %s" sid)
+              (claude-gravity-model-toggle-ignored session)
+              (claude-gravity--render-overview)
+              (claude-gravity--log 'debug "Session %s: %s"
+                                   (claude-gravity--session-label session)
+                                   (if (plist-get session :ignored)
+                                       "now ignored (TUI handles interactive hooks)"
+                                     "no longer ignored (Emacs handles interactive hooks)")))))))))
 
 
 (defun claude-gravity-delete-session ()

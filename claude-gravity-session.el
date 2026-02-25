@@ -136,7 +136,8 @@ Ensures :tool-index, :agent-index, and :turns exist. Idempotent."
                            :display-name nil
                            :branch nil
                            :buffer nil
-                           :token-usage nil)))
+                           :token-usage nil
+                           :ignored nil)))
         (puthash session-id session claude-gravity--sessions)
         (claude-gravity--load-allow-patterns session)
         session)))
