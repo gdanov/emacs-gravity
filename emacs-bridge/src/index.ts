@@ -684,9 +684,29 @@ async function main() {
       if (!response || Object.keys(response).length === 0) {
         log(`PermissionRequest: empty response from Emacs [tool=${toolName}, session=${sessionId}] — writing {} to stdout`, 'error');
       }
-      // WORKAROUND: Claude Code silently ignores ExitPlanMode "allow" from hooks (#15755 regression).
-      // Convert to "deny" with approval message — deny responses are always processed.
-      // Claude reads the message and proceeds with implementation.
+      // ── DENY-AS-APPROVE WORKAROUND ──────────────────────────────────────
+      // Bug: Claude Code silently ignores ExitPlanMode "allow" responses from
+      // PermissionRequest hooks. This is a regression of #15755 (first reported
+      // v2.1.7, still broken as of v2.1.50). The TUI prompt appears simultaneously
+      // with the hook — if the hook responds "allow", Claude Code drops it.
+      //
+      // "deny" responses are ALWAYS processed. So we convert:
+      //   Emacs sends:  { decision: { behavior: "allow" } }
+      //   Bridge writes: { decision: { behavior: "deny", message: "User approved..." } }
+      //
+      // Claude reads the deny message, sees "approved", and proceeds with
+      // implementation. This works because the model interprets the message content,
+      // not just the allow/deny signal.
+      //
+      // NOTE: "deny with feedback" (user annotated the plan) is already a deny —
+      // it passes through unchanged. Only clean "allow" is converted.
+      //
+      // Emacs side: claude-gravity-socket.el `claude-gravity-plan-review-approve`
+      // sends the original allow response. This bridge intercepts it here.
+      //
+      // TO REMOVE: When Claude Code fixes #15755 (ExitPlanMode allow from hooks),
+      // delete this if-block. Emacs already sends the correct allow response.
+      // ─────────────────────────────────────────────────────────────────────
       if (toolName === "ExitPlanMode" && response?.decision?.behavior === "allow") {
         log(`PermissionRequest: converting ExitPlanMode allow → deny-as-approve [session=${sessionId}]`, 'warn');
         response.decision = {

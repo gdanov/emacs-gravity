@@ -139,6 +139,16 @@ The socket stays alive while waiting for the response, so the bridge receives th
 
 The `magit-insert-section` macros expand into complex `unwind-protect` blocks. Do not refactor them into higher-order functions — the macro expansion is critical for proper cleanup and navigation.
 
+### ExitPlanMode Allow Ignored (#15755)
+
+Claude Code silently ignores `allow` responses from PermissionRequest hooks for ExitPlanMode. This is a regression of [#15755](https://github.com/anthropics/claude-code/issues/15755), still broken as of v2.1.50. `deny` responses always work.
+
+**Workaround:** The bridge converts ExitPlanMode `allow` → `deny` with message "User approved the plan. Proceed with implementation." See the `DENY-AS-APPROVE` comment block in `emacs-bridge/src/index.ts` and the "Known Bug" section in ARCHITECTURE.md.
+
+**If plan approval via Emacs stops working:** Check that the bridge workaround is still in place and that Claude Code hasn't changed the PermissionRequest response format. Check `/tmp/emacs-bridge.log` for `converting ExitPlanMode allow → deny-as-approve`.
+
+**To remove:** When #15755 is fixed upstream, delete the workaround block in `index.ts` and the related comments in `claude-gravity-socket.el`.
+
 ### Hook Configuration
 
 The `hooks.json` file uses `${CLAUDE_PLUGIN_ROOT}` which is expanded by Claude Code at startup, not by the shell. Ensure all paths in `hooks.json` use this variable or absolute paths.

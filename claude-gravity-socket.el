@@ -793,7 +793,12 @@ incorporate the feedback (the allow channel cannot carry feedback)."
           (claude-gravity--plan-review-cleanup-and-close)
           (claude-gravity--enable-session-follow-mode session-id)
           (claude-gravity--log 'debug "Feedback detected — denied for revision"))
-      ;; No feedback — clean approve with session-scoped permissions
+      ;; No feedback — clean approve with session-scoped permissions.
+      ;; NOTE: We send {"behavior":"allow"} here, but the bridge (index.ts)
+      ;; converts it to {"behavior":"deny","message":"User approved..."} before
+      ;; writing to stdout. This is the deny-as-approve workaround for Claude
+      ;; Code bug #15755 where ExitPlanMode "allow" from hooks is silently
+      ;; ignored. See the DENY-AS-APPROVE comment block in index.ts.
       (claude-gravity--log 'warn "Plan approve: proc=%s live=%s session=%s"
                            claude-gravity--plan-review-proc
                            (and claude-gravity--plan-review-proc

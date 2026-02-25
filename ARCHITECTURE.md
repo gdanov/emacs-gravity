@@ -175,6 +175,21 @@ PermissionRequest and AskUserQuestion keep the socket open:
 5. Bridge reads response and writes to stdout
 6. Claude Code receives response and continues
 
+### Known Bug: ExitPlanMode Allow Ignored (Deny-as-Approve Workaround)
+
+Claude Code silently ignores `allow` responses from PermissionRequest hooks for `ExitPlanMode`. This is a regression of [#15755](https://github.com/anthropics/claude-code/issues/15755), still broken as of v2.1.50. The TUI prompt appears simultaneously with the hook — if the hook responds `allow`, Claude Code drops it. `deny` responses are always processed.
+
+**Workaround (commit `62b24d8`):** The bridge intercepts `allow` responses for ExitPlanMode and converts them to `deny` with the message "User approved the plan. Proceed with implementation." Claude reads the message content, sees approval, and proceeds.
+
+**What this means for the data flow:**
+1. Emacs `claude-gravity-plan-review-approve` sends `{"decision":{"behavior":"allow"}}`
+2. Bridge (`index.ts`, PermissionRequest block) intercepts and rewrites to `{"decision":{"behavior":"deny","message":"User approved the plan. Proceed with implementation."}}`
+3. Claude Code processes the deny, model reads the message, continues implementing
+
+**Deny with feedback** (user annotated the plan) is already a deny — it passes through unchanged.
+
+**Removal:** When Claude Code fixes #15755, delete the `if (toolName === "ExitPlanMode" && response?.decision?.behavior === "allow")` block in `index.ts`. Emacs already sends the correct allow response.
+
 ### PostToolUse Content Extraction
 
 PostToolUse events extract both preceding and following assistant text:
