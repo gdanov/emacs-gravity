@@ -268,6 +268,10 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
                          cmd-parts)))
       (unless (= result 0)
         (error "Failed to create tmux session %s" tmux-name))
+      ;; Prevent tmux from resizing to match attached clients
+      (unless claude-gravity-tmux-sync-width
+        (call-process "tmux" nil nil nil
+                      "set-option" "-t" tmux-name "window-size" "manual"))
       ;; Set initial tmux window width
       (when claude-gravity-tmux-sync-width
         (let ((cols (claude-gravity--tmux-initial-width)))
@@ -347,6 +351,10 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
       (unless (= result 0)
         (remhash temp-id claude-gravity--tmux-pending)
         (error "Failed to create tmux session %s" tmux-name))
+      ;; Prevent tmux from resizing to match attached clients
+      (unless claude-gravity-tmux-sync-width
+        (call-process "tmux" nil nil nil
+                      "set-option" "-t" tmux-name "window-size" "manual"))
       ;; Set initial tmux window width
       (when claude-gravity-tmux-sync-width
         (let ((cols (claude-gravity--tmux-initial-width)))
@@ -991,6 +999,10 @@ session buffer opens alongside it automatically via SessionStart."
                          cmd-parts)))
       (unless (= result 0)
         (error "Failed to create tmux session %s" tmux-name))
+      ;; Prevent tmux from resizing to match attached clients
+      (unless claude-gravity-tmux-sync-width
+        (call-process "tmux" nil nil nil
+                      "set-option" "-t" tmux-name "window-size" "manual"))
       ;; Set initial tmux window width
       (when claude-gravity-tmux-sync-width
         (let ((cols (claude-gravity--tmux-initial-width)))
