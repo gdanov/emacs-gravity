@@ -1524,18 +1524,24 @@ Disables when you manually scroll or navigate."
 
 (defun claude-gravity-copy-section ()
   "Copy the text of the current section to the kill ring.
+When point is on a prompt line, copies only the prompt text.
 Strips gutter indicators (▎) that are used for display margins."
   (interactive)
-  (let ((section (magit-current-section)))
-    (if section
-        (let* ((raw (buffer-substring-no-properties
-                     (oref section start)
-                     (oref section end)))
-               (text (replace-regexp-in-string
-                      (regexp-quote claude-gravity--margin-char) "" raw)))
-          (kill-new text)
-          (message "Copied %d chars" (length text)))
-      (user-error "No section at point"))))
+  (let ((prompt (get-text-property (point) 'claude-gravity-prompt)))
+    (if prompt
+        (progn
+          (kill-new prompt)
+          (message "Copied prompt (%d chars)" (length prompt)))
+      (let ((section (magit-current-section)))
+        (if section
+            (let* ((raw (buffer-substring-no-properties
+                         (oref section start)
+                         (oref section end)))
+                   (text (replace-regexp-in-string
+                          (regexp-quote claude-gravity--margin-char) "" raw)))
+              (kill-new text)
+              (message "Copied %d chars" (length text)))
+          (user-error "No section at point"))))))
 
 (defun claude-gravity-tail ()
   "Collapse all sections and focus on the tail of the latest turn.

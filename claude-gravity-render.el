@@ -616,16 +616,18 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                     ;; Full prompt text outside the collapsible section
                     (when prompt-text
                       (let* ((indent (claude-gravity--indent))
-                             (cont-indent (+ (length indent) 2)))
+                             (cont-indent (+ (length indent) 2))
+                             (prompt-start (point)))
                         (insert (format "%s%s " indent indicator))
                         (let ((start (point))
                               (fill-column (max 40 (- (or (window-width) 80) 2)))
                               (fill-prefix (make-string cont-indent ?\s)))
                           (insert prompt-text "\n")
                           (when (> (length prompt-text) (- fill-column cont-indent))
-                            (fill-region start (point)))
-                          ;; Prompt indicator (❯/?) already propertized; text stays default color.
-                          )))
+                            (fill-region start (point))))
+                        ;; Tag prompt region so `w` copies just the prompt text
+                        (put-text-property prompt-start (point)
+                                           'claude-gravity-prompt prompt-text)))
                     (if frozen
                         ;; Frozen turn: collapsed section with children
                         (let* ((stop (alist-get 'stop_text turn-node))
