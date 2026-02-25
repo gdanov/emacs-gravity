@@ -538,6 +538,16 @@ SESSION-ID identifies the Claude Code session."
       (when (fboundp 'markdown-mode)
         (markdown-mode))
       (claude-gravity-plan-review-mode 1)
+      ;; Align markdown pipe tables for readability
+      (when (fboundp 'markdown-table-align)
+        (save-excursion
+          (goto-char (point-min))
+          (while (re-search-forward "^\\s-*|" nil t)
+            (beginning-of-line)
+            (condition-case nil
+                (markdown-table-align)
+              (error nil))
+            (forward-line 1))))
       ;; Store buffer-local state
       (setq-local claude-gravity--plan-review-proc proc)
       (setq-local claude-gravity--plan-review-original
