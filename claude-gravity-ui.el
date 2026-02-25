@@ -1302,7 +1302,7 @@ prompts to confirm the directory before starting."
     ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)]
    ["Session Lifecycle (S prefix)"
     ("S s" "Start (tmux)" claude-gravity-start-menu)
-    ("S n" "Start (Cloud)" claude-gravity-daemon-start-session)
+    ("S n" "Start (Cloud)" claude-gravity-daemon-start-menu)
     ("S h" "Start here" claude-gravity-start-session-here)
     ("S r" "Resume session" claude-gravity-unified-resume)
     ("S w" "Resume (picker)" claude-gravity-resume-in-tmux)

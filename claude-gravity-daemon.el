@@ -249,20 +249,25 @@ Returns nil on error."
     (and sid (gethash sid claude-gravity--daemon-sessions))))
 
 
-(defun claude-gravity-daemon-start-session (cwd &optional model permission-mode)
-  "Start a new Claude session in CWD via the SDK daemon.
+(defun claude-gravity-daemon-start-session (cwd &optional model permission-mode max-budget max-turns bridge)
+  "Start a new Claude session in CWD via the daemon.
 Optional MODEL overrides the default.  PERMISSION-MODE sets the permission mode.
+BRIDGE specifies which bridge to use: \"pi\" (default, pi-coding-agent) or \"sdk\".
 Returns the temp session-id (re-keyed when SessionStart arrives)."
   (interactive
    (list (read-directory-name "Project directory: " default-directory)))
   (claude-gravity-daemon-ensure)
   (setq cwd (claude-gravity--normalize-cwd cwd))
   (let* ((temp-id (format "daemon-%s" (format-time-string "%s%3N")))
+         (bridge (or bridge "pi"))
          (cmd `((cmd . "start")
                 (id . ,temp-id)
                 (cwd . ,cwd)
                 ,@(when model `((model . ,model)))
-                ,@(when permission-mode `((permission_mode . ,permission-mode)))))
+                ,@(when permission-mode `((permission_mode . ,permission-mode)))
+                ,@(when max-budget `((max_budget . ,max-budget)))
+                ,@(when max-turns `((max_turns . ,max-turns)))
+                ,@(when bridge `((bridge . ,bridge)))))
          (response (claude-gravity--daemon-send-command cmd)))
     (if (and response (eq (alist-get 'ok response) t))
         (progn
@@ -643,6 +648,39 @@ Dispatches to the appropriate backend (daemon or tmux)."
    ((claude-gravity--current-session-daemon-p) (claude-gravity-daemon-set-permission-mode mode))
    ((claude-gravity--current-session-tmux-p)   (claude-gravity-tmux-set-permission-mode mode))
    (t (user-error "No managed session at point"))))
+
+;;;###autoload
+(defun claude-gravity--daemon-start-session-from-transient ()
+  "Start a daemon session using transient parameters."
+  (interactive)
+  (let* ((args (transient-args 'claude-gravity-daemon-start-menu))
+         (dir (claude-gravity--transient-get-value args "--directory="))
+         (model (claude-gravity--transient-get-value args "--model="))
+         (perm (claude-gravity--transient-get-value args "--permission-mode="))
+         (budget (claude-gravity--transient-get-value args "--max-budget="))
+         (turns (claude-gravity--transient-get-value args "--max-turns="))
+         (bridge (claude-gravity--transient-get-value args "--bridge="))
+         (cwd (or dir
+                  (claude-gravity--infer-cwd-from-section)
+                  claude-gravity--last-project-dir
+                  default-directory)))
+    (claude-gravity-daemon-start-session cwd model perm budget turns bridge)))
+
+(transient-define-prefix claude-gravity-daemon-start-menu ()
+  "Configure and start a new Claude session via daemon."
+  ["Project"
+   ("-d" "Directory" "--directory="
+    :reader claude-gravity--read-project-dir-for-transient)]
+  ["Parameters"
+   ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku"))
+   ("-p" "Permission mode" "--permission-mode="
+    :choices ("default" "auto-edit" "plan" "full-auto"))
+   ("-b" "Max budget (USD)" "--max-budget=")
+   ("-t" "Max turns" "--max-turns=")
+   ("-a" "Bridge" "--bridge=" :choices ("pi" "sdk"))]
+  ["Actions"
+   ("s" "Start" claude-gravity--daemon-start-session-from-transient)
+   ("q" "Quit" transient-quit-one)])
 
 (provide 'claude-gravity-daemon)
 ;;; claude-gravity-daemon.el ends here

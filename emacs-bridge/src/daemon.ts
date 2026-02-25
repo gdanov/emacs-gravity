@@ -7,11 +7,44 @@
 
 import { createServer, createConnection, Server, Socket } from "net";
 import { unlinkSync, existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
 import { homedir } from "os";
-import { log, setLogLevel, setLogFile } from "./log";
-import { DaemonSession, DaemonSessionOptions, SendEventFn, SendAndWaitFn } from "./daemon-session";
-import { createDaemonHooks, createCanUseTool, clearAgents } from "./daemon-hooks";
+import { fork, ChildProcess } from "child_process";
+import { fileURLToPath } from "url";
+import { log, setLogLevel, setLogFile } from "./log.js";
+import { DaemonSession, DaemonSessionOptions, SendEventFn, SendAndWaitFn } from "./daemon-session.js";
+import { createDaemonHooks, createCanUseTool, clearAgents } from "./daemon-hooks.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+let piProcess: ChildProcess | null = null;
+
+async function startPiProcess(): Promise<void> {
+  if (piProcess) return;
+  
+  piProcess = fork(join(__dirname, "pi-bridge.js"), [], {
+    execArgv: [],
+    stdio: ["pipe", "pipe", "pipe", "ipc"],
+  });
+  
+  piProcess.on('error', (e) => {
+    log(`[daemon] Pi process error: ${e.message}`, 'error');
+  });
+  
+  piProcess.on('exit', (code) => {
+    log(`[daemon] Pi process exited: ${code}`, 'info');
+    piProcess = null;
+  });
+}
+
+let PiSessionClass: any = null;
+
+async function loadPiSession(): Promise<void> {
+  if (PiSessionClass) return;
+  const mod = await import("./pi-session.js");
+  PiSessionClass = mod.PiSession;
+}
 
 // ============================================================================
 // Authentication — API key resolution
@@ -148,12 +181,14 @@ const sendAndWait: SendAndWaitFn = async (eventName, sessionId, cwd, pid, payloa
 // Session management
 // ============================================================================
 
-const sessions: Map<string, DaemonSession> = new Map();
+const sessions: Map<string, AnySession> = new Map();
 
-// Map real session IDs back to DaemonSession (populated after system/init)
-const sessionByRealId: Map<string, DaemonSession> = new Map();
+// Map real session IDs back to session (populated after system/init)
+const sessionByRealId: Map<string, DaemonSession | any> = new Map();
 
-function findSession(id: string): DaemonSession | undefined {
+type AnySession = DaemonSession | any;
+
+function findSession(id: string): AnySession | undefined {
   return sessions.get(id) || sessionByRealId.get(id);
 }
 
@@ -203,6 +238,50 @@ function startSession(cmd: { id: string; cwd: string; model?: string; permission
   return { ok: true, session_id: cmd.id };
 }
 
+async function startPiSession(cmd: { id: string; cwd: string; model?: string; permission_mode?: string; resume?: string }): Promise<{ ok: boolean; session_id?: string; error?: string }> {
+  if (sessions.has(cmd.id)) {
+    return { ok: false, error: `Session ${cmd.id} already exists` };
+  }
+
+  await loadPiSession();
+
+  if (!PiSessionClass) {
+    return { ok: false, error: "Failed to load pi-session module" };
+  }
+
+  const getSessionId = () => {
+    const s = sessions.get(cmd.id);
+    return s ? s.sessionId : cmd.id;
+  };
+  const getCwd = () => cmd.cwd;
+
+  const opts: any = {
+    id: cmd.id,
+    cwd: cmd.cwd,
+    model: cmd.model,
+    permissionMode: cmd.permission_mode,
+    resume: cmd.resume,
+    sendEvent,
+    sendAndWait,
+    onSessionId: (realId: string) => {
+      log(`[daemon] Pi Session re-keyed: ${cmd.id} → ${realId}`, 'info');
+      sessionByRealId.set(realId, sessions.get(cmd.id)!);
+    },
+    onDone: (sessionId: string) => {
+      log(`[daemon] Pi Session done: ${sessionId}`, 'info');
+    },
+  };
+
+  const session = new PiSessionClass(opts) as any;
+  sessions.set(cmd.id, session);
+
+  session.start(opts).catch((e: any) => {
+    log(`[daemon] Pi Session start error: ${e.message}`, 'error');
+  });
+
+  return { ok: true, session_id: cmd.id };
+}
+
 function removeSession(id: string): void {
   const session = findSession(id);
   if (session) {
@@ -216,15 +295,23 @@ function removeSession(id: string): void {
 // Command dispatch
 // ============================================================================
 
-function handleCommand(cmd: any): any {
+async function handleCommand(cmd: any): Promise<any> {
   log(`[daemon] Command: ${JSON.stringify(cmd)}`, 'info');
 
   switch (cmd.cmd) {
     case "start": {
+      const bridge = cmd.bridge ?? "sdk";
+      if (bridge === "pi") {
+        return await startPiSession(cmd);
+      }
       return startSession(cmd);
     }
 
     case "resume": {
+      const bridge = cmd.bridge ?? "sdk";
+      if (bridge === "pi") {
+        return await startPiSession({ ...cmd, resume: cmd.session_id });
+      }
       return startSession({ ...cmd, resume: cmd.session_id });
     }
 
@@ -310,10 +397,10 @@ function startCommandServer(): void {
     try { unlinkSync(socketPath); } catch {}
   }
 
-  commandServer = createServer((client: Socket) => {
+  commandServer = createServer(async (client: Socket) => {
     let buffer = "";
 
-    client.on("data", (chunk) => {
+    client.on("data", async (chunk) => {
       buffer += chunk.toString();
       // Process all complete lines (newline-delimited JSON)
       let newlineIdx: number;
@@ -324,7 +411,7 @@ function startCommandServer(): void {
 
         try {
           const cmd = JSON.parse(line);
-          const response = handleCommand(cmd);
+          const response = await handleCommand(cmd);
           client.write(JSON.stringify(response) + "\n");
         } catch (e: any) {
           log(`[daemon] Command parse error: ${e.message}`, 'error');
