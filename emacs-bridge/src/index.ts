@@ -684,9 +684,16 @@ async function main() {
       if (!response || Object.keys(response).length === 0) {
         log(`PermissionRequest: empty response from Emacs [tool=${toolName}, session=${sessionId}] — writing {} to stdout`, 'error');
       }
-      // Force exit after flushing stdout — prevents bridge process from hanging
-      // with open pipe in Claude Code's plugin loader environment.
-      // Critical for ExitPlanMode "allow" responses (see #15755, #12176).
+      // WORKAROUND: Claude Code silently ignores ExitPlanMode "allow" from hooks (#15755 regression).
+      // Convert to "deny" with approval message — deny responses are always processed.
+      // Claude reads the message and proceeds with implementation.
+      if (toolName === "ExitPlanMode" && response?.decision?.behavior === "allow") {
+        log(`PermissionRequest: converting ExitPlanMode allow → deny-as-approve [session=${sessionId}]`, 'warn');
+        response.decision = {
+          behavior: "deny",
+          message: "User approved the plan. Proceed with implementation."
+        };
+      }
       const responseStr = JSON.stringify(response) + '\n';
       // Hard timeout: ensure process exits even if stdout write callback never fires
       const hardExit = setTimeout(() => {
