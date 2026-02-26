@@ -88,17 +88,21 @@ export class PiSession {
       this.agent.subscribe((event) => {
         switch (event.type) {
           case "agent_start":
+            // SessionStart is sent once in start() — do NOT send again per-prompt.
+            // agent_start fires for every prompt() call, which would trigger
+            // reset-session in Emacs and wipe turn data.
             log(`[pi-session] agent_start`, 'debug');
-            this.sendToolEvent("SessionStart", { session_id: this.sessionId });
             break;
           case "agent_end":
             log(`[pi-session] agent_end`, 'debug');
             // Send AssistantComplete if not already sent (e.g., response with no tools)
             if (!this.assistantCompleteSent) {
               this.sendToolEvent("AssistantComplete", { session_id: this.sessionId });
-              this.assistantCompleteSent = false; // Reset for next response
             }
-            this.sendToolEvent("SessionEnd", { num_turns: 0 });
+            this.assistantCompleteSent = false; // Reset for next response cycle
+            // Send Stop (not SessionEnd) — agent_end fires per-prompt, not per-session.
+            // SessionEnd would mark the session as ended in Emacs.
+            this.sendToolEvent("Stop", { session_id: this.sessionId });
             break;
           case "tool_execution_start":
             log(`[pi-session] tool_execution_start: ${event.toolName}`, 'debug');
@@ -134,6 +138,7 @@ export class PiSession {
 
       await this.sendEvent("SessionStart", this.sessionId, this.cwd, process.pid, {
         session_id: this.sessionId,
+        temp_id: this.tempId,
         model: model.provider + "/" + model.id,
       });
 
