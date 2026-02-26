@@ -4,7 +4,7 @@
 // Safe commands are auto-approved at the bridge level, skipping the Emacs permission UI.
 
 import { basename } from "path";
-import { log } from "./log";
+import { log } from "./log.js";
 
 /** Commands that are inherently read-only regardless of arguments. */
 const SAFE_BINARIES = new Set([

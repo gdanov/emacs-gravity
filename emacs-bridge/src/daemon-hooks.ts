@@ -14,10 +14,10 @@ import type {
   CanUseTool,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
-import { enrichEvent, AgentState, readAgentState, writeAgentState } from "./enrichment";
-import { log } from "./log";
+import { enrichEvent, AgentState, readAgentState, writeAgentState } from "./enrichment.js";
+import { log } from "./log.js";
 
-import type { SendEventFn, SendAndWaitFn } from "./daemon-session";
+import type { SendEventFn, SendAndWaitFn } from "./daemon-session.js";
 
 // ============================================================================
 // In-memory agent state (per-session, no file persistence needed)

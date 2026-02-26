@@ -6,7 +6,7 @@
 
 import type { Query, SDKMessage, SDKUserMessage, SDKSystemMessage, SDKResultMessage, SDKPartialAssistantMessage, SDKAssistantMessage, SDKAuthStatusMessage, Options, PermissionResult, HookEvent, HookCallbackMatcher } from "@anthropic-ai/claude-agent-sdk";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { log } from "./log";
+import { log } from "./log.js";
 
 // ============================================================================
 // Async prompt queue — feeds user messages to the SDK query

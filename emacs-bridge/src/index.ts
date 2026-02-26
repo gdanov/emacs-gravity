@@ -2,8 +2,8 @@ import { createConnection } from "net";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "fs";
 import { join, dirname, basename } from "path";
 import { execSync } from "child_process";
-import { log } from "./log";
-import { isSafeBashCommand } from "./safe-bash";
+import { log } from "./log.js";
+import { isSafeBashCommand } from "./safe-bash.js";
 
 // Re-export transcript functions from enrichment (canonical location)
 export {
@@ -15,7 +15,7 @@ export {
   extractTokenUsage,
   extractTranscriptMeta,
   extractSlug,
-} from "./enrichment";
+} from "./enrichment.js";
 
 // --- Fixture dump mode ---
 // When CLAUDE_GRAVITY_DUMP_DIR is set, save raw input and enriched output
@@ -48,7 +48,7 @@ import {
   extractTrailingText,
   extractTokenUsage,
   extractTranscriptMeta,
-} from "./enrichment";
+} from "./enrichment.js";
 
 // Resolve socket path from CLAUDE_GRAVITY_SOCK, CLAUDE_GRAVITY_SOCK_DIR, or default location
 function getSocketPath(): string {

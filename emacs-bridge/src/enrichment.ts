@@ -4,7 +4,7 @@
 
 import { existsSync, readFileSync, statSync, mkdirSync, writeFileSync, openSync, readSync, closeSync } from "fs";
 import { join, dirname, basename } from "path";
-import { log } from "./log";
+import { log } from "./log.js";
 
 // ============================================================================
 // Transcript reading utilities
