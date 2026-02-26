@@ -185,6 +185,202 @@
       (should (= 1 (alist-get 'turn-number (car turn-list))))
       (should (= 2 (alist-get 'turn-number (cadr turn-list)))))))
 
+;;;; Tests for pi bridge daemon dedup behavior
+
+(ert-deftest pi-test-daemon-prompt-sent-flag-prevents-duplicate ()
+  "When daemon-prompt-sent flag is set, UserPromptSubmit should NOT advance turn.
+This tests the dedup mechanism: send-prompt advances turn, then UserPromptSubmit arrives but skips."
+  (let ((sid "pi-dedup-test-1"))
+    (remhash sid claude-gravity--sessions)
+    
+    ;; Session start
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (should (= 0 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    ;; Simulate what send-prompt does: add prompt AND set flag
+    (let ((session (claude-gravity--get-session sid)))
+      (claude-gravity-model-add-prompt
+       session (list (cons 'text "First prompt")
+                     (cons 'submitted (current-time))
+                     (cons 'elapsed nil)
+                     (cons 'stop_text nil)
+                     (cons 'stop_thinking nil)))
+      (plist-put session :daemon-prompt-sent t))
+    
+    ;; Turn should be 1 now
+    (should (= 1 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    ;; Now UserPromptSubmit arrives - it should NOT advance turn because flag is set
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "First prompt")))
+    
+    ;; Turn should still be 1 (not 2) - this is the dedup behavior
+    (should (= 1 (plist-get (claude-gravity--get-session sid) :current-turn)))))
+
+(ert-deftest pi-test-daemon-without-flag-advances-turn ()
+  "When daemon-prompt-sent flag is NOT set, UserPromptSubmit SHOULD advance turn.
+This tests the normal case for non-daemon sources (like OpenCode)."
+  (let ((sid "pi-dedup-test-2"))
+    (remhash sid claude-gravity--sessions)
+    
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (should (= 0 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    ;; UserPromptSubmit without daemon-prompt-sent flag
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Hello")))
+    
+    ;; Turn should advance to 1
+    (should (= 1 (plist-get (claude-gravity--get-session sid) :current-turn)))))
+
+(ert-deftest pi-test-prompt-text-stored-in-turn ()
+  "UserPromptSubmit should store the prompt text in the turn node."
+  (let ((sid "pi-prompt-text-1"))
+    (remhash sid claude-gravity--sessions)
+    
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "List all files in src/")))
+    
+    ;; Check that prompt text is stored
+    (let* ((session (claude-gravity--get-session sid))
+           (turns (plist-get session :turns))
+           (turn (car (claude-gravity--tlist-items turns))))
+      (should turn)
+      (let ((prompt (alist-get 'prompt turn)))
+        (should prompt)
+        (should (string-match-p "List all files" (alist-get 'text prompt)))))))
+
+(ert-deftest pi-test-stop-finalizes-prompt-with-text ()
+  "Stop event should finalize the prompt with stop_text."
+  (let ((sid "pi-stop-text-1"))
+    (remhash sid claude-gravity--sessions)
+    
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Hello")))
+    
+    (claude-gravity-handle-event "Stop" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'stop_text "Hello! How can I help you?")))
+    
+    ;; Check stop_text is stored
+    (let* ((session (claude-gravity--get-session sid))
+           (turns (plist-get session :turns))
+           (turn (car (claude-gravity--tlist-items turns))))
+      (should (equal "Hello! How can I help you?" (alist-get 'stop_text turn))))))
+
+(ert-deftest pi-test-tool-attributed-to-correct-turn ()
+  "Tools should be attributed to the turn that was active when they ran."
+  (let ((sid "pi-tool-attr-1"))
+    (remhash sid claude-gravity--sessions)
+    
+    ;; Turn 1
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "First task")))
+    
+    ;; Tool in turn 1
+    (claude-gravity-handle-event "PreToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_1")
+                                       (cons 'tool_input (list (cons 'command "echo 1")))))
+    (claude-gravity-handle-event "PostToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_1")
+                                       (cons 'tool_response "1\n")))
+    (claude-gravity-handle-event "Stop" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'stop_text "Done 1")))
+    
+    ;; Turn 2
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Second task")))
+    
+    ;; Tool in turn 2
+    (claude-gravity-handle-event "PreToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_2")
+                                       (cons 'tool_input (list (cons 'command "echo 2")))))
+    (claude-gravity-handle-event "PostToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_2")
+                                       (cons 'tool_response "2\n")))
+    
+    ;; Verify tools are in correct turns
+    (let* ((session (claude-gravity--get-session sid))
+           (turns (plist-get session :turns))
+           (turn-list (claude-gravity--tlist-items turns)))
+      (should (= 2 (length turn-list)))
+      
+      ;; Turn 1 should have 1 tool
+      (let* ((turn1 (car turn-list))
+             (cycles1 (alist-get 'cycles turn1))
+             (cycle1 (car (claude-gravity--tlist-items cycles1)))
+             (tools1 (alist-get 'tools cycle1))
+             (tool-list1 (claude-gravity--tlist-items tools1)))
+        (should (= 1 (length tool-list1)))
+        (should (= 1 (alist-get 'turn (car tool-list1)))))
+      
+      ;; Turn 2 should have 1 tool
+      (let* ((turn2 (cadr turn-list))
+             (cycles2 (alist-get 'cycles turn2))
+             (cycle2 (car (claude-gravity--tlist-items cycles2)))
+             (tools2 (alist-get 'tools cycle2))
+             (tool-list2 (claude-gravity--tlist-items tools2)))
+        (should (= 1 (length tool-list2)))
+        (should (= 2 (alist-get 'turn (car tool-list2))))))))
+
+(ert-deftest pi-test-mcp-tools-captured ()
+  "MCP tools (like cli-mcp-server_run_command) should be captured in tool tracking."
+  (let ((sid "pi-mcp-tool-1"))
+    (remhash sid claude-gravity--sessions)
+    
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "List files")))
+    
+    ;; Pi-agent uses MCP tools (cli-mcp-server_run_command)
+    (claude-gravity-handle-event "PreToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "cli-mcp-server_run_command")
+                                       (cons 'tool_use_id "mcp_tool_1")
+                                       (cons 'tool_input (list (cons 'command "ls -la")))))
+    (claude-gravity-handle-event "PostToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "cli-mcp-server_run_command")
+                                       (cons 'tool_use_id "mcp_tool_1")
+                                       (cons 'tool_response "total 8\ndrwxr-xr-x 1\n")))
+    
+    ;; Verify MCP tool was captured
+    (let* ((session (claude-gravity--get-session sid))
+           (total-tools (plist-get session :total-tool-count)))
+      (should (= 1 total-tools)))))
+
 ;;;; Tests for pi bridge model verification
 
 (ert-deftest pi-test-default-model-is-minimax ()
