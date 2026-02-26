@@ -20,6 +20,8 @@ magit-section UI
 
 One-shot event forwarding: Claude Code hooks invoke the bridge with event JSON, bridge forwards over socket to Emacs, then exits. All state persists in Emacs hash tables and a JSON file (`.claude/emacs-bridge-agents.json`).
 
+**Bridge Design:** The bridge layer translates different session sources (Claude Code hooks, PI agent SDK) into a unified view model. Emacs renders events identically regardless of bridge source. See @ARCHITECTURE.md for view model invariants.
+
 For detailed architecture including view model, state API, and module interactions, see @ARCHITECTURE.md.
 
 ## Module Structure (Summary)

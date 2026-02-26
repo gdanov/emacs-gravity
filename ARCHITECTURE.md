@@ -17,7 +17,7 @@ claude-gravity.el (Emacs)
 ### One-Shot Architecture
 
 **emacs-bridge** is a stateless one-shot process:
-1. Claude Code hook script invokes `dist/index.js` with hook event name as argument
+1. Claude Code hook script invokes `tsx src/index.ts` with hook event name as argument
 2. Bridge reads event JSON from stdin
 3. Bridge forwards event over Unix domain socket to Emacs
 4. Bridge exits (process lifecycle is hook duration)
@@ -44,6 +44,55 @@ The socket path is `claude-gravity.sock` in the package directory, resolved via:
 - Bridge always returns valid JSON to stdout, even on socket errors
 - Prevents breaking Claude Code if Emacs is unavailable
 - Emacs buffers messages and renders them when next event arrives
+
+## Bridge Design: Stable View Model
+
+The bridge layer translates different session sources into a **stable, unified view model** that Emacs consumes. This ensures the UI renders identically regardless of how the session was started.
+
+### Supported Bridges
+
+1. **One-Shot Bridge** (`emacs-bridge/src/index.ts`)
+   - Stateless process invoked by Claude Code hooks
+   - Extracts `stop_text` from transcript files
+   - Runs via tsx: `node_modules/.bin/tsx src/index.ts <event>`
+
+2. **PI Agent Bridge** (`emacs-bridge/src/pi-session.ts`)
+   - Stateful adapter for `@mariozechner/pi-agent-core`
+   - Translates pi-agent events to view model format
+   - Extracts `stop_text`/`stop_thinking` from agent message content
+   - Runs via tsx: `node_modules/.bin/tsx src/daemon.ts`
+
+3. **Daemon Bridge** (`emacs-bridge/src/daemon.ts`)
+   - Long-running process for SDK-based sessions (ON HOLD — API key restrictions)
+   - Manages sessions via `@anthropic-ai/claude-agent-sdk`
+
+### View Model Invariants
+
+All bridges MUST produce events conforming to this schema:
+
+```
+SessionStart: { session_id, cwd, model }
+UserPromptSubmit: { prompt }
+Stop: { stop_text?, stop_thinking?, token_usage? }
+SubagentStart: { agent_id, agent_type }
+SubagentStop: { agent_id, agent_stop_text?, agent_stop_thinking? }
+PreToolUse: { tool_name, tool_call_id }
+PostToolUse: { tool_name, tool_call_id, result, is_error? }
+PostToolUseFailure: { tool_name, tool_call_id, result }
+```
+
+**Key invariants:**
+- `stop_text` is always present on Stop events (empty string if no content)
+- `agent_stop_text` is always present on SubagentStop events
+- Turn numbers are sequential integers starting from 1
+- Tool attribution is deterministic regardless of bridge source
+
+### Why This Matters
+
+The Emacs view model should not know which bridge generated the event. This:
+- Allows testing bridges in isolation
+- Enables future bridges (e.g., CLI-only, MCP) without UI changes
+- Keeps the rendering layer simple and predictable
 
 ## Hook System
 
