@@ -239,6 +239,31 @@ This tests the normal case for non-daemon sources (like OpenCode)."
     ;; Turn should advance to 1
     (should (= 1 (plist-get (claude-gravity--get-session sid) :current-turn)))))
 
+(ert-deftest pi-test-user-prompt-with-source-advances-turn ()
+  "UserPromptSubmit with source=pi (socket flow) advances turn counter.
+This simulates how events flow through the socket with source field."
+  (let ((sid "pi-socket-test-1"))
+    (remhash sid claude-gravity--sessions)
+    ;; Simulate socket flow: pass source as 6th argument
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5"))
+                                 nil "pi")
+    (should (= 0 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    ;; With source=pi, turns should still advance
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Hello pi agent"))
+                                 nil "pi")
+    (should (= 1 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Second prompt"))
+                                 nil "pi")
+    (should (= 2 (plist-get (claude-gravity--get-session sid) :current-turn)))))
+
 (ert-deftest pi-test-prompt-text-stored-in-turn ()
   "UserPromptSubmit should store the prompt text in the turn node."
   (let ((sid "pi-prompt-text-1"))

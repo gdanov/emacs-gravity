@@ -129,6 +129,8 @@ Accumulates partial data per connection until complete lines arrive."
                       (source (alist-get 'source data))
                       (payload (alist-get 'data data))
                       (needs-response (alist-get 'needs_response data)))
+                  (when (equal source "pi")
+                    (claude-gravity--log 'debug "Pi bridge event: %s for session %s" event session-id))
                   (if needs-response
                       ;; Bidirectional: queue in inbox.
                       ;; Do NOT call handle-event "PreToolUse" here — the generic

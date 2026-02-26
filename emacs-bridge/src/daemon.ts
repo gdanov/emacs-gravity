@@ -90,11 +90,18 @@ const sendEvent: SendEventFn = async (eventName, sessionId, cwd, pid, payload) =
   const socketPath = getGravitySocketPath();
   log(`[daemon] sendEvent: ${eventName} session=${sessionId}`, 'debug');
 
+  // Check if this is a PiSession to add source:pi
+  const session = findSession(sessionId);
+  const isPiSession = session && "sendPrompt" in session;
+  const source = isPiSession ? "pi" : undefined;
+
   return new Promise<void>((resolve) => {
     const client = createConnection(socketPath);
 
     client.on("connect", () => {
-      const msg = { event: eventName, session_id: sessionId, cwd, pid, data: payload };
+      const msg = source 
+        ? { event: eventName, session_id: sessionId, cwd, pid, source, data: payload }
+        : { event: eventName, session_id: sessionId, cwd, pid, data: payload };
       client.write(JSON.stringify(msg) + "\n");
       client.end();
     });
@@ -112,6 +119,11 @@ const sendAndWait: SendAndWaitFn = async (eventName, sessionId, cwd, pid, payloa
   const socketPath = getGravitySocketPath();
   log(`[daemon] sendAndWait: ${eventName} session=${sessionId}`, 'debug');
 
+  // Check if this is a PiSession to add source:pi
+  const session = findSession(sessionId);
+  const isPiSession = session && "sendPrompt" in session;
+  const source = isPiSession ? "pi" : undefined;
+
   return new Promise<any>((resolve) => {
     const client = createConnection(socketPath);
     let responded = false;
@@ -128,10 +140,9 @@ const sendAndWait: SendAndWaitFn = async (eventName, sessionId, cwd, pid, payloa
     }, 345600000);
 
     client.on("connect", () => {
-      const msg = {
-        event: eventName, session_id: sessionId, cwd, pid,
-        needs_response: true, data: payload,
-      };
+      const msg = source
+        ? { event: eventName, session_id: sessionId, cwd, pid, source, needs_response: true, data: payload }
+        : { event: eventName, session_id: sessionId, cwd, pid, needs_response: true, data: payload };
       client.write(JSON.stringify(msg) + "\n");
       // Keep connection open for response
     });
