@@ -22,7 +22,7 @@
    ((equal event-name "PermissionRequest")
     (list 'hookSpecificOutput (list 'decision (list 'behavior "allow"))))
    (t nil)))
-
+ 
 ;;;; Tests for pi bridge turn demarcation
 
 (ert-deftest pi-test-user-prompt-submit-advances-turn ()
@@ -74,7 +74,7 @@
             (let ((tool (car (claude-gravity--tlist-items tools))))
               (should tool)
               (should (equal "Bash" (alist-get 'name tool)))
-              (should (= 1 (alist-get 'turn tool)))))))))
+              (should (= 1 (alist-get 'turn tool))))))))))
 
 (ert-deftest pi-test-post-tool-use-completes-tool ()
   "PostToolUse event completes the tool with result."
@@ -382,6 +382,7 @@ This tests the normal case for non-daemon sources (like OpenCode)."
       (should (= 1 total-tools)))))
 
 ;;;; Tests for pi bridge model verification
+
 
 (ert-deftest pi-test-default-model-is-minimax ()
   "PiSession defaults to minimax/MiniMax-M2.5 when no model specified."
