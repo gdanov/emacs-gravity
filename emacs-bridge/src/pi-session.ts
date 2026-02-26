@@ -1,8 +1,7 @@
-import { createAgentSession, AgentSession, codingTools, readOnlyTools } from "@mariozechner/pi-coding-agent";
+import { Agent } from "@mariozechner/pi-agent-core";
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import { log } from "./log.js";
 import type { SendEventFn, SendAndWaitFn } from "./daemon-session.js";
-import { createPiExtension, type PiExtensionOptions } from "./pi-extension.js";
 
 type AnyModel = Model<any>;
 
@@ -23,7 +22,7 @@ export class PiSession {
   private realSessionId: string | null = null;
   private sessionStartSent = false;
   private cwd: string;
-  private agentSession: AgentSession | null = null;
+  private agent: Agent | null = null;
   private sendEvent: SendEventFn;
   private sendAndWait: SendAndWaitFn;
   private onSessionId?: (realId: string) => void;
@@ -49,19 +48,15 @@ export class PiSession {
     return this.running;
   }
 
+  private sendToolEvent(eventName: string, data: any): void {
+    this.sendEvent(eventName, this.sessionId, this.cwd, process.pid, data).catch((e: any) => {
+      log(`[pi-session] sendToolEvent error: ${e.message}`, 'error');
+    });
+  }
+
   async start(_opts: PiSessionOptions): Promise<void> {
     this.running = true;
     log(`[pi-session] Starting session ${this.tempId} in ${this.cwd}`, 'info');
-
-    const extensionOptions: PiExtensionOptions = {
-      sendEvent: this.sendEvent,
-      sendAndWait: this.sendAndWait,
-      getSessionId: () => this.sessionId,
-      getCwd: () => this.cwd,
-      pid: process.pid,
-    };
-
-    const piExtension = createPiExtension(extensionOptions);
 
     let model: AnyModel;
     if (_opts.model) {
@@ -72,31 +67,64 @@ export class PiSession {
         model = getModel("anthropic", _opts.model as any);
       }
     } else {
-      model = getModel("anthropic", "claude-sonnet-4-20250514");
+      model = getModel("minimax", "MiniMax-M2.5");
     }
 
     try {
-      const result = await createAgentSession({
-        cwd: this.cwd,
-        model,
-        tools: codingTools,
-        customTools: [],
-        sessionManager: undefined,
+      this.agent = new Agent({
+        initialState: {
+          model,
+          systemPrompt: "You are a helpful coding assistant.",
+          tools: [],
+        },
       });
 
-      this.agentSession = result.session;
-      this.realSessionId = this.agentSession.sessionId;
+      this.realSessionId = this.agent.sessionId || this.tempId;
       this.onSessionId?.(this.realSessionId);
 
       log(`[pi-session] Session initialized: ${this.realSessionId}`, 'info');
 
-      if (!this.sessionStartSent) {
-        this.sessionStartSent = true;
-        await this.sendEvent("SessionStart", this.sessionId, this.cwd, process.pid, {
-          session_id: this.sessionId,
-          model: model.provider + "/" + model.id,
-        });
-      }
+      this.agent.subscribe((event) => {
+        switch (event.type) {
+          case "agent_start":
+            log(`[pi-session] agent_start`, 'debug');
+            this.sendToolEvent("SessionStart", { session_id: this.sessionId });
+            break;
+          case "agent_end":
+            log(`[pi-session] agent_end`, 'debug');
+            this.sendToolEvent("SessionEnd", { num_turns: 0 });
+            break;
+          case "tool_execution_start":
+            log(`[pi-session] tool_execution_start: ${event.toolName}`, 'debug');
+            this.sendToolEvent("PreToolUse", {
+              tool_name: event.toolName,
+              tool_call_id: event.toolCallId,
+            });
+            break;
+          case "tool_execution_end":
+            log(`[pi-session] tool_execution_end: ${event.toolName}`, 'debug');
+            this.sendToolEvent("PostToolUse", {
+              tool_name: event.toolName,
+              tool_call_id: event.toolCallId,
+              result: event.result,
+              is_error: event.isError,
+            });
+            break;
+          case "message_update":
+            if (event.assistantMessageEvent && "delta" in event.assistantMessageEvent) {
+              const delta = (event.assistantMessageEvent as any).delta;
+              if (delta) {
+                this.sendToolEvent("StreamDelta", { text: delta });
+              }
+            }
+            break;
+        }
+      });
+
+      await this.sendEvent("SessionStart", this.sessionId, this.cwd, process.pid, {
+        session_id: this.sessionId,
+        model: model.provider + "/" + model.id,
+      });
 
       await this.runPromptLoop();
     } catch (e: any) {
@@ -113,22 +141,28 @@ export class PiSession {
   }
 
   private async runPromptLoop(): Promise<void> {
-    if (!this.agentSession) return;
+    if (!this.agent) return;
 
+    log(`[pi-session] runPromptLoop started for ${this.sessionId}`, 'info');
     while (this.running) {
       if (this.pendingPrompts.length > 0) {
         const text = this.pendingPrompts.shift()!;
+        log(`[pi-session] Processing prompt: "${text.substring(0, 50)}..."`, 'info');
         try {
-          await this.agentSession.prompt(text);
+          await this.agent.prompt(text);
+          log(`[pi-session] Prompt completed`, 'info');
         } catch (e: any) {
           log(`[pi-session] Prompt error: ${e.message}`, 'error');
         }
       } else {
+        log(`[pi-session] runPromptLoop waiting for prompt...`, 'debug');
         await new Promise<void>((resolve) => {
           this.resolvePrompt = resolve;
         });
+        log(`[pi-session] runPromptLoop woken up, queue length: ${this.pendingPrompts.length}`, 'debug');
       }
     }
+    log(`[pi-session] runPromptLoop exited`, 'info');
   }
 
   sendPrompt(text: string): void {
@@ -136,17 +170,19 @@ export class PiSession {
       log(`[pi-session] Cannot send prompt — session ${this.sessionId} not running`, 'warn');
       return;
     }
+    log(`[pi-session] sendPrompt: queueing "${text.substring(0, 50)}..."`, 'info');
     this.pendingPrompts.push(text);
     if (this.resolvePrompt) {
+      log(`[pi-session] sendPrompt: waking prompt loop`, 'info');
       this.resolvePrompt();
       this.resolvePrompt = null;
     }
   }
 
   async interrupt(): Promise<void> {
-    if (this.agentSession) {
+    if (this.agent) {
       try {
-        await this.agentSession.abort();
+        this.agent.abort();
       } catch (e: any) {
         log(`[pi-session] Interrupt error: ${e.message}`, 'warn');
       }
@@ -154,7 +190,7 @@ export class PiSession {
   }
 
   async setModel(model: string): Promise<void> {
-    if (this.agentSession) {
+    if (this.agent) {
       try {
         const modelParts = model.split("/");
         let resolvedModel: AnyModel;
@@ -163,7 +199,7 @@ export class PiSession {
         } else {
           resolvedModel = getModel("anthropic", model as any);
         }
-        await this.agentSession.setModel(resolvedModel);
+        this.agent.setModel(resolvedModel);
       } catch (e: any) {
         log(`[pi-session] setModel error: ${e.message}`, 'warn');
       }
@@ -180,9 +216,9 @@ export class PiSession {
       this.resolvePrompt();
       this.resolvePrompt = null;
     }
-    if (this.agentSession) {
-      this.agentSession.dispose();
-      this.agentSession = null;
+    if (this.agent) {
+      this.agent.abort();
+      this.agent = null;
     }
     this.running = false;
   }

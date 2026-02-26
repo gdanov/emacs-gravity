@@ -9,42 +9,14 @@ import { createServer, createConnection, Server, Socket } from "net";
 import { unlinkSync, existsSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
-import { fork, ChildProcess } from "child_process";
 import { fileURLToPath } from "url";
 import { log, setLogLevel, setLogFile } from "./log.js";
 import { DaemonSession, DaemonSessionOptions, SendEventFn, SendAndWaitFn } from "./daemon-session.js";
 import { createDaemonHooks, createCanUseTool, clearAgents } from "./daemon-hooks.js";
+import { PiSession } from "./pi-session.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-let piProcess: ChildProcess | null = null;
-
-async function startPiProcess(): Promise<void> {
-  if (piProcess) return;
-  
-  piProcess = fork(join(__dirname, "pi-bridge.js"), [], {
-    execArgv: [],
-    stdio: ["pipe", "pipe", "pipe", "ipc"],
-  });
-  
-  piProcess.on('error', (e) => {
-    log(`[daemon] Pi process error: ${e.message}`, 'error');
-  });
-  
-  piProcess.on('exit', (code) => {
-    log(`[daemon] Pi process exited: ${code}`, 'info');
-    piProcess = null;
-  });
-}
-
-let PiSessionClass: any = null;
-
-async function loadPiSession(): Promise<void> {
-  if (PiSessionClass) return;
-  const mod = await import("./pi-session.js");
-  PiSessionClass = mod.PiSession;
-}
 
 // ============================================================================
 // Authentication — API key resolution
@@ -73,13 +45,36 @@ function loadApiKey(): string | undefined {
   return undefined;
 }
 
+function loadMinimaxApiKey(): string | undefined {
+  // 1. Environment variable
+  if (process.env.MINIMAX_API_KEY) {
+    return process.env.MINIMAX_API_KEY;
+  }
+  // 2. Config file
+  const configPath = join(homedir(), ".claude", "gravity-config.json");
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, "utf-8"));
+      if (config.minimax_api_key) {
+        return config.minimax_api_key;
+      }
+    } catch (e: any) {
+      log(`[daemon] Failed to read config ${configPath}: ${e.message}`, "error");
+    }
+  }
+  return undefined;
+}
+
 // ============================================================================
 // Socket path resolution
 // ============================================================================
 
 function getGravitySocketPath(): string {
-  // Gravity socket is at emacs-gravity/claude-gravity.sock
-  return join(__dirname, "..", "..", "claude-gravity.sock");
+  // Use CLAUDE_GRAVITY_SOCK env var if set, otherwise default to ~/.local/state
+  const envSock = process.env.CLAUDE_GRAVITY_SOCK;
+  if (envSock) return envSock;
+  const sockDir = process.env.CLAUDE_GRAVITY_SOCK_DIR || join(homedir(), ".local", "state");
+  return join(sockDir, "claude-gravity.sock");
 }
 
 function getCommandSocketPath(): string {
@@ -243,12 +238,6 @@ async function startPiSession(cmd: { id: string; cwd: string; model?: string; pe
     return { ok: false, error: `Session ${cmd.id} already exists` };
   }
 
-  await loadPiSession();
-
-  if (!PiSessionClass) {
-    return { ok: false, error: "Failed to load pi-session module" };
-  }
-
   const getSessionId = () => {
     const s = sessions.get(cmd.id);
     return s ? s.sessionId : cmd.id;
@@ -272,7 +261,7 @@ async function startPiSession(cmd: { id: string; cwd: string; model?: string; pe
     },
   };
 
-  const session = new PiSessionClass(opts) as any;
+  const session = new PiSession(opts);
   sessions.set(cmd.id, session);
 
   session.start(opts).catch((e: any) => {
@@ -485,6 +474,15 @@ function main(): void {
   } else {
     log("[daemon] WARNING: ANTHROPIC_API_KEY not set — SDK sessions will fail to authenticate", 'error');
     log("[daemon] Set ANTHROPIC_API_KEY env var or create ~/.claude/gravity-config.json with {\"anthropic_api_key\": \"sk-ant-...\"}", 'error');
+  }
+
+  // Resolve MiniMax API key
+  const hadMinimaxEnvKey = !!process.env.MINIMAX_API_KEY;
+  const minimaxApiKey = loadMinimaxApiKey();
+  if (minimaxApiKey) {
+    process.env.MINIMAX_API_KEY = minimaxApiKey;
+    const source = hadMinimaxEnvKey ? "env/emacs" : "config file";
+    log(`[daemon] MINIMAX_API_KEY: set (${minimaxApiKey.length} chars, source: ${source})`, 'info');
   }
 
   startCommandServer();
