@@ -1,5 +1,6 @@
 import { Agent } from "@mariozechner/pi-agent-core";
 import { getModel, type Model } from "@mariozechner/pi-ai";
+import { createCodingTools, createReadOnlyTools } from "@mariozechner/pi-coding-agent";
 import { log } from "./log.js";
 import type { SendEventFn, SendAndWaitFn } from "./daemon-session.js";
 
@@ -11,6 +12,7 @@ export interface PiSessionOptions {
   model?: string;
   permissionMode?: string;
   resume?: string;
+  tools?: "coding" | "readonly" | "none";
   sendEvent: SendEventFn;
   sendAndWait: SendAndWaitFn;
   onSessionId?: (realId: string) => void;
@@ -72,12 +74,20 @@ export class PiSession {
       model = getModel("minimax", "MiniMax-M2.5");
     }
 
+    let tools: any[] = [];
+    const toolsOption = _opts.tools || "coding";
+    if (toolsOption === "coding") {
+      tools = createCodingTools(this.cwd);
+    } else if (toolsOption === "readonly") {
+      tools = createReadOnlyTools(this.cwd);
+    }
+
     try {
       this.agent = new Agent({
         initialState: {
           model,
           systemPrompt: "You are a helpful coding assistant.",
-          tools: [],
+          tools,
         },
       });
 

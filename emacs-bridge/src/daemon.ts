@@ -242,7 +242,7 @@ function startSession(cmd: { id: string; cwd: string; model?: string; permission
   return { ok: true, session_id: cmd.id };
 }
 
-async function startPiSession(cmd: { id: string; cwd: string; model?: string; permission_mode?: string; resume?: string }): Promise<{ ok: boolean; session_id?: string; error?: string }> {
+async function startPiSession(cmd: { id: string; cwd: string; model?: string; permission_mode?: string; resume?: string; tools?: string }): Promise<{ ok: boolean; session_id?: string; error?: string }> {
   if (sessions.has(cmd.id)) {
     return { ok: false, error: `Session ${cmd.id} already exists` };
   }
@@ -259,6 +259,7 @@ async function startPiSession(cmd: { id: string; cwd: string; model?: string; pe
     model: cmd.model,
     permissionMode: cmd.permission_mode,
     resume: cmd.resume,
+    tools: cmd.tools,
     sendEvent,
     sendAndWait,
     onSessionId: (realId: string) => {
