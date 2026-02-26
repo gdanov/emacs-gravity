@@ -31,6 +31,7 @@ export class PiSession {
   private resolvePrompt: ((value: void) => void) | null = null;
   private pendingPrompts: string[] = [];
   private assistantCompleteSent = false;
+  private lastAssistantMessage: any = null;
 
   constructor(opts: PiSessionOptions) {
     this.tempId = opts.id;
@@ -95,6 +96,18 @@ export class PiSession {
             break;
           case "agent_end":
             log(`[pi-session] agent_end`, 'debug');
+            // Extract stop_text from the last assistant message
+            let stopText: string | undefined;
+            let stopThinking: string | undefined;
+            if (this.lastAssistantMessage) {
+              const content = this.lastAssistantMessage.content;
+              if (typeof content === 'string') {
+                stopText = content;
+              } else if (content && typeof content === 'object') {
+                stopText = content.text || content.content?.[0]?.text;
+                stopThinking = content.thinking;
+              }
+            }
             // Send AssistantComplete if not already sent (e.g., response with no tools)
             if (!this.assistantCompleteSent) {
               this.sendToolEvent("AssistantComplete", { session_id: this.sessionId });
@@ -102,7 +115,12 @@ export class PiSession {
             this.assistantCompleteSent = false; // Reset for next response cycle
             // Send Stop (not SessionEnd) — agent_end fires per-prompt, not per-session.
             // SessionEnd would mark the session as ended in Emacs.
-            this.sendToolEvent("Stop", { session_id: this.sessionId });
+            this.sendToolEvent("Stop", { 
+              session_id: this.sessionId,
+              stop_text: stopText,
+              stop_thinking: stopThinking
+            });
+            this.lastAssistantMessage = null; // Reset for next turn
             break;
           case "tool_execution_start":
             log(`[pi-session] tool_execution_start: ${event.toolName}`, 'debug');
@@ -124,6 +142,10 @@ export class PiSession {
               result: event.result,
               is_error: event.isError,
             });
+            break;
+          case "turn_end":
+            // Store the assistant message for extracting stop_text on agent_end
+            this.lastAssistantMessage = event.message;
             break;
           case "message_update":
             if (event.assistantMessageEvent && "delta" in event.assistantMessageEvent) {
