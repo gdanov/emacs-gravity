@@ -172,6 +172,13 @@ export class PiSession {
     }
     log(`[pi-session] sendPrompt: queueing "${text.substring(0, 50)}..."`, 'info');
     this.pendingPrompts.push(text);
+
+    // Emit UserPromptSubmit for Emacs to track turns
+    this.sendToolEvent("UserPromptSubmit", {
+      prompt: text,
+      session_id: this.sessionId,
+    });
+
     if (this.resolvePrompt) {
       log(`[pi-session] sendPrompt: waking prompt loop`, 'info');
       this.resolvePrompt();
