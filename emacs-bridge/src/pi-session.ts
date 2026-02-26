@@ -30,6 +30,7 @@ export class PiSession {
   private running = false;
   private resolvePrompt: ((value: void) => void) | null = null;
   private pendingPrompts: string[] = [];
+  private assistantCompleteSent = false;
 
   constructor(opts: PiSessionOptions) {
     this.tempId = opts.id;
@@ -92,10 +93,20 @@ export class PiSession {
             break;
           case "agent_end":
             log(`[pi-session] agent_end`, 'debug');
+            // Send AssistantComplete if not already sent (e.g., response with no tools)
+            if (!this.assistantCompleteSent) {
+              this.sendToolEvent("AssistantComplete", { session_id: this.sessionId });
+              this.assistantCompleteSent = false; // Reset for next response
+            }
             this.sendToolEvent("SessionEnd", { num_turns: 0 });
             break;
           case "tool_execution_start":
             log(`[pi-session] tool_execution_start: ${event.toolName}`, 'debug');
+            // Assistant message is complete before tools run - send AssistantComplete
+            if (!this.assistantCompleteSent) {
+              this.sendToolEvent("AssistantComplete", { session_id: this.sessionId });
+              this.assistantCompleteSent = true;
+            }
             this.sendToolEvent("PreToolUse", {
               tool_name: event.toolName,
               tool_call_id: event.toolCallId,
@@ -172,6 +183,9 @@ export class PiSession {
     }
     log(`[pi-session] sendPrompt: queueing "${text.substring(0, 50)}..."`, 'info');
     this.pendingPrompts.push(text);
+
+    // Reset AssistantComplete flag for new response cycle
+    this.assistantCompleteSent = false;
 
     // Emit UserPromptSubmit for Emacs to track turns
     this.sendToolEvent("UserPromptSubmit", {
