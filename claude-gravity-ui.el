@@ -51,16 +51,23 @@ Returns nil if neither is available."
 
 (defun claude-gravity--source-indicator (session)
   "Return propertized source indicator for SESSION.
-Shows 🖥 for tmux sessions, [OC] for OpenCode, 🪝 for hook-based sessions."
+Shows bridge type: Pi (pi-agent), CC (Claude Code), CCT (Claude Code+tmux), OC (OpenCode)."
   (let ((source (plist-get session :source))
-        (sid (plist-get session :session-id)))
+        (sid (plist-get session :session-id))
+        (managed-by (plist-get session :managed-by)))
     (cond
+     ;; Pi-agent bridge (daemon-managed sessions)
+     ((eq managed-by 'daemon)
+      (propertize "[Pi]" 'face 'claude-gravity-detail-label))
+     ;; OpenCode
      ((equal source "opencode")
       (propertize "[OC]" 'face 'claude-gravity-detail-label))
+     ;; Claude Code with tmux
      ((gethash sid claude-gravity--tmux-sessions)
-      (propertize "🖥" 'face 'claude-gravity-detail-label))
+      (propertize "[CCT]" 'face 'claude-gravity-detail-label))
+     ;; Claude Code (hook-based)
      (t
-      (propertize "🪝" 'face 'claude-gravity-detail-label)))))
+      (propertize "[CC]" 'face 'claude-gravity-detail-label)))))
 
 
 ;;; Overview Buffer
