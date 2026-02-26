@@ -16,7 +16,7 @@ test-bridge:
 	cd emacs-bridge && npm ci --ignore-scripts && npx vitest run
 
 build:
-	cd emacs-bridge && npm ci && npm run build
+	cd emacs-bridge && npm ci
 
 clean:
 	rm -rf emacs-bridge/node_modules emacs-bridge/dist

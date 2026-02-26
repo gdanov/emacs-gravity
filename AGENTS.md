@@ -36,12 +36,11 @@ M-x ert t cg-test-user-prompt-advances-turn
 ```bash
 cd emacs-bridge
 npm install           # Install dependencies (first time)
-npm run build         # Compile TypeScript -> JavaScript
 npm test              # Run vitest tests
-npx tsc --noEmit     # Type check without building
+npx tsc --noEmit      # Type check without building
 
 # Run single test
-npx vitest run --testNamePattern "extractTrailingText"
+npx vittest run --testNamePattern "extractTrailingText"
 ```
 
 ---

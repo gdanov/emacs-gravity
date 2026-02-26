@@ -71,7 +71,7 @@ For complete visual specification and keybindings, see @UI-SPEC.md.
 
 For build commands, dependencies, debugging, and testing, see @DEVELOPMENT.md.
 
-Use `npm run build` for the bridge and `M-x eval-defun` for Emacs Lisp changes.
+Use `npm install` in emacs-bridge and `M-x eval-defun` for Emacs Lisp changes.
 
 ## Related Documentation
 

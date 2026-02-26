@@ -94,7 +94,6 @@ After this, every new shell in the project directory automatically has Emacs, No
 git clone https://github.com/anthropics/emacs-gravity.git  # or your fork
 cd emacs-gravity/emacs-bridge
 npm install
-npm run build
 ```
 
 ## Register the Claude Code plugin
@@ -175,7 +174,7 @@ Verify the plugin is registered:
 cat ~/.claude/plugins/marketplace.json
 ```
 
-Ensure the `source` path points to the `emacs-bridge` directory (not the project root) and that `dist/index.js` exists inside it.
+Ensure the `source` path points to the `emacs-bridge` directory (not the project root) and that `src/index.ts` exists inside it.
 
 ### Nix: "experimental feature 'flakes' is disabled"
 

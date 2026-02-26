@@ -27,9 +27,7 @@ cd emacs-bridge && npm install
 ```
 
 **Build the bridge (required after editing `emacs-bridge/src/index.ts`):**
-```bash
-cd emacs-bridge && npm run build
-```
+Since the bridge now uses tsx, there's no build step required. Changes to TypeScript files are picked up automatically.
 
 **Run tests:**
 ```bash

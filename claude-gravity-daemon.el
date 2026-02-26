@@ -79,13 +79,21 @@ ANTHROPIC_API_KEY env var.  Get a key from https://platform.claude.com/."
 ;;; Daemon lifecycle
 ;;; ============================================================================
 
-(defun claude-gravity--daemon-js-path ()
-  "Return the path to the daemon.js entry point."
+(defun claude-gravity--daemon-tsx-path ()
+  "Return the path to the tsx binary."
   (let ((plugin-root (file-name-directory
                       (or load-file-name
                           (locate-library "claude-gravity")
                           (error "Cannot locate claude-gravity.el")))))
-    (expand-file-name "emacs-bridge/dist/daemon.js" plugin-root)))
+    (expand-file-name "emacs-bridge/node_modules/.bin/tsx" plugin-root)))
+
+(defun claude-gravity--daemon-js-path ()
+  "Return the path to the daemon.ts entry point."
+  (let ((plugin-root (file-name-directory
+                      (or load-file-name
+                          (locate-library "claude-gravity")
+                          (error "Cannot locate claude-gravity.el")))))
+    (expand-file-name "emacs-bridge/src/daemon.ts" plugin-root)))
 
 
 (defun claude-gravity-daemon-start ()
@@ -97,11 +105,13 @@ SDK hook events and streaming text to Emacs via the gravity socket."
              (process-live-p claude-gravity--daemon-process))
     (user-error "Daemon is already running"))
   (claude-gravity--ensure-server)
-  (let ((daemon-js (claude-gravity--daemon-js-path))
+  (let ((tsx-path (claude-gravity--daemon-tsx-path))
+        (daemon-ts (claude-gravity--daemon-js-path))
         (api-key (or claude-gravity-daemon-api-key
                      (getenv "ANTHROPIC_API_KEY"))))
-    (unless (file-exists-p daemon-js)
-      (error "Daemon not built: %s not found.  Run `cd emacs-bridge && npm run build'" daemon-js))
+    (unless (and (file-exists-p tsx-path)
+                 (file-exists-p daemon-ts))
+      (error "Daemon not ready: tsx or daemon.ts not found. Run `cd emacs-bridge && npm install`"))
     ;; If Emacs has the key (defcustom or env), pass it to the daemon process.
     ;; Otherwise the daemon reads from ~/.claude/gravity-config.json.
     (let ((process-environment
@@ -114,7 +124,7 @@ SDK hook events and streaming text to Emacs via the gravity socket."
             claude-gravity--daemon-process
             (make-process
              :name "gravity-daemon"
-             :command (list "node" daemon-js)
+             :command (list tsx-path daemon-ts)
              :buffer (get-buffer-create " *gravity-daemon*")
              :filter #'claude-gravity--daemon-process-filter
              :sentinel #'claude-gravity--daemon-process-sentinel

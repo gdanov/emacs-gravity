@@ -1,2 +1,2 @@
 #!/bin/sh
-CLAUDE_PID=$PPID node "$(dirname "$0")/../dist/index.js" Stop
+exec env CLAUDE_PID=$PPID "$(dirname "$0")/../node_modules/.bin/tsx" "$(dirname "$0")/../src/index.ts" Stop

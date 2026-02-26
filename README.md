@@ -118,7 +118,6 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
 ```bash
 cd emacs-gravity/emacs-bridge
 npm install
-npm run build
 ```
 
 ### 2. Register the Claude Code plugin

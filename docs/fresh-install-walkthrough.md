@@ -91,13 +91,11 @@ nix develop --command make build
 
 Output:
 ```
-cd emacs-bridge && npm ci && npm run build
+cd emacs-bridge && npm ci
 added 56 packages, and audited 57 packages in 4s
-> emacs-bridge@1.0.0 build
-> tsc
 ```
 
-**What this does:** Installs npm dependencies and compiles TypeScript to `emacs-bridge/dist/index.js`. The compiled bridge is what Claude Code hooks invoke.
+**What this does:** Installs npm dependencies. The bridge runs TypeScript directly with tsx, so no build step is required.
 
 ## Step 5: Run tests
 
