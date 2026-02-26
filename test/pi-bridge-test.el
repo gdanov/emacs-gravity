@@ -23,6 +23,168 @@
     (list 'hookSpecificOutput (list 'decision (list 'behavior "allow"))))
    (t nil)))
 
+;;;; Tests for pi bridge turn demarcation
+
+(ert-deftest pi-test-user-prompt-submit-advances-turn ()
+  "UserPromptSubmit from pi bridge advances turn counter."
+  (let ((sid "pi-turn-test-1"))
+    (remhash sid claude-gravity--sessions)
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (should (= 0 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Hello pi agent")))
+    (should (= 1 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Second prompt")))
+    (should (= 2 (plist-get (claude-gravity--get-session sid) :current-turn)))))
+
+(ert-deftest pi-test-pre-tool-use-captures-tool-with-turn ()
+  "PreToolUse event captures tool with current turn stamp."
+  (let ((sid "pi-tool-test-1"))
+    (remhash sid claude-gravity--sessions)
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "List files")))
+    
+    (claude-gravity-handle-event "PreToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_123")
+                                       (cons 'tool_input (list (cons 'command "ls -la")))))
+    
+    (let* ((session (claude-gravity--get-session sid))
+           (turns (plist-get session :turns))
+           (turn (car (claude-gravity--tlist-items turns))))
+      (should turn)
+      (let ((cycles (alist-get 'cycles turn)))
+        (should cycles)
+        (let ((cycle (car (claude-gravity--tlist-items cycles))))
+          (should cycle)
+          (let ((tools (alist-get 'tools cycle)))
+            (should tools)
+            (let ((tool (car (claude-gravity--tlist-items tools))))
+              (should tool)
+              (should (equal "Bash" (alist-get 'name tool)))
+              (should (= 1 (alist-get 'turn tool)))))))))
+
+(ert-deftest pi-test-post-tool-use-completes-tool ()
+  "PostToolUse event completes the tool with result."
+  (let ((sid "pi-tool-test-2"))
+    (remhash sid claude-gravity--sessions)
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Test")))
+    (claude-gravity-handle-event "PreToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_456")
+                                       (cons 'tool_input (list (cons 'command "echo hi")))))
+    
+    (claude-gravity-handle-event "PostToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_456")
+                                       (cons 'tool_response "hi\n")))
+    
+    (let* ((session (claude-gravity--get-session sid))
+           (turns (plist-get session :turns))
+           (turn (car (claude-gravity--tlist-items turns)))
+           (cycles (alist-get 'cycles turn))
+           (cycle (car (claude-gravity--tlist-items cycles)))
+           (tools (alist-get 'tools cycle))
+           (tool (car (claude-gravity--tlist-items tools))))
+      (should (equal "done" (alist-get 'status tool)))
+      (should (equal "hi\n" (alist-get 'result tool))))))
+
+(ert-deftest pi-test-stop-advances-turn ()
+  "Stop event finalizes the turn but does not advance counter."
+  (let ((sid "pi-stop-test-1"))
+    (remhash sid claude-gravity--sessions)
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Hello")))
+    
+    (let ((turn-before (plist-get (claude-gravity--get-session sid) :current-turn)))
+      (claude-gravity-handle-event "Stop" sid "/tmp/test"
+                                   (list (cons 'session_id sid)
+                                         (cons 'stop_text "Response text")))
+      (should (= turn-before (plist-get (claude-gravity--get-session sid) :current-turn))))))
+
+(ert-deftest pi-test-multi-turn-workflow ()
+  "Complete workflow: SessionStart -> Prompt -> Tool -> Stop -> Prompt -> Tool -> Stop."
+  (let ((sid "pi-multi-turn-1"))
+    (remhash sid claude-gravity--sessions)
+    
+    ;; Turn 1: Start, prompt, tool, stop
+    (claude-gravity-handle-event "SessionStart" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'model "minimax/MiniMax-M2.5")))
+    (should (= 0 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "First prompt")))
+    (should (= 1 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    (claude-gravity-handle-event "PreToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_t1")
+                                       (cons 'tool_input (list (cons 'command "echo 1")))))
+    (claude-gravity-handle-event "PostToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_t1")
+                                       (cons 'tool_response "1\n")))
+    (claude-gravity-handle-event "Stop" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'stop_text "Done with first")))
+    
+    ;; Turn 2: Another prompt, tool, stop
+    (claude-gravity-handle-event "UserPromptSubmit" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'prompt "Second prompt")))
+    (should (= 2 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    (claude-gravity-handle-event "PreToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_t2")
+                                       (cons 'tool_input (list (cons 'command "echo 2")))))
+    (claude-gravity-handle-event "PostToolUse" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'tool_name "Bash")
+                                       (cons 'tool_use_id "tool_t2")
+                                       (cons 'tool_response "2\n")))
+    (claude-gravity-handle-event "Stop" sid "/tmp/test"
+                                 (list (cons 'session_id sid)
+                                       (cons 'stop_text "Done with second")))
+    
+    (should (= 2 (plist-get (claude-gravity--get-session sid) :current-turn)))
+    
+    ;; Verify both turns exist with their tools
+    (let* ((session (claude-gravity--get-session sid))
+           (turns (plist-get session :turns))
+           (turn-list (claude-gravity--tlist-items turns)))
+      (should (= 2 (length turn-list)))
+      (should (= 1 (alist-get 'turn-number (car turn-list))))
+      (should (= 2 (alist-get 'turn-number (cadr turn-list)))))))
+
 ;;;; Tests for pi bridge model verification
 
 (ert-deftest pi-test-default-model-is-minimax ()
