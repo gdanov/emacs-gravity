@@ -95,16 +95,25 @@ export class PiSession {
             log(`[pi-session] agent_start`, 'debug');
             break;
           case "agent_end":
-            log(`[pi-session] agent_end`, 'debug');
             // Extract stop_text from the last assistant message
             let stopText: string | undefined;
             let stopThinking: string | undefined;
             if (this.lastAssistantMessage) {
               const content = this.lastAssistantMessage.content;
+              // Content can be: string, object, or array of blocks
               if (typeof content === 'string') {
                 stopText = content;
+              } else if (Array.isArray(content)) {
+                // Array of blocks - extract text and thinking from each block
+                for (const block of content) {
+                  if (block.type === 'text') {
+                    stopText = block.text;
+                  } else if (block.type === 'thinking') {
+                    stopThinking = block.thinking;
+                  }
+                }
               } else if (content && typeof content === 'object') {
-                stopText = content.text || content.content?.[0]?.text;
+                stopText = content.text;
                 stopThinking = content.thinking;
               }
             }

@@ -272,4 +272,64 @@ describe("PiSession integration with real minimax API", () => {
     session?.stop();
     session = null;
   }, 30000);
+
+  itIfConfigured("sends Stop event with stop_text after prompt completes", async () => {
+    let stopEventReceived = false;
+    let stopEventPayload: any = null;
+
+    const originalSendEvent = sendEvent;
+    sendEvent = async (eventName, _sid, _cwd, _pid, payload) => {
+      console.log(`[TEST] Event: ${eventName}`, JSON.stringify(payload).substring(0, 200));
+      if (eventName === "Stop") {
+        stopEventReceived = true;
+        stopEventPayload = payload;
+      }
+      await originalSendEvent(eventName, _sid, _cwd, _pid, payload);
+    };
+
+    const sessionIdPromise = new Promise<string>((resolve) => {
+      session = new PiSession({
+        id: "pi-stop-text-test",
+        cwd: "/Users/gdanov/work/playground/emacs-gravity",
+        sendEvent,
+        sendAndWait,
+        onSessionId: (realId) => resolve(realId),
+      });
+
+      session.start({
+        id: "pi-stop-text-test",
+        cwd: "/Users/gdanov/work/playground/emacs-gravity",
+        sendEvent,
+        sendAndWait,
+      });
+    });
+
+    await sessionIdPromise;
+
+    // Send a simple prompt with a specific response we can verify
+    const testPrompt = "Say exactly: 'Test response 12345'";
+    session?.sendPrompt(testPrompt);
+
+    // Wait for Stop event with stop_text
+    const maxWait = 20000;
+    const startTime = Date.now();
+    while (!stopEventReceived && Date.now() - startTime < maxWait) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    console.log(`[TEST] Stop event received:`, stopEventReceived);
+    console.log(`[TEST] Stop payload:`, stopEventPayload);
+
+    expect(stopEventReceived).toBe(true);
+    expect(stopEventPayload).toBeDefined();
+    expect(stopEventPayload.stop_text).toBeDefined();
+    expect(typeof stopEventPayload.stop_text).toBe("string");
+    expect(stopEventPayload.stop_text.length).toBeGreaterThan(0);
+    // Verify the response contains our test phrase
+    expect(stopEventPayload.stop_text).toContain("Test response 12345");
+
+    // Clean up
+    session?.stop();
+    session = null;
+  }, 30000);
 });
