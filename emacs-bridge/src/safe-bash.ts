@@ -3,6 +3,8 @@
 // Classifies Bash commands as safe (read-only) or unsafe (potentially destructive).
 // Safe commands are auto-approved at the bridge level, skipping the Emacs permission UI.
 
+import type { HookData } from "./types.js";
+
 import { basename } from "path";
 import { log } from "./log.js";
 
@@ -110,7 +112,7 @@ function hasPerBinaryDangerousFlags(binary: string, segment: string): boolean {
  * Determine if a PermissionRequest payload is for a safe, read-only Bash command.
  * Returns true if the command can be auto-approved.
  */
-export function isSafeBashCommand(inputData: any): boolean {
+export function isSafeBashCommand(inputData: HookData): boolean {
   if (process.env.CLAUDE_GRAVITY_NO_AUTO_APPROVE === "1") return false;
 
   const toolName = inputData.tool_name;

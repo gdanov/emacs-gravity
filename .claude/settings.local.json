@@ -70,7 +70,10 @@
       "Bash(find /Users/gdanov/.claude/plugins -type d -name \"*dev-loop*\" 2>/dev/null | head -20)",
       "Bash(docker stop:*)",
       "Bash(md5:*)",
-      "Bash(gh issue:*)"
+      "Bash(gh issue:*)",
+      "WebFetch(domain:code.visualstudio.com)",
+      "WebFetch(domain:effect.website)",
+      "WebFetch(domain:www.sandromaglione.com)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

@@ -1,6 +1,7 @@
 import { Agent } from "@mariozechner/pi-agent-core";
 import { getModel, type Model } from "@mariozechner/pi-ai";
 import { createCodingTools, createReadOnlyTools } from "@mariozechner/pi-coding-agent";
+import { createDateTimeTool } from "./date-time-tool.js";
 import { log } from "./log.js";
 import type { SendEventFn, SendAndWaitFn } from "./daemon-session.js";
 
@@ -76,10 +77,13 @@ export class PiSession {
 
     let tools: any[] = [];
     const toolsOption = _opts.tools || "coding";
+    const dateTimeTool = createDateTimeTool();
     if (toolsOption === "coding") {
       tools = createCodingTools(this.cwd);
+      tools.push(dateTimeTool);
     } else if (toolsOption === "readonly") {
       tools = createReadOnlyTools(this.cwd);
+      tools.push(dateTimeTool);
     }
 
     try {
