@@ -13,6 +13,7 @@
 (declare-function claude-gravity--render-overview "claude-gravity-ui")
 (declare-function claude-gravity--session-buffer-name "claude-gravity-ui")
 (declare-function claude-gravity--follow-detect-manual "claude-gravity-ui")
+(declare-function claude-gravity--display-buffer "claude-gravity-ui")
 (declare-function claude-gravity--inbox-act-permission "claude-gravity-actions")
 (declare-function claude-gravity--inbox-act-question "claude-gravity-actions")
 (declare-function claude-gravity--inbox-act-plan-review "claude-gravity-actions")
@@ -589,8 +590,8 @@ SESSION-ID identifies the Claude Code session."
       (add-hook 'kill-buffer-hook #'claude-gravity--plan-review-on-kill nil t)
       (goto-char (point-min))
       (set-buffer-modified-p nil))
-    ;; Display in current window
-    (switch-to-buffer buf)
+    ;; Display in gravity window (or other window if no gravity window)
+    (claude-gravity--display-buffer buf)
     (if claude-gravity--plan-review-prev-content
         (claude-gravity--log 'debug "Plan REVISION: gutter shows changes | C-c C-c approve | C-c C-k deny | C-c C-g toggle")
       (claude-gravity--log 'debug "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff"))))

@@ -32,6 +32,52 @@
 (defvar claude-gravity--tmux-sessions)
 
 
+;;; Window Navigation Helpers
+
+(defun claude-gravity--gravity-window ()
+  "Find a visible window showing a gravity-mode buffer.
+Prefers the selected window, then scans other windows in the frame."
+  (let ((win (selected-window)))
+    (if (and (window-live-p win)
+             (with-current-buffer (window-buffer win)
+               (derived-mode-p 'claude-gravity-mode)))
+        win
+      (cl-loop for w in (window-list nil 'no-mini)
+               when (with-current-buffer (window-buffer w)
+                      (derived-mode-p 'claude-gravity-mode))
+               return w))))
+
+(defun claude-gravity--display-buffer (buf &optional context)
+  "Display BUF using gravity-aware window routing.
+CONTEXT controls behavior:
+  nil/\\='default  — gravity window if current or visible, else other-window
+  \\='same-window  — always same window
+  \\='other-window — always other window
+  \\='new-frame    — new frame"
+  (pcase context
+    ('same-window
+     (switch-to-buffer buf))
+    ('other-window
+     (pop-to-buffer buf t))
+    ('new-frame
+     (let ((frame (make-frame)))
+       (select-frame-set-input-focus frame)
+       (switch-to-buffer buf)))
+    (_  ; nil or 'default
+     (let ((gw (claude-gravity--gravity-window)))
+       (cond
+        ;; Already in a gravity window — replace in place
+        ((eq gw (selected-window))
+         (switch-to-buffer buf))
+        ;; Gravity window exists elsewhere — go there
+        (gw
+         (select-window gw)
+         (switch-to-buffer buf))
+        ;; No gravity window — use other window to preserve source
+        (t
+         (pop-to-buffer buf t)))))))
+
+
 (defun claude-gravity--branch-or-cwd (session)
   "Return propertized branch name or abbreviated cwd for SESSION.
 Returns nil if neither is available."
@@ -587,28 +633,35 @@ Only idle items can be dismissed.  Bidirectional items need a response."
   (format "*Claude: %s*" (claude-gravity--session-label session)))
 
 
-(defun claude-gravity-open-session (session-id)
-  "Open or switch to the buffer for SESSION-ID."
+(defun claude-gravity-open-session (session-id &optional context)
+  "Open or switch to the buffer for SESSION-ID.
+Optional CONTEXT controls window routing (see `claude-gravity--display-buffer')."
   (interactive)
   (let* ((session (claude-gravity--get-session session-id))
          (buf-name (claude-gravity--session-buffer-name session))
          (existing (get-buffer buf-name)))
     (if existing
-        (pop-to-buffer existing)
+        (claude-gravity--display-buffer existing context)
       (with-current-buffer (get-buffer-create buf-name)
         (claude-gravity-session-mode)
         (setq claude-gravity--buffer-session-id session-id)
         (plist-put session :buffer (current-buffer))
         (claude-gravity--render-session-buffer session)
-        (pop-to-buffer (current-buffer))))))
+        (claude-gravity--display-buffer (current-buffer) context)))))
 
 
-(defun claude-gravity-switch-session ()
+(defun claude-gravity-switch-session (arg)
   "Switch to a session buffer via completing-read.
 Pre-selects: session with oldest pending notification, else longest-idle,
-else current session."
-  (interactive)
-  (let ((candidates nil)
+else current session.
+With \\[universal-argument], open in other window.
+With \\[universal-argument] \\[universal-argument], open in new frame."
+  (interactive "P")
+  (let ((context (pcase (prefix-numeric-value arg)
+                   (4 'other-window)
+                   (16 'new-frame)
+                   (_ nil)))
+        (candidates nil)
         (id-map nil)
         (default-label nil)
         (self-id claude-gravity--buffer-session-id))
@@ -734,7 +787,7 @@ else current session."
     (let* ((choice (completing-read "Session: " candidates nil t nil nil default-label))
            (sid (cdr (assoc choice id-map))))
       (when sid
-        (claude-gravity-open-session sid)
+        (claude-gravity-open-session sid context)
         ;; Auto-open inbox pop-up if session has pending actionable items
         (let ((first-item (cl-find-if
                            (lambda (item)
@@ -1636,10 +1689,11 @@ in the current window."
 
 (defun claude-gravity-setup-buffer ()
   "Create and display the overview buffer."
-  (with-current-buffer (get-buffer-create claude-gravity-buffer-name)
-    (claude-gravity-mode)
-    (claude-gravity--render-overview)
-    (switch-to-buffer (current-buffer))))
+  (let ((buf (get-buffer-create claude-gravity-buffer-name)))
+    (with-current-buffer buf
+      (claude-gravity-mode)
+      (claude-gravity--render-overview))
+    (claude-gravity--display-buffer buf)))
 
 
 ;; Keep compose prompt at top level (most frequent action)

@@ -6,6 +6,8 @@
 (require 'claude-gravity-faces)
 (require 'claude-gravity-session)
 
+(declare-function claude-gravity--display-buffer "claude-gravity-ui")
+
 
 ;;; Divider helpers
 
@@ -347,7 +349,7 @@ LABEL gets detail-label face, VALUE gets optional FACE."
           (visual-line-mode 1)
           (setq buffer-read-only t)
           (set-buffer-modified-p nil))
-        (pop-to-buffer buf)))))
+        (claude-gravity--display-buffer buf)))))
 
 
 (defun claude-gravity-show-plan ()
