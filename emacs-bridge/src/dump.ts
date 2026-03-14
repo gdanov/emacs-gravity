@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { log } from "./log.js";
 
 // --- Fixture dump mode ---
