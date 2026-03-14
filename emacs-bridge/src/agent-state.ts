@@ -5,35 +5,64 @@ import { readTail } from "./enrichment.js";
 
 // --- Active Agent List ---
 // Tracks which agents are currently running per session.
-// Persisted to {cwd}/.claude/emacs-bridge-agents.json so each
-// one-shot bridge invocation can read the current state.
+// Persisted to {transcript_dir}/gravity/emacs-bridge-agents.json
+// alongside Claude's transcript.
 
 export type AgentState = { [sessionId: string]: string[] };
 
-export function getAgentStatePath(cwd: string): string {
-  return join(cwd, ".claude", "emacs-bridge-agents.json");
+export function getAgentStatePath(transcriptPath: string | undefined): string | undefined {
+  if (!transcriptPath) return undefined;
+  const transcriptDir = dirname(transcriptPath);
+  return join(transcriptDir, "gravity", "emacs-bridge-agents.json");
 }
 
-export function readAgentState(cwd: string): AgentState {
-  try {
-    const p = getAgentStatePath(cwd);
-    if (existsSync(p)) {
-      return JSON.parse(readFileSync(p, "utf-8"));
+export function readAgentState(cwd: string, transcriptPath?: string): AgentState {
+  const statePath = transcriptPath ? getAgentStatePath(transcriptPath) : undefined;
+  
+  // Try transcript-based path first
+  if (statePath && existsSync(statePath)) {
+    try {
+      return JSON.parse(readFileSync(statePath, "utf-8"));
+    } catch (e) {
+      log(`readAgentState error: ${e}`, 'error');
     }
-  } catch (e) {
-    log(`readAgentState error: ${e}`, 'error');
   }
+  
+  // Fallback to cwd-based path for backward compatibility
+  const legacyPath = join(cwd, ".claude", "emacs-bridge-agents.json");
+  if (existsSync(legacyPath)) {
+    try {
+      return JSON.parse(readFileSync(legacyPath, "utf-8"));
+    } catch (e) {
+      log(`readAgentState (legacy) error: ${e}`, 'error');
+    }
+  }
+  
   return {};
 }
 
-export function writeAgentState(cwd: string, state: AgentState): void {
+export function writeAgentState(cwd: string, transcriptPath: string | undefined, state: AgentState): void {
+  const statePath = transcriptPath ? getAgentStatePath(transcriptPath) : undefined;
+  
+  if (statePath) {
+    try {
+      const dir = dirname(statePath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(statePath, JSON.stringify(state), "utf-8");
+      return;
+    } catch (e) {
+      log(`writeAgentState (new path) error: ${e}`, 'error');
+    }
+  }
+  
+  // Fallback to cwd-based path for backward compatibility
+  const legacyPath = join(cwd, ".claude", "emacs-bridge-agents.json");
   try {
-    const p = getAgentStatePath(cwd);
-    const dir = dirname(p);
+    const dir = dirname(legacyPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(p, JSON.stringify(state), "utf-8");
+    writeFileSync(legacyPath, JSON.stringify(state), "utf-8");
   } catch (e) {
-    log(`writeAgentState error: ${e}`, 'error');
+    log(`writeAgentState (legacy) error: ${e}`, 'error');
   }
 }
 

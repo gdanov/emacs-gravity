@@ -1,6 +1,6 @@
 import { Effect, Layer, pipe } from "effect";
 import { join } from "path";
-import { log } from "./log.js";
+import { log, initLogForSession } from "./log.js";
 import { isSafeBashCommand } from "./safe-bash.js";
 import { nextDumpSeq, writeDumpFile } from "./dump.js";
 import type { HookData } from "./types.js";
@@ -86,15 +86,17 @@ const program = Effect.gen(function* () {
   if (config.tmuxSession) inputData.tmux_session = config.tmuxSession;
   if (config.effortLevel) inputData.effort_level = config.effortLevel;
 
-  // Dump raw input if dump mode enabled
+  // Dump raw input if transcript path available
+  const transcriptPath = inputData.transcript_path;
+  initLogForSession(transcriptPath);
+  
   let dumpSeq: number | undefined;
-  if (config.dumpDir) {
-    dumpSeq = nextDumpSeq(config.dumpDir);
-    writeDumpFile(config.dumpDir, dumpSeq, eventName, "raw", inputData);
+  if (transcriptPath) {
+    dumpSeq = nextDumpSeq(transcriptPath);
+    writeDumpFile(transcriptPath, dumpSeq, eventName, "raw", inputData);
   }
 
   // --- Enrichment (pure functions returning new enriched objects) ---
-  const transcriptPath = inputData.transcript_path;
   let enrichedData = enrichSessionMetadata(inputData, transcriptPath);
 
   if (eventName === "SubagentStart") {
@@ -104,7 +106,7 @@ const program = Effect.gen(function* () {
     enrichedData = enrichSubagentStop(enrichedData, sessionId, cwd, transcriptPath);
   }
   if (eventName === "SessionEnd") {
-    enrichedData = enrichSessionEnd(enrichedData, sessionId, cwd);
+    enrichedData = enrichSessionEnd(enrichedData, sessionId, cwd, transcriptPath);
   }
   if (eventName === "PreToolUse" || eventName === "PostToolUse" || eventName === "PostToolUseFailure") {
     enrichedData = enrichToolAttribution(enrichedData, sessionId, cwd, transcriptPath);
@@ -123,8 +125,8 @@ const program = Effect.gen(function* () {
   inputData = enrichedData;
 
   // Dump enriched output
-  if (config.dumpDir && dumpSeq !== undefined) {
-    writeDumpFile(config.dumpDir, dumpSeq, eventName, "output", {
+  if (transcriptPath && dumpSeq !== undefined) {
+    writeDumpFile(transcriptPath, dumpSeq, eventName, "output", {
       event: eventName, session_id: sessionId, cwd, pid, data: inputData,
     });
   }

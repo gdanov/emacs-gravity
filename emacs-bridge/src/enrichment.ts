@@ -377,26 +377,36 @@ export function extractSlug(transcriptPath: string): string | null {
 
 export type AgentState = { [sessionId: string]: string[] };
 
-function getAgentStatePath(cwd: string): string {
+function getAgentStatePath(cwd: string, transcriptPath?: string): string | undefined {
+  // Prefer transcript-based path (new location alongside Claude's transcript)
+  if (transcriptPath) {
+    const transcriptDir = dirname(transcriptPath);
+    return join(transcriptDir, "gravity", "emacs-bridge-agents.json");
+  }
+  // Fallback to cwd-based path (legacy location)
   return join(cwd, ".claude", "emacs-bridge-agents.json");
 }
 
-export function readAgentState(cwd: string): AgentState {
+export function readAgentState(cwd: string, transcriptPath?: string): AgentState {
+  const statePath = getAgentStatePath(cwd, transcriptPath);
+  if (!statePath) return {};
+  
   try {
-    const p = getAgentStatePath(cwd);
-    if (existsSync(p)) {
-      return JSON.parse(readFileSync(p, "utf-8"));
+    if (existsSync(statePath)) {
+      return JSON.parse(readFileSync(statePath, "utf-8"));
     }
   } catch {}
   return {};
 }
 
-export function writeAgentState(cwd: string, state: AgentState): void {
+export function writeAgentState(cwd: string, transcriptPath: string | undefined, state: AgentState): void {
+  const statePath = getAgentStatePath(cwd, transcriptPath);
+  if (!statePath) return;
+  
   try {
-    const p = getAgentStatePath(cwd);
-    const dir = dirname(p);
+    const dir = dirname(statePath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(p, JSON.stringify(state), "utf-8");
+    writeFileSync(statePath, JSON.stringify(state), "utf-8");
   } catch {}
 }
 

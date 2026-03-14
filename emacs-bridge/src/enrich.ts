@@ -35,12 +35,12 @@ export function enrichSubagentStart(inputData: HookData, sessionId: string, cwd:
   const agentId = inputData.agent_id;
   if (!agentId || !cwd) return inputData;
 
-  const state = readAgentState(cwd);
+  const state = readAgentState(cwd, transcriptPath);
   if (!state[sessionId]) state[sessionId] = [];
   if (!state[sessionId].includes(agentId)) {
     state[sessionId].push(agentId);
   }
-  writeAgentState(cwd, state);
+  writeAgentState(cwd, transcriptPath, state);
   log(`Agent ${agentId} started, active list: ${state[sessionId].join(", ")}`, 'info');
 
   if (!transcriptPath) return inputData;
@@ -56,12 +56,12 @@ export function enrichSubagentStop(inputData: HookData, sessionId: string, cwd: 
   const agentId = inputData.agent_id;
   if (!agentId || !cwd) return inputData;
 
-  const state = readAgentState(cwd);
+  const state = readAgentState(cwd, transcriptPath);
   if (state[sessionId]) {
     state[sessionId] = state[sessionId].filter((id: string) => id !== agentId);
     if (state[sessionId].length === 0) delete state[sessionId];
   }
-  writeAgentState(cwd, state);
+  writeAgentState(cwd, transcriptPath, state);
   log(`Agent ${agentId} stopped, active list: ${state[sessionId]?.join(", ") || "(empty)"}`, 'warn');
 
   // Use agent_transcript_path provided by Claude Code (don't construct)
@@ -143,12 +143,12 @@ export function enrichSubagentStop(inputData: HookData, sessionId: string, cwd: 
 // SessionEnd: clean up agent state for this session
 // Note: This function doesn't enrich inputData, it just cleans up state.
 // Returns inputData for potential chain compatibility.
-export function enrichSessionEnd(inputData: HookData, sessionId: string, cwd: string): HookData {
+export function enrichSessionEnd(inputData: HookData, sessionId: string, cwd: string, transcriptPath?: string): HookData {
   if (!cwd) return inputData;
-  const state = readAgentState(cwd);
+  const state = readAgentState(cwd, transcriptPath);
   if (state[sessionId]) {
     delete state[sessionId];
-    writeAgentState(cwd, state);
+    writeAgentState(cwd, transcriptPath, state);
     log(`Cleaned up agent state for session ${sessionId}`, 'info');
   }
   return inputData;
@@ -157,7 +157,7 @@ export function enrichSessionEnd(inputData: HookData, sessionId: string, cwd: st
 // Tool-to-agent attribution for PreToolUse/PostToolUse/PostToolUseFailure
 export function enrichToolAttribution(inputData: HookData, sessionId: string, cwd: string, transcriptPath: string | undefined): HookData {
   if (!cwd) return inputData;
-  const state = readAgentState(cwd);
+  const state = readAgentState(cwd, transcriptPath);
   const activeAgents = state[sessionId] || [];
   if (activeAgents.length === 0) return inputData;
 
