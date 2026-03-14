@@ -60,7 +60,7 @@ const program = Effect.gen(function* () {
 
   // Read and parse stdin
   const raw = yield* io.readStdin().pipe(Effect.catch(() => Effect.succeed("")));
-  const inputData = yield* parseStdin(raw);
+  let inputData = yield* parseStdin(raw);
 
   yield* Effect.logDebug(`Payload: ${JSON.stringify(inputData)}`);
 
@@ -93,32 +93,34 @@ const program = Effect.gen(function* () {
     writeDumpFile(config.dumpDir, dumpSeq, eventName, "raw", inputData);
   }
 
-  // --- Enrichment (still imperative — converted in Phase 3) ---
+  // --- Enrichment (pure functions returning new enriched objects) ---
   const transcriptPath = inputData.transcript_path;
-
-  enrichSessionMetadata(inputData, transcriptPath);
+  let enrichedData = enrichSessionMetadata(inputData, transcriptPath);
 
   if (eventName === "SubagentStart") {
-    enrichSubagentStart(inputData, sessionId, cwd, transcriptPath);
+    enrichedData = enrichSubagentStart(enrichedData, sessionId, cwd, transcriptPath);
   }
   if (eventName === "SubagentStop") {
-    enrichSubagentStop(inputData, sessionId, cwd, transcriptPath);
+    enrichedData = enrichSubagentStop(enrichedData, sessionId, cwd, transcriptPath);
   }
   if (eventName === "SessionEnd") {
-    enrichSessionEnd(sessionId, cwd);
+    enrichedData = enrichSessionEnd(enrichedData, sessionId, cwd);
   }
   if (eventName === "PreToolUse" || eventName === "PostToolUse" || eventName === "PostToolUseFailure") {
-    enrichToolAttribution(inputData, sessionId, cwd, transcriptPath);
+    enrichedData = enrichToolAttribution(enrichedData, sessionId, cwd, transcriptPath);
   }
   if (eventName === "PreToolUse") {
-    enrichPreToolUse(inputData, sessionId, transcriptPath);
+    enrichedData = enrichPreToolUse(enrichedData, sessionId, transcriptPath);
   }
   if (eventName === "PostToolUse" || eventName === "PostToolUseFailure") {
-    enrichPostToolUse(inputData, sessionId, transcriptPath);
+    enrichedData = enrichPostToolUse(enrichedData, sessionId, transcriptPath);
   }
   if (eventName === "Stop") {
-    yield* Effect.promise(() => enrichStop(inputData, transcriptPath));
+    enrichedData = yield* Effect.promise(() => enrichStop(enrichedData, transcriptPath));
   }
+
+  // Use enriched data for the rest of the pipeline
+  inputData = enrichedData;
 
   // Dump enriched output
   if (config.dumpDir && dumpSeq !== undefined) {
@@ -244,7 +246,7 @@ const program = Effect.gen(function* () {
     // Fire-and-forget: send to Emacs and output {}
     if (eventName === "SubagentStop") {
       yield* Effect.logWarning(
-        `[FINAL_CHECK_BEFORE_SEND] agent_stop_text=${typeof inputData.agent_stop_text === "string" ? `"${(inputData.agent_stop_text as string).substring(0, 40)}"` : inputData.agent_stop_text}`
+        `[FINAL_CHECK_BEFORE_SEND] agent_stop_text=${typeof enrichedData.agent_stop_text === "string" ? `"${(enrichedData.agent_stop_text as string).substring(0, 40)}"` : enrichedData.agent_stop_text}`
       );
     }
     yield* socket.send({
@@ -252,7 +254,7 @@ const program = Effect.gen(function* () {
       session_id: sessionId,
       cwd,
       pid,
-      data: inputData,
+      data: enrichedData,
       hook_input: rawHookInput,
     });
     yield* io.writeStdout(JSON.stringify({}) + "\n");

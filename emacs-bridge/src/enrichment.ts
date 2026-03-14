@@ -471,6 +471,7 @@ export function attributeToolToAgent(
 /**
  * Enriches a raw event payload with data extracted from transcripts.
  * Synchronous — caller handles retries for Stop/SubagentStop.
+ * Returns a new enriched object (does not mutate input).
  */
 export function enrichEvent(
   inputData: any,
@@ -484,106 +485,143 @@ export function enrichEvent(
   const cwd = inputData.cwd || "";
   const transcriptPath = inputData.transcript_path;
 
+  let result: any = { ...inputData };
+
+  // Session metadata (slug)
   if (transcriptPath) {
     try {
       const slug = extractSlug(transcriptPath);
-      if (slug) inputData.slug = slug;
+      if (slug) {
+        result = { ...result, slug };
+      }
     } catch {}
   }
 
   const agentState = opts?.agentState ?? (cwd ? readAgentState(cwd) : {});
 
+  // SubagentStart
   if (eventName === "SubagentStart") {
-    const agentId = inputData.agent_id;
+    const agentId = result.agent_id;
     if (agentId && transcriptPath) {
-      inputData.agent_transcript_path = agentTranscriptPath(transcriptPath, sessionId, agentId);
+      result = {
+        ...result,
+        agent_transcript_path: agentTranscriptPath(transcriptPath, sessionId, agentId),
+      };
     }
   }
 
+  // SubagentStop
   if (eventName === "SubagentStop") {
-    const agentId = inputData.agent_id;
+    const agentId = result.agent_id;
     if (agentId && transcriptPath) {
       const atp = agentTranscriptPath(transcriptPath, sessionId, agentId);
       const toolIds = extractAgentToolIds(atp);
-      if (toolIds.length > 0) {
-        inputData.agent_tool_ids = toolIds;
-      }
-      inputData.agent_transcript_path = atp;
+
+      let text = "";
+      let thinking = "";
       try {
-        const { text, thinking } = extractTrailingText(atp);
-        if (text) inputData.agent_stop_text = text;
-        if (thinking) inputData.agent_stop_thinking = thinking;
+        const extracted = extractTrailingText(atp);
+        text = extracted.text;
+        thinking = extracted.thinking;
       } catch {}
+
+      const updates: any = { agent_transcript_path: atp };
+      if (toolIds.length > 0) updates.agent_tool_ids = toolIds;
+      if (text) updates.agent_stop_text = text;
+      if (thinking) updates.agent_stop_thinking = thinking;
+      result = { ...result, ...updates };
     }
   }
 
+  // Tool attribution
   if (eventName === "PreToolUse" || eventName === "PostToolUse" || eventName === "PostToolUseFailure") {
     const activeAgents = agentState[sessionId] || [];
     if (activeAgents.length > 0) {
-      const toolUseId = inputData.tool_use_id || "";
+      const toolUseId = result.tool_use_id || "";
       const { parentAgentId, candidateAgentIds } = attributeToolToAgent(
         sessionId, cwd, transcriptPath, toolUseId, activeAgents
       );
       if (parentAgentId) {
-        inputData.parent_agent_id = parentAgentId;
-        if (candidateAgentIds) {
-          inputData.candidate_agent_ids = candidateAgentIds;
-        }
+        const updates: any = { parent_agent_id: parentAgentId };
+        if (candidateAgentIds) updates.candidate_agent_ids = candidateAgentIds;
+        result = { ...result, ...updates };
       }
     }
   }
 
+  // PreToolUse enrichment
   if (eventName === "PreToolUse") {
-    const toolUseId = inputData.tool_use_id;
-    const parentAgentId = inputData.parent_agent_id;
+    const toolUseId = result.tool_use_id;
+    const parentAgentId = result.parent_agent_id;
     const effectiveTranscript = (parentAgentId && parentAgentId !== "ambiguous" && transcriptPath)
       ? agentTranscriptPath(transcriptPath, sessionId, parentAgentId)
       : transcriptPath;
     if (effectiveTranscript && toolUseId) {
       try {
         const { text, thinking, model } = extractPrecedingContent(effectiveTranscript, toolUseId);
-        if (text) inputData.assistant_text = text;
-        if (thinking) inputData.assistant_thinking = thinking;
-        if (model) inputData.model = model;
+        const updates: any = {};
+        if (text) updates.assistant_text = text;
+        if (thinking) updates.assistant_thinking = thinking;
+        if (model) updates.model = model;
+        if (Object.keys(updates).length > 0) {
+          result = { ...result, ...updates };
+        }
       } catch {}
     }
   }
 
+  // PostToolUse/PostToolUseFailure enrichment
   if (eventName === "PostToolUse" || eventName === "PostToolUseFailure") {
-    const toolUseId = inputData.tool_use_id;
-    const parentAgentId = inputData.parent_agent_id;
+    const toolUseId = result.tool_use_id;
+    const parentAgentId = result.parent_agent_id;
     const effectiveTranscript = (parentAgentId && parentAgentId !== "ambiguous" && transcriptPath)
       ? agentTranscriptPath(transcriptPath, sessionId, parentAgentId)
       : transcriptPath;
+    
+    const updates: any = {};
+    
     if (effectiveTranscript && toolUseId) {
       try {
         const { text, thinking } = extractFollowingContent(effectiveTranscript, toolUseId);
-        if (text) inputData.post_tool_text = text;
-        if (thinking) inputData.post_tool_thinking = thinking;
+        if (text) updates.post_tool_text = text;
+        if (thinking) updates.post_tool_thinking = thinking;
       } catch {}
     }
+    
     if (transcriptPath) {
       try {
-        inputData.token_usage = extractTokenUsage(transcriptPath);
+        updates.token_usage = extractTokenUsage(transcriptPath);
       } catch {}
+    }
+    
+    if (Object.keys(updates).length > 0) {
+      result = { ...result, ...updates };
     }
   }
 
+  // Stop enrichment
   if (eventName === "Stop") {
     if (transcriptPath) {
+      const updates: any = {};
+      
       try {
         const snapshotBytes = opts?.stopSnapshotBytes ?? (() => {
           try { return statSync(transcriptPath).size; } catch { return undefined; }
         })();
         const { text, thinking } = extractTrailingText(transcriptPath, snapshotBytes);
-        if (text) inputData.stop_text = text;
-        if (thinking) inputData.stop_thinking = thinking;
+        if (text) updates.stop_text = text;
+        if (thinking) updates.stop_thinking = thinking;
       } catch {}
+      
       try {
-        inputData.token_usage = extractTokenUsage(transcriptPath);
+        updates.token_usage = extractTokenUsage(transcriptPath);
       } catch {}
+      
+      if (Object.keys(updates).length > 0) {
+        result = { ...result, ...updates };
+      }
     }
   }
 
-  return inputData;
+  return result;
 }

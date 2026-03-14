@@ -79,17 +79,18 @@ export function createDaemonHooks(
       // Enrich with transcript data
       const agentState: AgentState = {};
       agentState[sessionId] = getActiveAgents(sessionId);
+      let enrichedPayload = payload;
       try {
-        enrichEvent(payload, eventName, { agentState });
+        enrichedPayload = enrichEvent(payload, eventName, { agentState });
       } catch (e: any) {
         log(`[daemon-hooks] enrichEvent error for ${eventName}: ${e.message}`, 'error');
       }
 
       if (isBidirectional) {
-        const response = await sendAndWait(eventName, sessionId, cwd, null, payload);
+        const response = await sendAndWait(eventName, sessionId, cwd, null, enrichedPayload);
         return response || {};
       } else {
-        await sendEvent(eventName, sessionId, cwd, null, payload);
+        await sendEvent(eventName, sessionId, cwd, null, enrichedPayload);
         return {};
       }
     };
