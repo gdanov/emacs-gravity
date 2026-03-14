@@ -14,7 +14,8 @@ import type {
   CanUseTool,
   PermissionResult,
 } from "@anthropic-ai/claude-agent-sdk";
-import { enrichEvent, AgentState, readAgentState, writeAgentState } from "./enrichment.js";
+import { enrichEvent } from "./enrichment.js";
+import type { AgentState } from "./agent-state.js";
 import { log } from "./log.js";
 
 import type { SendEventFn, SendAndWaitFn } from "./daemon-session.js";

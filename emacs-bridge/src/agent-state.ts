@@ -18,51 +18,28 @@ export function getAgentStatePath(transcriptPath: string | undefined): string | 
 
 export function readAgentState(cwd: string, transcriptPath?: string): AgentState {
   const statePath = transcriptPath ? getAgentStatePath(transcriptPath) : undefined;
-  
-  // Try transcript-based path first
-  if (statePath && existsSync(statePath)) {
-    try {
+  if (!statePath) return {};
+
+  try {
+    if (existsSync(statePath)) {
       return JSON.parse(readFileSync(statePath, "utf-8"));
-    } catch (e) {
-      log(`readAgentState error: ${e}`, 'error');
     }
+  } catch (e) {
+    log(`readAgentState error: ${e}`, 'error');
   }
-  
-  // Fallback to cwd-based path for backward compatibility
-  const legacyPath = join(cwd, ".claude", "emacs-bridge-agents.json");
-  if (existsSync(legacyPath)) {
-    try {
-      return JSON.parse(readFileSync(legacyPath, "utf-8"));
-    } catch (e) {
-      log(`readAgentState (legacy) error: ${e}`, 'error');
-    }
-  }
-  
   return {};
 }
 
 export function writeAgentState(cwd: string, transcriptPath: string | undefined, state: AgentState): void {
   const statePath = transcriptPath ? getAgentStatePath(transcriptPath) : undefined;
-  
-  if (statePath) {
-    try {
-      const dir = dirname(statePath);
-      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      writeFileSync(statePath, JSON.stringify(state), "utf-8");
-      return;
-    } catch (e) {
-      log(`writeAgentState (new path) error: ${e}`, 'error');
-    }
-  }
-  
-  // Fallback to cwd-based path for backward compatibility
-  const legacyPath = join(cwd, ".claude", "emacs-bridge-agents.json");
+  if (!statePath) return;
+
   try {
-    const dir = dirname(legacyPath);
+    const dir = dirname(statePath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(legacyPath, JSON.stringify(state), "utf-8");
+    writeFileSync(statePath, JSON.stringify(state), "utf-8");
   } catch (e) {
-    log(`writeAgentState (legacy) error: ${e}`, 'error');
+    log(`writeAgentState error: ${e}`, 'error');
   }
 }
 

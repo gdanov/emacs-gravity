@@ -86,12 +86,12 @@ const program = Effect.gen(function* () {
   if (config.tmuxSession) inputData.tmux_session = config.tmuxSession;
   if (config.effortLevel) inputData.effort_level = config.effortLevel;
 
-  // Dump raw input if transcript path available
   const transcriptPath = inputData.transcript_path;
   initLogForSession(transcriptPath);
-  
+
+  // Dump raw input (opt-in via CLAUDE_GRAVITY_DUMP=1 or CLAUDE_GRAVITY_DUMP_DIR)
   let dumpSeq: number | undefined;
-  if (transcriptPath) {
+  if (config.dumpEnabled && transcriptPath) {
     dumpSeq = nextDumpSeq(transcriptPath);
     writeDumpFile(transcriptPath, dumpSeq, eventName, "raw", inputData);
   }
@@ -121,29 +121,26 @@ const program = Effect.gen(function* () {
     enrichedData = yield* Effect.promise(() => enrichStop(enrichedData, transcriptPath));
   }
 
-  // Use enriched data for the rest of the pipeline
-  inputData = enrichedData;
-
   // Dump enriched output
-  if (transcriptPath && dumpSeq !== undefined) {
+  if (config.dumpEnabled && transcriptPath && dumpSeq !== undefined) {
     writeDumpFile(transcriptPath, dumpSeq, eventName, "output", {
-      event: eventName, session_id: sessionId, cwd, pid, data: inputData,
+      event: eventName, session_id: sessionId, cwd, pid, data: enrichedData,
     });
   }
 
   // --- Routing ---
 
   // Auto-approve safe read-only Bash commands (skip Emacs round-trip)
-  if (eventName === "PermissionRequest" && !config.noAutoApprove && isSafeBashCommand(inputData)) {
+  if (eventName === "PermissionRequest" && !config.noAutoApprove && isSafeBashCommand(enrichedData)) {
     yield* socket.send({
       event: "PermissionAutoApproved",
       session_id: sessionId,
       cwd,
       pid,
       data: {
-        tool_name: inputData.tool_name,
-        tool_use_id: inputData.tool_use_id,
-        command: inputData.tool_input?.command,
+        tool_name: enrichedData.tool_name,
+        tool_use_id: enrichedData.tool_use_id,
+        command: enrichedData.tool_input?.command,
       },
     });
     yield* io.writeStdout(JSON.stringify({
@@ -174,7 +171,7 @@ const program = Effect.gen(function* () {
         session_id: sessionId,
         cwd,
         pid,
-        data: inputData,
+        data: enrichedData,
         hook_input: rawHookInput,
       });
       yield* io.writeStdout(JSON.stringify({}) + "\n");
@@ -184,14 +181,14 @@ const program = Effect.gen(function* () {
 
   // Send to Emacs — PermissionRequest and AskUserQuestionIntercept use bidirectional wait
   if (eventName === "PermissionRequest") {
-    const toolName = inputData.tool_name || "unknown";
+    const toolName = enrichedData.tool_name || "unknown";
     yield* Effect.logWarning(`PermissionRequest: waiting for Emacs response [tool=${toolName}, session=${sessionId}]`);
     const response = yield* socket.sendAndWait({
       event: eventName,
       session_id: sessionId,
       cwd,
       pid,
-      data: inputData,
+      data: enrichedData,
       hook_input: rawHookInput,
     });
 
@@ -234,7 +231,7 @@ const program = Effect.gen(function* () {
       session_id: sessionId,
       cwd,
       pid,
-      data: inputData,
+      data: enrichedData,
       hook_input: rawHookInput,
     });
     const output = (response && response.hookSpecificOutput)

@@ -7,6 +7,7 @@ import { join } from "path";
 export interface BridgeConfigData {
   readonly socketPath: string;
   readonly dumpDir: string | undefined;
+  readonly dumpEnabled: boolean;
   readonly noAutoApprove: boolean;
   readonly claudePid: number | null;
   readonly tempId: string | null;
@@ -30,6 +31,7 @@ export const BridgeConfigLive = Layer.effect(
       ?? (sockDir ? join(sockDir, "claude-gravity.sock") : join(home, ".local", "state", "claude-gravity.sock"));
 
     const dumpDir = yield* io.getEnv("CLAUDE_GRAVITY_DUMP_DIR");
+    const dumpEnabled = !!dumpDir || (yield* io.getEnv("CLAUDE_GRAVITY_DUMP")) === "1";
     const noAutoApprove = (yield* io.getEnv("CLAUDE_GRAVITY_NO_AUTO_APPROVE")) === "1";
     const claudePidStr = yield* io.getEnv("CLAUDE_PID");
     const claudePid = claudePidStr ? parseInt(claudePidStr, 10) || null : null;
@@ -64,6 +66,7 @@ export const BridgeConfigLive = Layer.effect(
     return {
       socketPath,
       dumpDir,
+      dumpEnabled,
       noAutoApprove,
       claudePid,
       tempId,
@@ -77,6 +80,7 @@ export const BridgeConfigTest = (overrides?: Partial<BridgeConfigData>) =>
   Layer.succeed(BridgeConfig, {
     socketPath: "/tmp/test.sock",
     dumpDir: undefined,
+    dumpEnabled: false,
     noAutoApprove: false,
     claudePid: null,
     tempId: null,

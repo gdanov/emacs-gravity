@@ -2,9 +2,7 @@
 // This is the canonical location for all transcript parsing.
 // Both index.ts (one-shot bridge) and daemon-hooks.ts import from here.
 
-import { Effect, ServiceMap } from "effect";
-import { existsSync, readFileSync, statSync, openSync, readSync, closeSync, mkdirSync, writeFileSync } from "fs";
-import { join, dirname, basename } from "path";
+import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "fs";
 import { log } from "./log.js";
 
 // ============================================================================
@@ -372,110 +370,32 @@ export function extractSlug(transcriptPath: string): string | null {
 }
 
 // ============================================================================
-// Agent state helpers
+// Re-export agent state helpers from canonical location
 // ============================================================================
 
-export type AgentState = { [sessionId: string]: string[] };
+export type { AgentState } from "./agent-state.js";
+export {
+  readAgentState,
+  writeAgentState,
+  getAgentStatePath,
+  agentTranscriptPath,
+  transcriptHasToolUseId,
+  extractAgentToolIds,
+  attributeToolToAgent,
+} from "./agent-state.js";
 
-function getAgentStatePath(cwd: string, transcriptPath?: string): string | undefined {
-  // Prefer transcript-based path (new location alongside Claude's transcript)
-  if (transcriptPath) {
-    const transcriptDir = dirname(transcriptPath);
-    return join(transcriptDir, "gravity", "emacs-bridge-agents.json");
-  }
-  // Fallback to cwd-based path (legacy location)
-  return join(cwd, ".claude", "emacs-bridge-agents.json");
-}
-
-export function readAgentState(cwd: string, transcriptPath?: string): AgentState {
-  const statePath = getAgentStatePath(cwd, transcriptPath);
-  if (!statePath) return {};
-  
-  try {
-    if (existsSync(statePath)) {
-      return JSON.parse(readFileSync(statePath, "utf-8"));
-    }
-  } catch {}
-  return {};
-}
-
-export function writeAgentState(cwd: string, transcriptPath: string | undefined, state: AgentState): void {
-  const statePath = getAgentStatePath(cwd, transcriptPath);
-  if (!statePath) return;
-  
-  try {
-    const dir = dirname(statePath);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(statePath, JSON.stringify(state), "utf-8");
-  } catch {}
-}
-
-export function agentTranscriptPath(transcriptPath: string, sessionId: string, agentId: string): string {
-  const transcriptDir = dirname(transcriptPath);
-  const sessionBase = basename(transcriptPath, ".jsonl");
-  return join(transcriptDir, sessionBase, "subagents", `agent-${agentId}.jsonl`);
-}
-
-export function transcriptHasToolUseId(agentTranscript: string, toolUseId: string): boolean {
-  try {
-    if (!existsSync(agentTranscript)) return false;
-    const content = readTail(agentTranscript, 5 * 1024 * 1024);
-    const lines = content.split("\n").filter((l) => l.length > 0);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const obj = JSON.parse(lines[i]);
-        if (obj.type !== "assistant") continue;
-        const c = obj.message?.content;
-        if (!Array.isArray(c)) continue;
-        for (const block of c) {
-          if (block.type === "tool_use" && block.id === toolUseId) return true;
-        }
-      } catch { continue; }
-    }
-  } catch {}
-  return false;
-}
-
-export function extractAgentToolIds(agentTranscript: string): string[] {
-  const ids: string[] = [];
-  try {
-    if (!existsSync(agentTranscript)) return ids;
-    const content = readFileSync(agentTranscript, "utf-8");
-    const lines = content.split("\n").filter((l) => l.length > 0);
-    for (const line of lines) {
-      try {
-        const obj = JSON.parse(line);
-        if (obj.type !== "assistant") continue;
-        const c = obj.message?.content;
-        if (!Array.isArray(c)) continue;
-        for (const block of c) {
-          if (block.type === "tool_use" && block.id) ids.push(block.id);
-        }
-      } catch { continue; }
-    }
-  } catch {}
-  return ids;
-}
-
-export function attributeToolToAgent(
-  sessionId: string, cwd: string, transcriptPath: string | undefined,
-  toolUseId: string, activeAgents: string[]
-): { parentAgentId: string | null; candidateAgentIds?: string[] } {
-  if (activeAgents.length === 0) return { parentAgentId: null };
-  if (activeAgents.length === 1) return { parentAgentId: activeAgents[0] };
-  if (transcriptPath && toolUseId) {
-    for (const agentId of activeAgents) {
-      const atp = agentTranscriptPath(transcriptPath, sessionId, agentId);
-      if (transcriptHasToolUseId(atp, toolUseId)) {
-        return { parentAgentId: agentId };
-      }
-    }
-  }
-  return { parentAgentId: "ambiguous", candidateAgentIds: [...activeAgents] };
-}
+import type { AgentState } from "./agent-state.js";
+import {
+  readAgentState,
+  agentTranscriptPath,
+  extractAgentToolIds,
+  attributeToolToAgent,
+  writeAgentState,
+} from "./agent-state.js";
+import type { HookData } from "./types.js";
 
 // ============================================================================
-// Event enrichment (used by one-shot bridge and daemon hooks)
+// Event enrichment (used by daemon hooks)
 // ============================================================================
 
 /**
@@ -484,62 +404,64 @@ export function attributeToolToAgent(
  * Returns a new enriched object (does not mutate input).
  */
 export function enrichEvent(
-  inputData: any,
+  inputData: HookData,
   eventName: string,
   opts?: {
     agentState?: AgentState;
     stopSnapshotBytes?: number;
   }
-): any {
+): HookData {
   const sessionId = inputData.session_id || "unknown";
   const cwd = inputData.cwd || "";
   const transcriptPath = inputData.transcript_path;
 
-  let result: any = { ...inputData };
+  const updates: Partial<HookData> = {};
 
   // Session metadata (slug)
   if (transcriptPath) {
     try {
       const slug = extractSlug(transcriptPath);
-      if (slug) {
-        result = { ...result, slug };
-      }
+      if (slug) updates.slug = slug;
     } catch {}
   }
 
-  const agentState = opts?.agentState ?? (cwd ? readAgentState(cwd) : {});
+  const agentState = opts?.agentState ?? (cwd ? readAgentState(cwd, transcriptPath) : {});
 
   // SubagentStart
   if (eventName === "SubagentStart") {
-    const agentId = result.agent_id;
+    const agentId = inputData.agent_id;
     if (agentId && transcriptPath) {
-      result = {
-        ...result,
-        agent_transcript_path: agentTranscriptPath(transcriptPath, sessionId, agentId),
-      };
+      updates.agent_transcript_path = agentTranscriptPath(transcriptPath, sessionId, agentId);
     }
   }
 
   // SubagentStop
   if (eventName === "SubagentStop") {
-    const agentId = result.agent_id;
+    const agentId = inputData.agent_id;
     if (agentId && transcriptPath) {
       const atp = agentTranscriptPath(transcriptPath, sessionId, agentId);
       const toolIds = extractAgentToolIds(atp);
 
-      let text = "";
-      let thinking = "";
+      updates.agent_transcript_path = atp;
+      if (toolIds.length > 0) updates.agent_tool_ids = toolIds;
+
       try {
         const extracted = extractTrailingText(atp);
-        text = extracted.text;
-        thinking = extracted.thinking;
+        if (extracted.text) updates.agent_stop_text = extracted.text;
+        if (extracted.thinking) updates.agent_stop_thinking = extracted.thinking;
       } catch {}
+    }
+  }
 
-      const updates: any = { agent_transcript_path: atp };
-      if (toolIds.length > 0) updates.agent_tool_ids = toolIds;
-      if (text) updates.agent_stop_text = text;
-      if (thinking) updates.agent_stop_thinking = thinking;
-      result = { ...result, ...updates };
+  // SessionEnd: clean up agent state
+  if (eventName === "SessionEnd") {
+    if (cwd) {
+      const state = readAgentState(cwd, transcriptPath);
+      if (state[sessionId]) {
+        delete state[sessionId];
+        writeAgentState(cwd, transcriptPath, state);
+        log(`enrichEvent: cleaned up agent state for session ${sessionId}`, 'info');
+      }
     }
   }
 
@@ -547,49 +469,42 @@ export function enrichEvent(
   if (eventName === "PreToolUse" || eventName === "PostToolUse" || eventName === "PostToolUseFailure") {
     const activeAgents = agentState[sessionId] || [];
     if (activeAgents.length > 0) {
-      const toolUseId = result.tool_use_id || "";
+      const toolUseId = inputData.tool_use_id || "";
       const { parentAgentId, candidateAgentIds } = attributeToolToAgent(
         sessionId, cwd, transcriptPath, toolUseId, activeAgents
       );
       if (parentAgentId) {
-        const updates: any = { parent_agent_id: parentAgentId };
+        updates.parent_agent_id = parentAgentId;
         if (candidateAgentIds) updates.candidate_agent_ids = candidateAgentIds;
-        result = { ...result, ...updates };
       }
     }
   }
 
   // PreToolUse enrichment
   if (eventName === "PreToolUse") {
-    const toolUseId = result.tool_use_id;
-    const parentAgentId = result.parent_agent_id;
+    const toolUseId = inputData.tool_use_id;
+    const parentAgentId = updates.parent_agent_id || inputData.parent_agent_id;
     const effectiveTranscript = (parentAgentId && parentAgentId !== "ambiguous" && transcriptPath)
       ? agentTranscriptPath(transcriptPath, sessionId, parentAgentId)
       : transcriptPath;
     if (effectiveTranscript && toolUseId) {
       try {
         const { text, thinking, model } = extractPrecedingContent(effectiveTranscript, toolUseId);
-        const updates: any = {};
         if (text) updates.assistant_text = text;
         if (thinking) updates.assistant_thinking = thinking;
         if (model) updates.model = model;
-        if (Object.keys(updates).length > 0) {
-          result = { ...result, ...updates };
-        }
       } catch {}
     }
   }
 
   // PostToolUse/PostToolUseFailure enrichment
   if (eventName === "PostToolUse" || eventName === "PostToolUseFailure") {
-    const toolUseId = result.tool_use_id;
-    const parentAgentId = result.parent_agent_id;
+    const toolUseId = inputData.tool_use_id;
+    const parentAgentId = updates.parent_agent_id || inputData.parent_agent_id;
     const effectiveTranscript = (parentAgentId && parentAgentId !== "ambiguous" && transcriptPath)
       ? agentTranscriptPath(transcriptPath, sessionId, parentAgentId)
       : transcriptPath;
-    
-    const updates: any = {};
-    
+
     if (effectiveTranscript && toolUseId) {
       try {
         const { text, thinking } = extractFollowingContent(effectiveTranscript, toolUseId);
@@ -597,23 +512,17 @@ export function enrichEvent(
         if (thinking) updates.post_tool_thinking = thinking;
       } catch {}
     }
-    
+
     if (transcriptPath) {
       try {
         updates.token_usage = extractTokenUsage(transcriptPath);
       } catch {}
-    }
-    
-    if (Object.keys(updates).length > 0) {
-      result = { ...result, ...updates };
     }
   }
 
   // Stop enrichment
   if (eventName === "Stop") {
     if (transcriptPath) {
-      const updates: any = {};
-      
       try {
         const snapshotBytes = opts?.stopSnapshotBytes ?? (() => {
           try { return statSync(transcriptPath).size; } catch { return undefined; }
@@ -622,16 +531,13 @@ export function enrichEvent(
         if (text) updates.stop_text = text;
         if (thinking) updates.stop_thinking = thinking;
       } catch {}
-      
+
       try {
         updates.token_usage = extractTokenUsage(transcriptPath);
       } catch {}
-      
-      if (Object.keys(updates).length > 0) {
-        result = { ...result, ...updates };
-      }
     }
   }
 
-  return result;
+  // Single spread at the end
+  return Object.keys(updates).length > 0 ? { ...inputData, ...updates } : inputData;
 }
