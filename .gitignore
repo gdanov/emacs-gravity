@@ -1,5 +1,5 @@
-emacs-bridge/node_modules
-/emacs-bridge/dist/
+node_modules/
+packages/*/dist/
 emacs-bridge-agents.json
 .claude/
 */.claude/

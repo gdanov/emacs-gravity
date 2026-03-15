@@ -369,14 +369,14 @@ Uses :agent-index hash table for O(1) lookup."
 
 ;;; Turn tree structure
 ;;
-;; The turn tree mirrors the screen: Session → Turns → Cycles → Tools.
+;; The turn tree mirrors the screen: Session → Turns → Steps → Tools.
 ;; Hooks write directly to the tree; the renderer iterates it.
 
 (defun claude-gravity--make-turn-node (turn-number)
   "Create a new turn node alist for TURN-NUMBER."
   (list (cons 'turn-number turn-number)
         (cons 'prompt nil)
-        (cons 'cycles (claude-gravity--tlist-new))
+        (cons 'steps (claude-gravity--tlist-new))
         (cons 'agents (claude-gravity--tlist-new))
         (cons 'tasks nil)
         (cons 'tool-count 0)
@@ -387,8 +387,8 @@ Uses :agent-index hash table for O(1) lookup."
         (cons 'token-in nil)
         (cons 'token-out nil)))
 
-(defun claude-gravity--make-cycle-node (&optional thinking text)
-  "Create a new cycle node alist with optional THINKING and TEXT."
+(defun claude-gravity--make-step-node (&optional thinking text)
+  "Create a new step node alist with optional THINKING and TEXT."
   (list (cons 'thinking thinking)
         (cons 'text text)
         (cons 'tools (claude-gravity--tlist-new))))
@@ -402,15 +402,15 @@ Uses :agent-index hash table for O(1) lookup."
   (cl-find turn-number (claude-gravity--tlist-items (plist-get session :turns))
            :key (lambda (t-node) (alist-get 'turn-number t-node))))
 
-(defun claude-gravity--current-cycle (turn-node)
-  "Return the current (last) cycle from TURN-NODE, or nil."
-  (claude-gravity--tlist-last-item (alist-get 'cycles turn-node)))
+(defun claude-gravity--current-step (turn-node)
+  "Return the current (last) step from TURN-NODE, or nil."
+  (claude-gravity--tlist-last-item (alist-get 'steps turn-node)))
 
-(defun claude-gravity--ensure-cycle (turn-node &optional thinking text)
-  "Return current cycle in TURN-NODE, creating one if empty.
-If THINKING or TEXT differ from current cycle, start a new cycle."
-  (let* ((cycles-tl (alist-get 'cycles turn-node))
-         (current (claude-gravity--tlist-last-item cycles-tl)))
+(defun claude-gravity--ensure-step (turn-node &optional thinking text)
+  "Return current step in TURN-NODE, creating one if empty.
+If THINKING or TEXT differ from current step, start a new step."
+  (let* ((steps-tl (alist-get 'steps turn-node))
+         (current (claude-gravity--tlist-last-item steps-tl)))
     (if (and current
              (not (and thinking
                        (not (equal thinking (alist-get 'thinking current)))))
@@ -420,14 +420,14 @@ If THINKING or TEXT differ from current cycle, start a new cycle."
                        (not (string-empty-p (alist-get 'text current)))
                        (not (claude-gravity--text-subsumes-p text (alist-get 'text current))))))
         current
-      ;; Create new cycle
-      (let ((new-cycle (claude-gravity--make-cycle-node thinking text)))
-        (claude-gravity--tlist-append cycles-tl new-cycle)
-        new-cycle))))
+      ;; Create new step
+      (let ((new-step (claude-gravity--make-step-node thinking text)))
+        (claude-gravity--tlist-append steps-tl new-step)
+        new-step))))
 
 (defun claude-gravity--tree-add-tool (session tool &optional agent-id)
   "Add TOOL to SESSION's turn tree, routing based on AGENT-ID.
-Handles cycle boundary detection at insertion time."
+Handles step boundary detection at insertion time."
   (let* ((turn-num (or (alist-get 'turn tool) 0))
          (turn-node (or (claude-gravity--get-turn-node session turn-num)
                         (claude-gravity--current-turn-node session)))
@@ -435,22 +435,22 @@ Handles cycle boundary detection at insertion time."
          (atext (alist-get 'assistant_text tool)))
     (when turn-node
       (if (and agent-id (not (equal agent-id "ambiguous")))
-          ;; Route to agent's cycles
+          ;; Route to agent's steps
           (let ((agent (claude-gravity--find-agent session agent-id)))
             (when agent
-              (let* ((agent-cycles (alist-get 'cycles agent))
-                     (cycle (if (not (claude-gravity--tlist-items agent-cycles))
-                                ;; First cycle for this agent
-                                (let ((c (claude-gravity--make-cycle-node athink atext)))
-                                  (claude-gravity--tlist-append agent-cycles c)
-                                  c)
-                              (claude-gravity--agent-ensure-cycle agent athink atext))))
-                (claude-gravity--tlist-append (alist-get 'tools cycle) tool)
+              (let* ((agent-steps (alist-get 'steps agent))
+                     (step (if (not (claude-gravity--tlist-items agent-steps))
+                               ;; First step for this agent
+                               (let ((s (claude-gravity--make-step-node athink atext)))
+                                 (claude-gravity--tlist-append agent-steps s)
+                                 s)
+                             (claude-gravity--agent-ensure-step agent athink atext))))
+                (claude-gravity--tlist-append (alist-get 'tools step) tool)
                 (cl-incf (alist-get 'tool-count agent)))))
-        ;; Route to turn's root cycles (including ambiguous)
-        (let* ((cycles-tl (alist-get 'cycles turn-node))
-               (current (claude-gravity--tlist-last-item cycles-tl))
-               ;; Dedup: if same assistant_text as current cycle, clear it (parallel call)
+        ;; Route to turn's root steps (including ambiguous)
+        (let* ((steps-tl (alist-get 'steps turn-node))
+               (current (claude-gravity--tlist-last-item steps-tl))
+               ;; Dedup: if same assistant_text as current step, clear it (parallel call)
                (atext (if (and atext current
                                (equal atext (alist-get 'text current)))
                           (progn (setf (alist-get 'assistant_text tool) nil) nil)
@@ -459,39 +459,39 @@ Handles cycle boundary detection at insertion time."
                                 (equal athink (alist-get 'thinking current)))
                            (progn (setf (alist-get 'assistant_thinking tool) nil) nil)
                          athink))
-               ;; Start new cycle if we have new assistant text
-               (cycle (if (or (not current)
-                              (and atext (not (string-empty-p atext))
-                                   (alist-get 'text current)
-                                   (not (string-empty-p (alist-get 'text current)))
-                                   (not (claude-gravity--text-subsumes-p atext (alist-get 'text current))))
-                              (and athink (not (string-empty-p athink))
-                                   (alist-get 'thinking current)
-                                   (not (string-empty-p (alist-get 'thinking current)))
-                                   (not (equal athink (alist-get 'thinking current)))))
-                          ;; New cycle
-                          (let ((c (claude-gravity--make-cycle-node athink atext)))
-                            (claude-gravity--tlist-append cycles-tl c)
-                            c)
-                        ;; Reuse current cycle, but set text/thinking if not yet set
-                        (progn
-                          (when (and atext (not (string-empty-p atext))
-                                     (or (not (alist-get 'text current))
-                                         (string-empty-p (alist-get 'text current))))
-                            (setf (alist-get 'text current) atext))
-                          (when (and athink (not (string-empty-p athink))
-                                     (or (not (alist-get 'thinking current))
-                                         (string-empty-p (alist-get 'thinking current))))
-                            (setf (alist-get 'thinking current) athink))
-                          current))))
-          (claude-gravity--tlist-append (alist-get 'tools cycle) tool)
+               ;; Start new step if we have new assistant text
+               (step (if (or (not current)
+                             (and atext (not (string-empty-p atext))
+                                  (alist-get 'text current)
+                                  (not (string-empty-p (alist-get 'text current)))
+                                  (not (claude-gravity--text-subsumes-p atext (alist-get 'text current))))
+                             (and athink (not (string-empty-p athink))
+                                  (alist-get 'thinking current)
+                                  (not (string-empty-p (alist-get 'thinking current)))
+                                  (not (equal athink (alist-get 'thinking current)))))
+                         ;; New step
+                         (let ((s (claude-gravity--make-step-node athink atext)))
+                           (claude-gravity--tlist-append steps-tl s)
+                           s)
+                       ;; Reuse current step, but set text/thinking if not yet set
+                       (progn
+                         (when (and atext (not (string-empty-p atext))
+                                    (or (not (alist-get 'text current))
+                                        (string-empty-p (alist-get 'text current))))
+                           (setf (alist-get 'text current) atext))
+                         (when (and athink (not (string-empty-p athink))
+                                    (or (not (alist-get 'thinking current))
+                                        (string-empty-p (alist-get 'thinking current))))
+                           (setf (alist-get 'thinking current) athink))
+                         current))))
+          (claude-gravity--tlist-append (alist-get 'tools step) tool)
           ;; Only increment turn tool count for root (non-agent) tools
           (cl-incf (alist-get 'tool-count turn-node)))))))
 
-(defun claude-gravity--agent-ensure-cycle (agent &optional thinking text)
-  "Ensure AGENT has a current cycle, creating new one if needed."
-  (let* ((cycles-tl (alist-get 'cycles agent))
-         (current (claude-gravity--tlist-last-item cycles-tl)))
+(defun claude-gravity--agent-ensure-step (agent &optional thinking text)
+  "Ensure AGENT has a current step, creating new one if needed."
+  (let* ((steps-tl (alist-get 'steps agent))
+         (current (claude-gravity--tlist-last-item steps-tl)))
     (if (and current
              (not (and text
                        (not (string-empty-p text))
@@ -509,10 +509,10 @@ Handles cycle boundary detection at insertion time."
                          (string-empty-p (alist-get 'thinking current))))
             (setf (alist-get 'thinking current) thinking))
           current)
-      ;; New cycle
-      (let ((c (claude-gravity--make-cycle-node thinking text)))
-        (claude-gravity--tlist-append cycles-tl c)
-        c))))
+      ;; New step
+      (let ((s (claude-gravity--make-step-node thinking text)))
+        (claude-gravity--tlist-append steps-tl s)
+        s))))
 
 (defun claude-gravity--tree-add-agent (session agent)
   "Add AGENT to current turn node's agents tlist in SESSION."
@@ -527,13 +527,13 @@ Handles cycle boundary detection at insertion time."
   "Link AGENT to its spawning Task tool in TURN-NODE.
 Scans recent tools in the turn for an unlinked Task tool matching agent type."
   (let* ((atype (alist-get 'type agent))
-         (cycles (claude-gravity--tlist-items (alist-get 'cycles turn-node)))
+         (steps (claude-gravity--tlist-items (alist-get 'steps turn-node)))
          (found nil))
     (when atype
-      ;; Scan cycles in reverse (most recent first) for matching unlinked Task tool
-      (dolist (cycle (reverse cycles))
+      ;; Scan steps in reverse (most recent first) for matching unlinked Task tool
+      (dolist (step (reverse steps))
         (unless found
-          (dolist (tool (reverse (claude-gravity--tlist-items (alist-get 'tools cycle))))
+          (dolist (tool (reverse (claude-gravity--tlist-items (alist-get 'tools step))))
             (when (and (not found)
                        (equal (alist-get 'name tool) "Task")
                        (equal (alist-get 'subagent_type (alist-get 'input tool)) atype)
@@ -713,9 +713,9 @@ Returns a list of (TURN-NUMBER . TOOL) pairs sorted by turn order."
     (dolist (turn-node (claude-gravity--tlist-items (plist-get session :turns)))
       (let ((turn-num (alist-get 'number turn-node)))
         (cl-labels
-            ((collect-from-cycles (cycles-tl)
-               (dolist (cycle (when cycles-tl (claude-gravity--tlist-items cycles-tl)))
-                 (dolist (tool (claude-gravity--tlist-items (alist-get 'tools cycle)))
+            ((collect-from-steps (steps-tl)
+               (dolist (step (when steps-tl (claude-gravity--tlist-items steps-tl)))
+                 (dolist (tool (claude-gravity--tlist-items (alist-get 'tools step)))
                    (when (and (member (alist-get 'name tool) '("Edit" "Write"))
                               (equal (alist-get 'file_path (alist-get 'input tool))
                                      file-path))
@@ -723,8 +723,8 @@ Returns a list of (TURN-NUMBER . TOOL) pairs sorted by turn order."
                    ;; Check agent sub-tools
                    (let ((agent (alist-get 'agent tool)))
                      (when agent
-                       (collect-from-cycles (alist-get 'cycles agent))))))))
-          (collect-from-cycles (alist-get 'cycles turn-node)))))
+                       (collect-from-steps (alist-get 'steps agent))))))))
+          (collect-from-steps (alist-get 'steps turn-node)))))
     (nreverse result)))
 
 (defun claude-gravity-model-find-tool (session tool-use-id)

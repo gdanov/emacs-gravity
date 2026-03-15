@@ -1,6 +1,6 @@
 import { existsSync, statSync } from "fs";
 import { log } from "./log.js";
-import type { HookData } from "./types.js";
+import type { HookData } from "@gravity/shared";
 import {
   extractPrecedingContent,
   extractFollowingContent,

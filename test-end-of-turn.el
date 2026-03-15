@@ -119,14 +119,14 @@ AGENTS is a list of agent alists.  Returns the buffer."
 (defun test-eot--make-turn-with-tool (turn-number &optional post-text post-thinking)
   "Create a turn node with one tool that has POST-TEXT and POST-THINKING."
   (let* ((turn (claude-gravity--make-turn-node turn-number))
-         (cycle (claude-gravity--make-cycle-node nil nil))
+         (step (claude-gravity--make-step-node nil nil))
          (tool (list (cons 'tool_use_id (format "tool_%d" turn-number))
                      (cons 'name "Read")
                      (cons 'status "done")
                      (cons 'post_text post-text)
                      (cons 'post_thinking post-thinking))))
-    (claude-gravity--tlist-append (alist-get 'cycles turn) cycle)
-    (claude-gravity--tlist-append (alist-get 'tools cycle) tool)
+    (claude-gravity--tlist-append (alist-get 'steps turn) step)
+    (claude-gravity--tlist-append (alist-get 'tools step) tool)
     turn))
 
 
@@ -397,9 +397,9 @@ AGENTS is a list of agent alists.  Returns the buffer."
             (should (string-match-p "more context"
                       (test-eot--buffer-text-with-face buf 'claude-gravity-agent-stop-text)))
             ;; Verify the tool's post_text was cleared
-            (let* ((cycles (claude-gravity--tlist-items (alist-get 'cycles turn)))
-                   (last-cycle (car (last cycles)))
-                   (tools (claude-gravity--tlist-items (alist-get 'tools last-cycle)))
+            (let* ((steps (claude-gravity--tlist-items (alist-get 'steps turn)))
+                   (last-step (car (last steps)))
+                   (tools (claude-gravity--tlist-items (alist-get 'tools last-step)))
                    (last-tool (car (last tools))))
               (should (null (alist-get 'post_text last-tool)))))
         (kill-buffer buf)))))

@@ -1,9 +1,9 @@
 import { Effect, Layer, pipe } from "effect";
 import { join } from "path";
 import { log, initLogForSession } from "./log.js";
-import { isSafeBashCommand } from "./safe-bash.js";
+import { isSafeBashCommand } from "@gravity/shared";
+import type { HookData } from "@gravity/shared";
 import { nextDumpSeq, writeDumpFile } from "./dump.js";
-import type { HookData } from "./types.js";
 import {
   enrichSessionMetadata,
   enrichSubagentStart,
@@ -19,9 +19,11 @@ import { BridgeConfig, BridgeConfigLive } from "./services/config.js";
 import { Fs, FsLive } from "./services/fs.js";
 import { LoggerLive } from "./services/logger.js";
 import { EmacsSocket, EmacsSocketLive } from "./services/emacs-socket.js";
+import { HookSocketClient, HookSocketClientLive } from "./services/hook-socket.js";
+import type { HookSocketMessage, HookEventName } from "@gravity/shared";
 
 // Re-export types and transcript functions
-export type { HookData, TokenUsage } from "./types.js";
+export type { HookData, TokenUsage } from "@gravity/shared";
 export {
   readTail,
   readHead,
@@ -48,6 +50,7 @@ const program = Effect.gen(function* () {
   const io = yield* Effect.service(ProcessIO);
   const fs = yield* Effect.service(Fs);
   const socket = yield* Effect.service(EmacsSocket);
+  const hookSocket = yield* Effect.service(HookSocketClient);
   const config = yield* Effect.service(BridgeConfig);
 
   yield* Effect.logDebug(`Process started: ${process.argv.join(" ")}`);
@@ -127,6 +130,20 @@ const program = Effect.gen(function* () {
       event: eventName, session_id: sessionId, cwd, pid, data: enrichedData,
     });
   }
+
+  // --- Forward to gravity-server hook socket (fire-and-forget, informational) ---
+  const hookMsg: HookSocketMessage = {
+    event: eventName as HookEventName,
+    session_id: sessionId,
+    cwd,
+    pid,
+    source: "bridge",
+    data: enrichedData,
+    needs_response: eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept",
+  };
+  yield* hookSocket.send(hookMsg).pipe(
+    Effect.catch(() => Effect.logDebug("Hook socket send failed (server unavailable)"))
+  );
 
   // --- Routing ---
 
@@ -292,7 +309,7 @@ const socketPathFromEnv = (() => {
   return join(home, ".local", "state", "claude-gravity.sock");
 })();
 
-const FullLayer = Layer.mergeAll(MainLive, ConfigLayer, EmacsSocketLive(socketPathFromEnv));
+const FullLayer = Layer.mergeAll(MainLive, ConfigLayer, EmacsSocketLive(socketPathFromEnv), HookSocketClientLive);
 
 // --- Entry point ---
 const args = process.argv.slice(2);

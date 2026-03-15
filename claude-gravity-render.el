@@ -82,29 +82,29 @@
 
 
 (defun claude-gravity--insert-turn-children-from-tree (turn-node)
-  "Insert response cycles, agent branches, and tasks from TURN-NODE's tree.
-Cycles are pre-computed — no dedup or grouping needed."
-  (let* ((cycles-tl (alist-get 'cycles turn-node))
-         (cycles (when cycles-tl (claude-gravity--tlist-items cycles-tl)))
-         (n-cycles (length cycles))
-         (cycle-idx 0)
+  "Insert response steps, agent branches, and tasks from TURN-NODE's tree.
+Steps are pre-computed — no dedup or grouping needed."
+  (let* ((steps-tl (alist-get 'steps turn-node))
+         (steps (when steps-tl (claude-gravity--tlist-items steps-tl)))
+         (n-steps (length steps))
+         (step-idx 0)
          (tasks (alist-get 'tasks turn-node)))
-    ;; Render cycles
-    (when (> n-cycles 0)
-      (dolist (cycle cycles)
-        (let* ((is-last (= cycle-idx (1- n-cycles)))
-               (cycle-tools (claude-gravity--tlist-items (alist-get 'tools cycle)))
+    ;; Render steps
+    (when (> n-steps 0)
+      (dolist (step steps)
+        (let* ((is-last (= step-idx (1- n-steps)))
+               (step-tools (claude-gravity--tlist-items (alist-get 'tools step)))
                (all-done (cl-every (lambda (item) (equal (alist-get 'status item) "done"))
-                                   cycle-tools))
+                                   step-tools))
                (should-collapse (and (not is-last) all-done))
-               (athink (alist-get 'thinking cycle))
-               (atext (alist-get 'text cycle))
+               (athink (alist-get 'thinking step))
+               (atext (alist-get 'text step))
                (athink (when athink (string-trim athink)))
                (atext (when atext (string-trim atext)))
                (split (when (and atext (not (string-empty-p atext)))
                         (claude-gravity--split-margin-text atext 'claude-gravity-assistant-text)))
-               (tools-label (format "%d tool%s" (length cycle-tools)
-                                    (if (= (length cycle-tools) 1) "" "s"))))
+               (tools-label (format "%d tool%s" (length step-tools)
+                                    (if (= (length step-tools) 1) "" "s"))))
           ;; Thinking stays outside the section (always visible)
           (when (and athink (not (string-empty-p athink)))
             (let* ((indent (or (* (claude-gravity--section-depth) claude-gravity--indent-step) 0))
@@ -113,8 +113,8 @@ Cycles are pre-computed — no dedup or grouping needed."
                    (prefix (concat (make-string indent ?\s) margin)))
               (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
               (claude-gravity--insert-wrapped athink (+ indent 4) 'claude-gravity-thinking)))
-          ;; Response cycle section
-          (magit-insert-section (response-cycle cycle-idx should-collapse)
+          ;; Response step section
+          (magit-insert-section (response-step step-idx should-collapse)
             (magit-insert-heading
               (if split
                   (car split)
@@ -136,15 +136,15 @@ Cycles are pre-computed — no dedup or grouping needed."
                                           'face 'claude-gravity-detail-label)
                               (propertize tools-label 'face 'claude-gravity-detail-label))))
             ;; Tools — first tool's context already rendered as heading
-            (when cycle-tools
-              (claude-gravity--insert-tool-item-from-tree (car cycle-tools))
-              (dolist (item (cdr cycle-tools))
+            (when step-tools
+              (claude-gravity--insert-tool-item-from-tree (car step-tools))
+              (dolist (item (cdr step-tools))
                 (claude-gravity--insert-tool-context item)
                 (claude-gravity--insert-tool-item-from-tree item))))
-          ;; Separator between cycles
+          ;; Separator between steps
           (unless is-last
             (claude-gravity--turn-separator)))
-        (cl-incf cycle-idx)))
+        (cl-incf step-idx)))
     ;; Tasks subsection at the end
     (when (and tasks (> (length tasks) 0))
       (let ((sorted (sort (copy-sequence tasks)
@@ -172,7 +172,7 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
          (agent (alist-get 'agent item)))
     ;; Skip AskUserQuestion (shown as prompt entries)
     (unless (equal name "AskUserQuestion")
-      (if (and agent (> (claude-gravity--tlist-length (alist-get 'cycles agent)) 0))
+      (if (and agent (> (claude-gravity--tlist-length (alist-get 'steps agent)) 0))
           ;; Agent with tools → render as agent branch
           (claude-gravity--insert-agent-branch-from-tree item agent)
         ;; Regular tool or agent without tools
@@ -294,7 +294,7 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
 
 
 (defun claude-gravity--insert-agent-branch-from-tree (item agent &optional depth)
-  "Insert ITEM (a Task tool) as a sub-branch with AGENT's nested cycles from tree.
+  "Insert ITEM (a Task tool) as a sub-branch with AGENT's nested steps from tree.
 DEPTH tracks nesting level for background tint."
   (let* ((name (alist-get 'name item))
          (status (alist-get 'status item))
@@ -350,8 +350,8 @@ DEPTH tracks nesting level for background tint."
                                model-badge
                                tool-count-str
                                dur-str))
-         (agent-cycles (claude-gravity--tlist-items (alist-get 'cycles agent)))
-         (collapsed (and agent-done-p (not (null agent-cycles))))
+         (agent-steps (claude-gravity--tlist-items (alist-get 'steps agent)))
+         (collapsed (and agent-done-p (not (null agent-steps))))
          (tool-use-id (alist-get 'tool_use_id item)))
     (let ((section-start (point)))
       (magit-insert-section (tool tool-use-id collapsed)
@@ -370,27 +370,27 @@ DEPTH tracks nesting level for background tint."
                     (propertize (claude-gravity--tool-summary name input)
                                 'face 'claude-gravity-detail-label)
                     agent-suffix)))
-        ;; Render agent's cycles with agent-specific styling
+        ;; Render agent's steps with agent-specific styling
         (let ((claude-gravity--margin-face 'claude-gravity-agent-margin)
               (claude-gravity--agent-depth (1+ (or depth claude-gravity--agent-depth 0)))
               (body-start (point)))
-          (when agent-cycles
-            (let ((n-cycles (length agent-cycles))
-                  (cycle-idx 0))
-              (dolist (cycle agent-cycles)
-                (let* ((is-last (= cycle-idx (1- n-cycles)))
-                       (cycle-tools (claude-gravity--tlist-items (alist-get 'tools cycle)))
+          (when agent-steps
+            (let ((n-steps (length agent-steps))
+                  (step-idx 0))
+              (dolist (step agent-steps)
+                (let* ((is-last (= step-idx (1- n-steps)))
+                       (step-tools (claude-gravity--tlist-items (alist-get 'tools step)))
                        (all-done (cl-every (lambda (ti) (equal (alist-get 'status ti) "done"))
-                                           cycle-tools))
+                                           step-tools))
                        (should-collapse (and (not is-last) all-done))
-                       (athink (alist-get 'thinking cycle))
-                       (atext (alist-get 'text cycle))
+                       (athink (alist-get 'thinking step))
+                       (atext (alist-get 'text step))
                        (athink (when athink (string-trim athink)))
                        (atext (when atext (string-trim atext)))
                        (split (when (and atext (not (string-empty-p atext)))
                                 (claude-gravity--split-margin-text atext 'claude-gravity-assistant-text)))
-                       (tools-label (format "%d tool%s" (length cycle-tools)
-                                            (if (= (length cycle-tools) 1) "" "s"))))
+                       (tools-label (format "%d tool%s" (length step-tools)
+                                            (if (= (length step-tools) 1) "" "s"))))
                   ;; Thinking
                   (when (and athink (not (string-empty-p athink)))
                     (let* ((indent (or (* (claude-gravity--section-depth) claude-gravity--indent-step) 0))
@@ -399,8 +399,8 @@ DEPTH tracks nesting level for background tint."
                            (prefix (concat (make-string indent ?\s) margin)))
                       (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
                       (claude-gravity--insert-wrapped athink (+ indent 4) 'claude-gravity-thinking)))
-                  ;; Response cycle section
-                  (magit-insert-section (response-cycle cycle-idx should-collapse)
+                  ;; Response step section
+                  (magit-insert-section (response-step step-idx should-collapse)
                     (magit-insert-heading
                       (if split
                           (car split)
@@ -419,14 +419,14 @@ DEPTH tracks nesting level for background tint."
                                       (propertize (concat claude-gravity--margin-char " ")
                                                   'face 'claude-gravity-detail-label)
                                       (propertize tools-label 'face 'claude-gravity-detail-label))))
-                    (when cycle-tools
-                      (claude-gravity--insert-tool-item-from-tree (car cycle-tools))
-                      (dolist (ti (cdr cycle-tools))
+                    (when step-tools
+                      (claude-gravity--insert-tool-item-from-tree (car step-tools))
+                      (dolist (ti (cdr step-tools))
                         (claude-gravity--insert-tool-context ti)
                         (claude-gravity--insert-tool-item-from-tree ti))))
                   (unless is-last
                     (claude-gravity--turn-separator)))
-                (cl-incf cycle-idx))))
+                (cl-incf step-idx))))
           ;; Agent's trailing summary text
           (let ((agent-stop-think (alist-get 'stop_thinking agent))
                 (agent-stop-text (alist-get 'stop_text agent)))
@@ -439,7 +439,7 @@ DEPTH tracks nesting level for background tint."
               (claude-gravity--insert-wrapped-with-margin
                agent-stop-text nil 'claude-gravity-assistant-text)))
           ;; If no agent tools yet but agent is running, show status
-          (when (and (not agent-cycles) (not agent-done-p))
+          (when (and (not agent-steps) (not agent-done-p))
             (insert (format "%s%s\n"
                             (claude-gravity--indent)
                             (propertize "Agent running..." 'face 'claude-gravity-detail-label))))
@@ -464,11 +464,11 @@ Deduplicates against the last tool's post_text/post_thinking."
          (stop-text (or (alist-get 'stop_text turn-node)
                         (and (listp prompt-entry)
                              (alist-get 'stop_text prompt-entry)))))
-    ;; Find the last tool across all cycles for dedup
+    ;; Find the last tool across all steps for dedup
     (when (or stop-think stop-text)
-      (let* ((last-cycle (claude-gravity--tlist-last-item (alist-get 'cycles turn-node)))
-             (last-tool (when last-cycle
-                          (claude-gravity--tlist-last-item (alist-get 'tools last-cycle)))))
+      (let* ((last-step (claude-gravity--tlist-last-item (alist-get 'steps turn-node)))
+             (last-tool (when last-step
+                          (claude-gravity--tlist-last-item (alist-get 'tools last-step)))))
         (let ((last-post-text (when last-tool (alist-get 'post_text last-tool)))
               (last-post-think (when last-tool (alist-get 'post_thinking last-tool))))
           ;; Dedup stop_thinking vs last tool's post_thinking

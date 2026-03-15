@@ -1,12 +1,11 @@
 // safe-bash.ts — Auto-approve safe read-only Bash commands in PermissionRequest
 //
 // Classifies Bash commands as safe (read-only) or unsafe (potentially destructive).
-// Safe commands are auto-approved at the bridge level, skipping the Emacs permission UI.
+// Safe commands are auto-approved at the bridge level, skipping the permission UI.
 
 import type { HookData } from "./types.js";
 
 import { basename } from "path";
-import { log } from "./log.js";
 
 /** Commands that are inherently read-only regardless of arguments. */
 const SAFE_BINARIES = new Set([
@@ -111,10 +110,11 @@ function hasPerBinaryDangerousFlags(binary: string, segment: string): boolean {
 /**
  * Determine if a PermissionRequest payload is for a safe, read-only Bash command.
  * Returns true if the command can be auto-approved.
+ *
+ * Note: The caller is responsible for checking any "no auto-approve" configuration
+ * (e.g., CLAUDE_GRAVITY_NO_AUTO_APPROVE env var) before calling this function.
  */
 export function isSafeBashCommand(inputData: HookData): boolean {
-  if (process.env.CLAUDE_GRAVITY_NO_AUTO_APPROVE === "1") return false;
-
   const toolName = inputData.tool_name;
   if (toolName !== "Bash") return false;
 
@@ -124,10 +124,7 @@ export function isSafeBashCommand(inputData: HookData): boolean {
   const trimmed = command.trim();
 
   // Phase 1: Reject dangerous shell constructs
-  if (hasDangerousConstructs(trimmed)) {
-    log(`[auto-approve] REJECT (dangerous construct) — ${trimmed.substring(0, 100)}`, "debug");
-    return false;
-  }
+  if (hasDangerousConstructs(trimmed)) return false;
 
   // Phase 2: Every segment's binary must be in the safe list
   const segments = splitSegments(trimmed);
@@ -135,18 +132,11 @@ export function isSafeBashCommand(inputData: HookData): boolean {
 
   for (const seg of segments) {
     const binary = extractBinary(seg);
-    if (!binary || !SAFE_BINARIES.has(binary)) {
-      log(`[auto-approve] REJECT (unsafe binary: ${binary}) — ${trimmed.substring(0, 100)}`, "debug");
-      return false;
-    }
+    if (!binary || !SAFE_BINARIES.has(binary)) return false;
 
     // Phase 3: Per-binary dangerous flag checks
-    if (hasPerBinaryDangerousFlags(binary, seg)) {
-      log(`[auto-approve] REJECT (dangerous flags for ${binary}) — ${trimmed.substring(0, 100)}`, "debug");
-      return false;
-    }
+    if (hasPerBinaryDangerousFlags(binary, seg)) return false;
   }
 
-  log(`[auto-approve] ALLOW — ${trimmed.substring(0, 100)}`, "info");
   return true;
 }

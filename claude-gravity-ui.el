@@ -1607,7 +1607,7 @@ Strips gutter indicators (▎) that are used for display margins."
   "Collapse all sections and focus on the tail of the latest turn.
 Hides Plan, Files, Allow Patterns, and past turns.  When a
 stop-message follows the latest turn, shows only the stop-message
-summary.  Otherwise expands the last turn and its last cycle."
+summary.  Otherwise expands the last turn and its last step."
   (interactive)
   (when magit-root-section
     ;; Single pass: collapse all top-level sections, find turns section
@@ -1636,16 +1636,16 @@ summary.  Otherwise expands the last turn and its last cycle."
                     (with-selected-window win
                       (goto-char (oref last-stop start))
                       (recenter -3)))))
-            ;; No stop message: expand last turn and its last cycle
+            ;; No stop message: expand last turn and its last step
             (when last-turn
               (magit-section-show last-turn)
-              (let ((last-cycle nil))
+              (let ((last-step nil))
                 (dolist (child (oref last-turn children))
-                  (when (eq (oref child type) 'response-cycle)
+                  (when (eq (oref child type) 'response-step)
                     (magit-section-hide child)
-                    (setq last-cycle child)))
-                (when last-cycle
-                  (magit-section-show last-cycle)))
+                    (setq last-step child)))
+                (when last-step
+                  (magit-section-show last-step)))
               (let ((win (get-buffer-window (current-buffer))))
                 (when win
                   (with-selected-window win
@@ -1773,7 +1773,7 @@ Press `q' or `SPC' to dismiss and restore the previous layout."
 Returns nil if no meaningful content is available."
   (pcase type
     ('tool (claude-gravity--popup-tool-content value session))
-    ('response-cycle (claude-gravity--popup-cycle-content value session))
+    ('response-step (claude-gravity--popup-step-content value session))
     ('stop-message (claude-gravity--popup-stop-content value session))
     ('turn (claude-gravity--popup-turn-content value session))
     ('task (claude-gravity--popup-task-content value session))
@@ -1808,17 +1808,17 @@ Returns nil if no meaningful content is available."
               (when agent
                 (let ((stop-think (alist-get 'stop_thinking agent))
                       (stop-text (alist-get 'stop_text agent))
-                      (cycles (claude-gravity--tlist-items (alist-get 'cycles agent))))
+                      (steps (claude-gravity--tlist-items (alist-get 'steps agent))))
                   (when (and stop-think (stringp stop-think) (not (string-empty-p stop-think)))
                     (insert "## Agent Thinking\n\n" (claude-gravity--render-tables-in-text stop-think) "\n\n"))
                   (when (and stop-text (stringp stop-text) (not (string-empty-p stop-text)))
                     (insert "## Agent Summary\n\n" (claude-gravity--render-tables-in-text stop-text) "\n\n"))
-                  (when cycles
+                  (when steps
                     (insert "## Agent Tool History\n\n")
-                    (dolist (cycle cycles)
-                      (let ((tools (claude-gravity--tlist-items (alist-get 'tools cycle)))
-                            (athink (alist-get 'thinking cycle))
-                            (atext (alist-get 'text cycle)))
+                    (dolist (step steps)
+                      (let ((tools (claude-gravity--tlist-items (alist-get 'tools step)))
+                            (athink (alist-get 'thinking step))
+                            (atext (alist-get 'text step)))
                         (when (and athink (not (string-empty-p (string-trim athink))))
                           (insert "### Thinking\n\n" (string-trim athink) "\n\n"))
                         (when (and atext (not (string-empty-p (string-trim atext))))
@@ -2006,23 +2006,23 @@ NAME, INPUT used for context. STATUS for error display."
         (t "- [ ]")))
 
 
-(defun claude-gravity--popup-cycle-content (cycle-idx session)
-  "Generate full content for response cycle CYCLE-IDX in SESSION."
+(defun claude-gravity--popup-step-content (step-idx session)
+  "Generate full content for response step STEP-IDX in SESSION."
   (when session
     (let* ((turns-tl (plist-get session :turns))
            (turn-nodes (when turns-tl (claude-gravity--tlist-items turns-tl))))
       (catch 'found
         (dolist (tn turn-nodes)
-          (let* ((cycles-tl (alist-get 'cycles tn))
-                 (cycles (when cycles-tl (claude-gravity--tlist-items cycles-tl))))
-            (when (and cycles (< cycle-idx (length cycles)))
-              (let* ((cycle (nth cycle-idx cycles))
-                     (athink (alist-get 'thinking cycle))
-                     (atext (alist-get 'text cycle))
-                     (tools (claude-gravity--tlist-items (alist-get 'tools cycle))))
+          (let* ((steps-tl (alist-get 'steps tn))
+                 (steps (when steps-tl (claude-gravity--tlist-items steps-tl))))
+            (when (and steps (< step-idx (length steps)))
+              (let* ((step (nth step-idx steps))
+                     (athink (alist-get 'thinking step))
+                     (atext (alist-get 'text step))
+                     (tools (claude-gravity--tlist-items (alist-get 'tools step))))
                 (throw 'found
                        (with-temp-buffer
-                         (insert (format "# Response Cycle %d\n\n" cycle-idx))
+                         (insert (format "# Response Step %d\n\n" step-idx))
                          (when (and athink (not (string-empty-p (string-trim athink))))
                            (insert "## Thinking\n\n" (claude-gravity--render-tables-in-text (string-trim athink)) "\n\n"))
                          (when (and atext (not (string-empty-p (string-trim atext))))
@@ -2070,7 +2070,7 @@ NAME, INPUT used for context. STATUS for error display."
       (when tn
         (let* ((prompt (alist-get 'prompt tn))
                (prompt-text (when prompt (claude-gravity--prompt-text prompt)))
-               (cycles (claude-gravity--tlist-items (alist-get 'cycles tn)))
+               (steps (claude-gravity--tlist-items (alist-get 'steps tn)))
                (stop-think (alist-get 'stop_thinking tn))
                (stop-text (alist-get 'stop_text tn)))
           (with-temp-buffer
@@ -2078,11 +2078,11 @@ NAME, INPUT used for context. STATUS for error display."
             (when (and prompt-text (not (string-empty-p prompt-text)))
               (insert "## Prompt\n\n> " (replace-regexp-in-string "\n" "\n> " prompt-text) "\n\n"))
             (let ((ci 0))
-              (dolist (cycle cycles)
-                (let ((athink (alist-get 'thinking cycle))
-                      (atext (alist-get 'text cycle))
-                      (tools (claude-gravity--tlist-items (alist-get 'tools cycle))))
-                  (insert (format "## Cycle %d\n\n" ci))
+              (dolist (step steps)
+                (let ((athink (alist-get 'thinking step))
+                      (atext (alist-get 'text step))
+                      (tools (claude-gravity--tlist-items (alist-get 'tools step))))
+                  (insert (format "## Step %d\n\n" ci))
                   (when (and athink (not (string-empty-p (string-trim athink))))
                     (insert "### Thinking\n\n" (claude-gravity--render-tables-in-text (string-trim athink)) "\n\n"))
                   (when (and atext (not (string-empty-p (string-trim atext))))
@@ -2152,13 +2152,13 @@ NAME, INPUT used for context. STATUS for error display."
               (insert "## Thinking\n\n" stop-think "\n\n"))
             (when (and stop-text (not (string-empty-p stop-text)))
               (insert "## Summary\n\n" stop-text "\n\n"))
-            (let ((cycles (claude-gravity--tlist-items (alist-get 'cycles agent))))
-              (when cycles
+            (let ((steps (claude-gravity--tlist-items (alist-get 'steps agent))))
+              (when steps
                 (insert "## Tool History\n\n")
-                (dolist (cycle cycles)
-                  (let ((tools (claude-gravity--tlist-items (alist-get 'tools cycle)))
-                        (athink (alist-get 'thinking cycle))
-                        (atext (alist-get 'text cycle)))
+                (dolist (step steps)
+                  (let ((tools (claude-gravity--tlist-items (alist-get 'tools step)))
+                        (athink (alist-get 'thinking step))
+                        (atext (alist-get 'text step)))
                     (when (and athink (not (string-empty-p (string-trim athink))))
                       (insert "### Thinking\n\n" (string-trim athink) "\n\n"))
                     (when (and atext (not (string-empty-p (string-trim atext))))

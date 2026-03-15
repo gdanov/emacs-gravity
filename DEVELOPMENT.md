@@ -17,27 +17,54 @@ This guide covers building, testing, and debugging the emacs-gravity project.
 
 ## Build Commands
 
-### Node.js Bridge
+### Monorepo Setup
 
-The `emacs-bridge/` directory contains the Node.js plugin that forwards Claude Code hook events to Emacs over a Unix domain socket.
+The project uses npm workspaces with three packages under `packages/`:
+- `@gravity/shared` — Shared types and utilities
+- `emacs-bridge` — Claude Code plugin (one-shot hook forwarder)
+- `@gravity/server` — Stateful backend (session state, terminal protocol)
 
-**Install dependencies (first time):**
+**Install all dependencies (first time):**
 ```bash
-cd emacs-bridge && npm install
+npm install
 ```
 
-**Build the bridge (required after editing `emacs-bridge/src/index.ts`):**
-Since the bridge now uses tsx, there's no build step required. Changes to TypeScript files are picked up automatically.
-
-**Run tests:**
+**Run all tests:**
 ```bash
-cd emacs-bridge && npm test
+make test
 ```
 
-**Type check without building:**
+**Type check all packages:**
 ```bash
-cd emacs-bridge && npx tsc --noEmit
+npx -w packages/shared tsc --noEmit
+npx -w packages/emacs-bridge tsc --noEmit
+npx -w packages/gravity-server tsc --noEmit
 ```
+
+### Bridge (packages/emacs-bridge)
+
+Uses tsx — no build step needed. Changes to TypeScript files picked up automatically.
+
+**Run bridge tests:**
+```bash
+make test-bridge
+```
+
+### Gravity Server (packages/gravity-server)
+
+Long-running TypeScript backend. Run with tsx.
+
+**Run server tests:**
+```bash
+make test-server
+```
+
+**Start server manually:**
+```bash
+npx -w packages/gravity-server tsx src/server.ts
+```
+
+Sockets: `~/.local/state/gravity-hooks.sock` (bridge → server) and `~/.local/state/gravity-terminal.sock` (server → terminals). Override with `GRAVITY_HOOK_SOCK` / `GRAVITY_TERMINAL_SOCK`.
 
 ### Emacs Lisp
 

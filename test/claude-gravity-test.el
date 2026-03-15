@@ -76,8 +76,8 @@ EXTRA-DATA is an alist merged into the event data."
   "Collect all root tools across all turns in SID's tree."
   (let ((result nil))
     (dolist (tn (cg-test--turn-nodes sid))
-      (dolist (cycle (claude-gravity--tlist-items (alist-get 'cycles tn)))
-        (dolist (tool (claude-gravity--tlist-items (alist-get 'tools cycle)))
+      (dolist (step (claude-gravity--tlist-items (alist-get 'steps tn)))
+        (dolist (tool (claude-gravity--tlist-items (alist-get 'tools step)))
           (push tool result))))
     (nreverse result)))
 
@@ -150,14 +150,14 @@ EXTRA-DATA is an alist merged into the event data."
       (should (= 2 (alist-get 'turn (cg-test--tool-by-id sid "t3")))))))
 
 (ert-deftest cg-test-multiple-boundaries-in-sequence ()
-  "Multiple ExitPlanMode cycles accumulate correctly."
+  "Multiple ExitPlanMode boundaries accumulate correctly."
   (let ((sid (cg-test--fresh-session "test-5")))
-    ;; First cycle
+    ;; First boundary
     (cg-test--prompt-submit sid "first")
     (cg-test--pre-tool sid "ExitPlanMode" "t1")
     (cg-test--post-tool sid "ExitPlanMode" "t1")
     (cg-test--pre-tool sid "Edit" "t2")
-    ;; Second cycle
+    ;; Second boundary
     (cg-test--prompt-submit sid "second")
     (cg-test--pre-tool sid "ExitPlanMode" "t3")
     (cg-test--post-tool sid "ExitPlanMode" "t3")
@@ -416,12 +416,12 @@ The tmux-prompt-sent flag should prevent duplicates."
   "PreToolUse carries assistant_text through to tool entries."
   (let* ((sid (cg-test--replay-stop-text))
          (tools (cg-test--all-root-tools sid)))
-    ;; First tool's assistant_text may be cleared by cycle dedup
-    ;; but should be accessible via the cycle's text field
+    ;; First tool's assistant_text may be cleared by step dedup
+    ;; but should be accessible via the step's text field
     (let* ((turn-node (claude-gravity--get-turn-node (cg-test--get sid) 1))
-           (cycles (claude-gravity--tlist-items (alist-get 'cycles turn-node))))
-      ;; At least one cycle should have text
-      (should (cl-some (lambda (c) (alist-get 'text c)) cycles)))))
+           (steps (claude-gravity--tlist-items (alist-get 'steps turn-node))))
+      ;; At least one step should have text
+      (should (cl-some (lambda (s) (alist-get 'text s)) steps)))))
 
 (ert-deftest cg-test-replay-stop-text-post-tool-text ()
   "PostToolUse carries post_tool_text through to tool entry."
@@ -456,13 +456,13 @@ The tmux-prompt-sent flag should prevent duplicates."
    (list (cons 'agent_id agent-id))))
 
 (defun cg-test--agent-tools (sid agent-id)
-  "Collect all tools in AGENT-ID's cycles for session SID."
+  "Collect all tools in AGENT-ID's steps for session SID."
   (let* ((session (cg-test--get sid))
          (agent (claude-gravity--find-agent session agent-id))
          (result nil))
     (when agent
-      (dolist (cycle (claude-gravity--tlist-items (alist-get 'cycles agent)))
-        (dolist (tool (claude-gravity--tlist-items (alist-get 'tools cycle)))
+      (dolist (step (claude-gravity--tlist-items (alist-get 'steps agent)))
+        (dolist (tool (claude-gravity--tlist-items (alist-get 'tools step)))
           (push tool result))))
     (nreverse result)))
 
@@ -484,7 +484,7 @@ The tmux-prompt-sent flag should prevent duplicates."
                                          (cons 'description "find Y")
                                          (cons 'prompt "find Y")))))
 
-    ;; Both Task tools should be in root cycles
+    ;; Both Task tools should be in root steps
     (let ((root-tools (cg-test--all-root-tools sid)))
       (should (= 2 (length root-tools)))
       (should (equal "Task" (alist-get 'name (nth 0 root-tools))))
@@ -612,7 +612,7 @@ The tmux-prompt-sent flag should prevent duplicates."
         (kill-buffer buf)))))
 
 (ert-deftest cg-test-multi-agent-ambiguous-goes-to-root ()
-  "Tools with parent_agent_id='ambiguous' go to root, not agent cycles."
+  "Tools with parent_agent_id='ambiguous' go to root, not agent steps."
   (let ((sid (cg-test--fresh-session "test-ambiguous")))
     (cg-test--session-start sid)
     (cg-test--prompt-submit sid "work")

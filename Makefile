@@ -1,8 +1,8 @@
 EMACS ?= emacs
 
-.PHONY: test test-elisp test-bridge build clean
+.PHONY: test test-elisp test-bridge test-server build clean
 
-test: test-elisp test-bridge
+test: test-elisp test-bridge test-server
 
 test-elisp:
 	$(EMACS) -nw --batch -L . -L test \
@@ -13,10 +13,13 @@ test-elisp:
 		-f ert-run-tests-batch-and-exit
 
 test-bridge:
-	cd emacs-bridge && npm ci --ignore-scripts && npx vitest run
+	cd packages/emacs-bridge && npx vitest run
+
+test-server:
+	cd packages/gravity-server && npx vitest run
 
 build:
-	cd emacs-bridge && npm ci
+	npm install
 
 clean:
-	rm -rf emacs-bridge/node_modules emacs-bridge/dist
+	rm -rf node_modules packages/*/node_modules packages/*/dist

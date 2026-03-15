@@ -1,0 +1,7 @@
+{
+  "name": "emacs-gravity",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ]
+}

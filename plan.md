@@ -53,7 +53,7 @@ great claude code plug-in, I'm shamelessly copying it here.
 - Debounced per-session rendering (0.1s timer)
 - ExitPlanMode inline preview: collapsible 8-line plan preview in session buffer, allowedPrompts display, plan file path with F keybinding to open
 - Assistant monologue & extended thinking display: extracted from Claude Code transcript, deduplicated across parallel tool calls, rendered in gray italic with ┊ margin indicator
-- Response cycles: tools grouped into collapsible sections by assistant text boundaries; completed non-last cycles auto-collapse
+- Response steps: tools grouped into collapsible sections by assistant text boundaries; completed non-last steps auto-collapse
 - Trailing assistant text/thinking captured on Stop events, displayed after tools/agents/tasks per turn
 - Visual section dividers (─ Title ──), turn separators (╌╌╌), margin indicators (┊)
 - Running tool/agent background highlighting (subtle gold tint via `claude-gravity-running-bg` face)

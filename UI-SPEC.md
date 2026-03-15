@@ -312,14 +312,14 @@ Structured Claude Session  ◆ 18 tools
 
 ---
 
-## 4. Response Cycles (Tool Grouping)
+## 4. Response Steps (Tool Grouping)
 
-Tools are grouped into "response cycles" — each cycle is one assistant
+Tools are grouped into "response steps" — each step is one assistant
 message plus its tool calls. A `▎ N tools` heading groups them.
 The `▎` block character is colored to match the content type:
 purple for thinking, orange for assistant text, gray for structural headings.
 
-### Single cycle (expanded, current)
+### Single step (expanded, current)
 
 ```
   ▎ 2 tools
@@ -329,7 +329,7 @@ purple for thinking, orange for assistant text, gray for structural headings.
       Read(/src/index.ts)
 ```
 
-### Multiple cycles — earlier ones auto-collapsed
+### Multiple steps — earlier ones auto-collapsed
 
 ```
   ▎ 3 tools                                   [collapsed]
@@ -345,7 +345,7 @@ purple for thinking, orange for assistant text, gray for structural headings.
       Edit(/src/index.test.ts)
 ```
 
-### Cycle with preceding assistant text
+### Step with preceding assistant text
 
 ```
   ▎ Thinking...                                    (purple)
@@ -443,7 +443,7 @@ Sort order: in_progress → pending → completed
 ## 7. Agents (within a turn)
 
 Agents with live tool data render as **sub-branches** — their tools appear
-nested inside the Task tool item using the same response-cycle format as
+nested inside the Task tool item using the same response-step format as
 root tools. This provides full visibility into agent thinking and tool use.
 
 ### Agent sub-branch — completed (collapsed by default)
@@ -551,7 +551,7 @@ Margin indicators (▎):
   The ▎ block character color matches the content type:
   purple ▎    — thinking sections
   orange ▎    — assistant text
-  gray ▎      — tool cycle headings and structural labels
+  gray ▎      — tool step headings and structural labels
 
 Status:
   green       — done [x], idle, completed tasks

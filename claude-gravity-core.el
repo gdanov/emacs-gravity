@@ -120,7 +120,7 @@ EXTRA is additional spaces beyond the depth-based indent."
 
 (defvar claude-gravity--margin-char "▎"
   "Current margin indicator character (U+258E LEFT ONE QUARTER BLOCK).
-Used as gutter prefix for thinking, assistant text, and tool cycle headings.
+Used as gutter prefix for thinking, assistant text, and tool step headings.
 The character color is determined by the content-type face at each call site.")
 
 

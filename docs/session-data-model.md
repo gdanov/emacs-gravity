@@ -51,7 +51,7 @@ Defined in `claude-gravity-state.el:276`.
 └── turn-node (alist)
     ├── turn-number    integer    — 0-based, monotonic
     ├── prompt         alist|nil  — user prompt for this turn (see below)
-    ├── cycles         tlist      — response cycles (see below)
+    ├── steps          tlist      — response steps (see below)
     ├── agents         tlist      — agents spawned in this turn
     ├── tasks          list       — task alists for this turn
     ├── tool-count     integer    — root tools in this turn (pre-computed)
@@ -63,15 +63,15 @@ Defined in `claude-gravity-state.el:276`.
 
 Turn 0 is always pre-allocated for "pre-prompt activity" (tools that run before any user prompt).
 
-### Cycle Node
+### Step Node
 
-A response cycle groups tools under a single assistant text/thinking block. Cycle boundaries are detected at insertion time in `claude-gravity--tree-add-tool` — the renderer just iterates.
+A response step groups tools under a single assistant text/thinking block. Step boundaries are detected at insertion time in `claude-gravity--tree-add-tool` — the renderer just iterates.
 
 ```
-cycle-node (alist)
-├── thinking   string|nil  — assistant thinking for this cycle
-├── text       string|nil  — assistant monologue for this cycle
-└── tools      tlist       — tool alists in this cycle
+step-node (alist)
+├── thinking   string|nil  — assistant thinking for this step
+├── text       string|nil  — assistant monologue for this step
+└── tools      tlist       — tool alists in this step
 ```
 
 New cycle is created when:
@@ -135,7 +135,7 @@ Agents have their own `:cycles` tlist (same structure as turn-node cycles), enab
 ├── timestamp         time
 ├── turn              integer
 ├── duration          float|nil  — seconds (set on SubagentStop)
-├── cycles            tlist      — agent's own response cycles (same as turn cycles)
+├── steps             tlist      — agent's own response steps (same as turn steps)
 ├── tool-count        integer    — number of tools in this agent
 ├── transcript_path   string|nil
 ├── stop_text         string|nil — agent summary text

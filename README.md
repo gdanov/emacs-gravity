@@ -53,7 +53,7 @@ All active sessions at a glance, grouped by project. Status indicators show idle
 ![alt text](<Screenshot 2026-02-21 at 23.40.45.png>)
 
 ### Session Detail
-Turn-based conversation view. Each user prompt starts a turn; tools are grouped into response cycles with collapsible headings. Assistant thinking (purple) and text (orange) rendered with margin indicators.
+Turn-based conversation view. Each user prompt starts a turn; tools are grouped into response steps with collapsible headings. Assistant thinking (purple) and text (orange) rendered with margin indicators.
 
 ![alt text](<Screenshot 2026-02-20 at 13.35.56.png>)
 

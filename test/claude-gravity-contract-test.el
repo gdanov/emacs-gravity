@@ -39,8 +39,8 @@ Optional SOURCE is \"opencode\" or nil (claude-code)."
   (let ((result nil)
         (session (cgc--get sid)))
     (dolist (tn (claude-gravity--tlist-items (plist-get session :turns)))
-      (dolist (cycle (claude-gravity--tlist-items (alist-get 'cycles tn)))
-        (dolist (tool (claude-gravity--tlist-items (alist-get 'tools cycle)))
+      (dolist (step (claude-gravity--tlist-items (alist-get 'steps tn)))
+        (dolist (tool (claude-gravity--tlist-items (alist-get 'tools step)))
           (push tool result))))
     (nreverse result)))
 
@@ -442,7 +442,7 @@ Optional SOURCE is \"opencode\" or nil (claude-code)."
     (should (equal "opencode" (plist-get oc :source)))))
 
 (ert-deftest cgc-cross-full-turn-both-sources ()
-  "Full turn cycle (prompt → tool → stop) works identically from both sources."
+  "Full turn (prompt → tool → stop) works identically from both sources."
   (cgc--fresh)
   ;; Claude Code turn
   (cgc--event "UserPromptSubmit" "cc-2" '((prompt . "hello")))

@@ -177,7 +177,7 @@ is provided."
 
 (defface claude-gravity-agent-margin
   '((t :foreground "#5599aa"))
-  "Fallback face for margin indicator inside agent response cycles.
+  "Fallback face for margin indicator inside agent response steps.
 Content-type faces are preferred; agent distinction is provided
 by the background tint (`claude-gravity-agent-bg')."
   :group 'claude-gravity)

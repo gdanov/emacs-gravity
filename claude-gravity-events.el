@@ -393,9 +393,7 @@ the model mutation API to update session state."
              (claude-gravity-model-add-prompt
               session (list (cons 'text text)
                             (cons 'submitted (current-time))
-                            (cons 'elapsed nil)
-                            (cons 'stop_text nil)
-                            (cons 'stop_thinking nil))))))
+                            (cons 'elapsed nil))))))
        (claude-gravity-model-set-claude-status session 'responding))
      ;; Session is responding — remove idle inbox items
      (claude-gravity--inbox-remove-for-session session-id 'idle)
@@ -449,7 +447,7 @@ the model mutation API to update session state."
                              (cons 'status "running")
                              (cons 'timestamp (current-time))
                              (cons 'turn (or (plist-get session :current-turn) 0))
-                             (cons 'cycles (claude-gravity--tlist-new))
+                             (cons 'steps (claude-gravity--tlist-new))
                              (cons 'tool-count 0)
                              (cons 'task-tool nil)
                              (cons 'transcript_path (alist-get 'agent_transcript_path data))
@@ -523,9 +521,7 @@ the model mutation API to update session state."
                             (cons 'tool_use_id (alist-get 'tool_use_id data))
                             (cons 'submitted (current-time))
                             (cons 'elapsed nil)
-                            (cons 'answer nil)
-                            (cons 'stop_text nil)
-                            (cons 'stop_thinking nil))))))))
+                            (cons 'answer nil))))))))
 
     ("PostToolUse"
      (let* ((session (claude-gravity--ensure-session session-id cwd))
@@ -574,9 +570,7 @@ the model mutation API to update session state."
           session (list (cons 'text "[Plan approved]")
                         (cons 'type 'phase-boundary)
                         (cons 'submitted (current-time))
-                        (cons 'elapsed nil)
-                        (cons 'stop_text nil)
-                        (cons 'stop_thinking nil))))
+                        (cons 'elapsed nil))))
        ;; Update per-turn token delta (running estimate during active turn)
        (claude-gravity--update-turn-tokens session (alist-get 'token_usage data))))
 

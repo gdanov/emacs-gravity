@@ -392,7 +392,7 @@ import {
   attributeToolToAgent,
   writeAgentState,
 } from "./agent-state.js";
-import type { HookData } from "./types.js";
+import type { HookData } from "@gravity/shared";
 
 // ============================================================================
 // Event enrichment (used by daemon hooks)

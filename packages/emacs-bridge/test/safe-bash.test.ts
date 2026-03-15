@@ -1,15 +1,11 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { isSafeBashCommand } from "../src/safe-bash";
+import { describe, it, expect } from "vitest";
+import { isSafeBashCommand } from "@gravity/shared";
 
 function bash(command: string) {
   return { tool_name: "Bash", tool_input: { command } };
 }
 
 describe("isSafeBashCommand", () => {
-  afterEach(() => {
-    delete process.env.CLAUDE_GRAVITY_NO_AUTO_APPROVE;
-  });
-
   // --- Should auto-approve ---
 
   describe("safe commands", () => {
@@ -115,10 +111,7 @@ describe("isSafeBashCommand", () => {
     it("rejects curl --form", () => expect(isSafeBashCommand(bash("curl --form 'file=@test.txt' https://api.example.com"))).toBe(false));
     it("rejects curl --upload-file", () => expect(isSafeBashCommand(bash("curl --upload-file test.txt https://api.example.com"))).toBe(false));
     it("rejects curl -T", () => expect(isSafeBashCommand(bash("curl -T test.txt https://api.example.com"))).toBe(false));
-    it("rejects wget --post-data (not in safe list)", () =>
-      // wget --post-data doesn't match CURL_WGET_DANGEROUS, but >
-      // In practice wget with POST is rare. -d matches for wget too.
-      expect(isSafeBashCommand(bash("wget -d https://api.example.com"))).toBe(false));
+    it("rejects wget -d", () => expect(isSafeBashCommand(bash("wget -d https://api.example.com"))).toBe(false));
   });
 
   // --- Edge cases ---
@@ -143,24 +136,5 @@ describe("isSafeBashCommand", () => {
     it("rejects safe && unsafe", () => expect(isSafeBashCommand(bash("ls && rm -rf /"))).toBe(false));
     it("rejects safe | unsafe", () => expect(isSafeBashCommand(bash("echo hello | tee file.txt"))).toBe(false));
     it("rejects unsafe ; safe", () => expect(isSafeBashCommand(bash("npm install; ls"))).toBe(false));
-  });
-
-  // --- Configuration ---
-
-  describe("configuration", () => {
-    it("respects CLAUDE_GRAVITY_NO_AUTO_APPROVE=1", () => {
-      process.env.CLAUDE_GRAVITY_NO_AUTO_APPROVE = "1";
-      expect(isSafeBashCommand(bash("ls"))).toBe(false);
-    });
-
-    it("allows when CLAUDE_GRAVITY_NO_AUTO_APPROVE is unset", () => {
-      delete process.env.CLAUDE_GRAVITY_NO_AUTO_APPROVE;
-      expect(isSafeBashCommand(bash("ls"))).toBe(true);
-    });
-
-    it("allows when CLAUDE_GRAVITY_NO_AUTO_APPROVE=0", () => {
-      process.env.CLAUDE_GRAVITY_NO_AUTO_APPROVE = "0";
-      expect(isSafeBashCommand(bash("ls"))).toBe(true);
-    });
   });
 });

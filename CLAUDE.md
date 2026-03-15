@@ -9,20 +9,29 @@ Emacs UI for Claude Code, inspired by Google's AntiGravity and Cursor. Provides 
 ## Quick Architecture
 
 ```
-Claude Code
-    ↓ (11 hook events)
-emacs-bridge (Node.js)
-    ↕ (Unix domain socket)
-claude-gravity.el (Emacs)
+Claude Code (11 hooks)
     ↓
-magit-section UI
+emacs-bridge (Node.js, one-shot)
+    ↓ enriched events
+    ├──→ Emacs socket (legacy direct mode)
+    └──→ gravity-server hook socket (new server mode)
+              ↓ state management + patches
+         gravity-server (TypeScript, long-running)
+              ↓ semantic patches over terminal socket
+         Emacs client (claude-gravity-client.el)
+              ↓
+         magit-section UI
 ```
 
-One-shot event forwarding: Claude Code hooks invoke the bridge with event JSON, bridge forwards over socket to Emacs, then exits. All state persists in Emacs hash tables and a JSON file (`.claude/emacs-bridge-agents.json`).
+**Two modes of operation:**
+1. **Legacy (direct):** Bridge → Emacs socket → `claude-gravity-events.el` handles state
+2. **Server mode (new):** Bridge → gravity-server → patches → `claude-gravity-client.el` applies patches
 
-**Bridge Design:** The bridge layer translates different session sources (Claude Code hooks, PI agent SDK) into a unified view model. Emacs renders events identically regardless of bridge source. See @ARCHITECTURE.md for view model invariants.
+Both modes coexist during migration. The bridge dual-writes to both sockets.
 
-For detailed architecture including view model, state API, and module interactions, see @ARCHITECTURE.md.
+**Monorepo structure:** `packages/{shared, emacs-bridge, gravity-server}` with npm workspaces.
+
+For detailed architecture, see @ARCHITECTURE.md.
 
 ## Module Structure (Summary)
 
@@ -39,7 +48,8 @@ The Emacs package is split into 13 modular files:
 | `claude-gravity-diff.el` | Inline diffs, tool/plan display |
 | `claude-gravity-render.el` | UI section rendering |
 | `claude-gravity-ui.el` | Buffers, keymaps, transient menu |
-| `claude-gravity-socket.el` | Socket server, plan review |
+| `claude-gravity-socket.el` | Socket server, plan review (legacy) |
+| `claude-gravity-client.el` | Client connection to gravity-server (new) |
 | `claude-gravity-actions.el` | Permission and question buffers |
 | `claude-gravity-tmux.el` | Tmux session management |
 | `claude-gravity.el` | Thin loader |
@@ -59,7 +69,7 @@ Registered in `hooks.json` and forwarded by shell scripts to the Node.js bridge.
 ## Key Features
 
 - Multi-session tracking with per-session buffers
-- Live turn-based response cycles with collapsible sections
+- Live turn-based response steps with collapsible sections
 - Agent tracking and transcript viewing
 - Plan review with inline comments and diff
 - Task and file operation tracking

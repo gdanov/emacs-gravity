@@ -18,7 +18,7 @@ exports[`Event enrichment snapshots > PostToolUse: Read with following text 1`] 
   },
   "tool_name": "Read",
   "tool_use_id": "toolu_posttool_read_001",
-  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/posttool_transcript.jsonl",
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/test/fixtures/posttool_transcript.jsonl",
 }
 `;
 
@@ -35,7 +35,7 @@ exports[`Event enrichment snapshots > PreToolUse: Bash with thinking 1`] = `
   },
   "tool_name": "Bash",
   "tool_use_id": "toolu_0117AHsMTSWiUkLVBhQ43wzv",
-  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/preceding_content_bash.jsonl",
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/test/fixtures/preceding_content_bash.jsonl",
 }
 `;
 
@@ -55,7 +55,7 @@ Let me research this by looking at the hook system documentation and the AskUser
   },
   "tool_name": "Task",
   "tool_use_id": "toolu_01DpAA4KkHMsWYXGnPuSn9fa",
-  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/at_first_stop.jsonl",
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/test/fixtures/at_first_stop.jsonl",
 }
 `;
 
@@ -99,7 +99,7 @@ The cleanest solution would be the \`PreAskUserQuestion\` hook from that issue, 
     "input_tokens": 10,
     "output_tokens": 31,
   },
-  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/at_first_stop.jsonl",
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/test/fixtures/at_first_stop.jsonl",
 }
 `;
 
@@ -156,6 +156,6 @@ There's also a noted bug ([#13439](https://github.com/anthropics/claude-code/iss
     "input_tokens": 20,
     "output_tokens": 687,
   },
-  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/emacs-bridge/test/fixtures/at_second_stop.jsonl",
+  "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/test/fixtures/at_second_stop.jsonl",
 }
 `;
