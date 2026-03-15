@@ -9,6 +9,7 @@ const VALID_TERMINAL_MESSAGE_TYPES = new Set([
   "action.turn-auto-approve",
   "request.session",
   "request.overview",
+  "request.resync",
 ]);
 
 /** Parse a raw JSON line into a TerminalMessage. Returns null on invalid input. */

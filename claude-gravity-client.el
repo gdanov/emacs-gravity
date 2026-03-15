@@ -362,6 +362,8 @@ Accumulates partial data and processes complete newline-delimited JSON."
        (claude-gravity--handle-inbox-added msg))
       ("inbox.removed"
        (claude-gravity--handle-inbox-removed msg))
+      ("inbox.snapshot"
+       (claude-gravity--handle-inbox-snapshot msg))
       ("overview.snapshot"
        (claude-gravity--handle-overview-snapshot msg))
       (_
@@ -626,11 +628,17 @@ MSG contains sessionId and full session state."
          (session-json (alist-get 'session msg))
          (session (claude-gravity--json-session-to-plist session-json))
          (existing (gethash session-id claude-gravity--sessions)))
-    ;; Preserve buffer reference from existing session
+    ;; Preserve local-only state from existing session
     (when existing
-      (let ((buf (plist-get existing :buffer)))
+      (let ((buf (plist-get existing :buffer))
+            (display-name (plist-get existing :display-name))
+            (ignored (plist-get existing :ignored)))
         (when (and buf (buffer-live-p buf))
-          (plist-put session :buffer buf))))
+          (plist-put session :buffer buf))
+        (when display-name
+          (plist-put session :display-name display-name))
+        (when ignored
+          (plist-put session :ignored ignored))))
     ;; Store session
     (puthash session-id session claude-gravity--sessions)
     ;; Register tmux mapping if present
@@ -962,6 +970,27 @@ MSG contains projects array with session summaries."
         (cons 'data (alist-get 'data item-json))
         ;; No socket-proc in client mode — server handles bidirectional
         (cons 'socket-proc nil)))
+
+(defun claude-gravity--handle-inbox-snapshot (msg)
+  "Handle inbox.snapshot — replace local inbox with server state."
+  (let ((items-json (alist-get 'items msg)))
+    (setq claude-gravity--inbox
+          (mapcar #'claude-gravity--json-inbox-item-to-alist items-json))
+    (claude-gravity--update-inbox-indicator)
+    (claude-gravity--schedule-refresh)))
+
+
+;;; ── Resync ─────────────────────────────────────────────────────────
+
+(defun claude-gravity--force-resync-session (session-id)
+  "Force re-request a full snapshot for SESSION-ID, bypassing subscription guard."
+  (remhash session-id claude-gravity--client-subscribed-sessions)
+  (claude-gravity--request-session session-id))
+
+(defun claude-gravity--force-resync-all ()
+  "Force resync all state from gravity-server."
+  (clrhash claude-gravity--client-subscribed-sessions)
+  (claude-gravity--send-to-server '((type . "request.resync"))))
 
 
 ;;; ── Inbox notification (mode-line) ──────────────────────────────────

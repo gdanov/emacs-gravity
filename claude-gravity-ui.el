@@ -898,6 +898,7 @@ Only shows permission, question, and plan-review items (not idle)."
 (define-key claude-gravity-mode-map (kbd "p") 'claude-gravity--section-backward)
 
 (define-key claude-gravity-mode-map (kbd "g") 'claude-gravity-refresh)
+(define-key claude-gravity-mode-map (kbd "G") 'claude-gravity-force-resync)
 
 (define-key claude-gravity-mode-map (kbd "c") 'claude-gravity-comment-at-point)
 
@@ -1204,6 +1205,21 @@ On an agent, parse transcript.  Otherwise toggle."
     ;; Overview buffer
     (claude-gravity--render-overview)))
 
+(defun claude-gravity-force-resync ()
+  "Force resync from gravity-server, replacing local state.
+In session buffer: resync current session only.
+In overview buffer: resync all sessions."
+  (interactive)
+  (unless (claude-gravity-server-alive-p)
+    (user-error "Not connected to gravity-server"))
+  (if claude-gravity--buffer-session-id
+      (progn
+        (claude-gravity--force-resync-session claude-gravity--buffer-session-id)
+        (message "Resync requested for %s"
+                 (substring claude-gravity--buffer-session-id 0 8)))
+    (claude-gravity--force-resync-all)
+    (message "Full resync requested")))
+
 
 ;;; Permission pattern commands
 
@@ -1358,6 +1374,7 @@ prompts to confirm the directory before starting."
   "Overview buffer menu: manage sessions and inbox."
   [["Actions"
     ("g" "Refresh" claude-gravity-refresh)
+    ("G" "Force resync" claude-gravity-force-resync)
     ("b" "Switch session" claude-gravity-switch-session)
     ("RET" "Visit or toggle" claude-gravity-visit-or-toggle)]
    ["Session Lifecycle (S prefix)"
@@ -1386,6 +1403,7 @@ prompts to confirm the directory before starting."
   "Session buffer menu: interact with current session."
   [["View & Navigate"
     ("g" "Refresh" claude-gravity-refresh)
+    ("G" "Force resync" claude-gravity-force-resync)
     ("t" "Tail" claude-gravity-tail)
     ("SPC" "Detail popup" claude-gravity-popup-at-point)
     ("o" "Return to overview" claude-gravity-return-to-overview)

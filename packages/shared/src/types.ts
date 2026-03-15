@@ -290,6 +290,7 @@ export type ServerMessage =
   | { type: "session.removed"; sessionId: string }
   | { type: "inbox.added"; item: InboxItem }
   | { type: "inbox.removed"; itemId: number }
+  | { type: "inbox.snapshot"; items: InboxItem[] }
   | { type: "overview.snapshot"; projects: ProjectSummary[] };
 
 /** Messages from terminal to server. */
@@ -299,7 +300,8 @@ export type TerminalMessage =
   | { type: "action.plan-review"; itemId: number; decision: "allow" | "deny"; feedback?: PlanFeedback }
   | { type: "action.turn-auto-approve"; sessionId: string }
   | { type: "request.session"; sessionId: string }
-  | { type: "request.overview" };
+  | { type: "request.overview" }
+  | { type: "request.resync" };
 
 export interface ProjectSummary {
   project: string;

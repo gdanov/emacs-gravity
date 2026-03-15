@@ -231,6 +231,32 @@ function handleTerminalMessage(
       break;
     }
 
+    case "request.resync": {
+      // Overview
+      terminals.sendTo(conn, {
+        type: "overview.snapshot",
+        projects: store.getProjectSummaries(),
+      });
+      // Snapshots for all subscribed sessions
+      for (const sessionId of conn.subscribedSessions) {
+        const session = store.get(sessionId);
+        if (session) {
+          terminals.sendTo(conn, {
+            type: "session.snapshot",
+            sessionId,
+            session,
+          });
+        }
+      }
+      // Inbox snapshot
+      terminals.sendTo(conn, {
+        type: "inbox.snapshot",
+        items: inbox.all(),
+      });
+      log(`Terminal resync: ${conn.subscribedSessions.size} sessions`, "info");
+      break;
+    }
+
     case "action.permission": {
       const { itemId, decision, message } = msg;
       // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
