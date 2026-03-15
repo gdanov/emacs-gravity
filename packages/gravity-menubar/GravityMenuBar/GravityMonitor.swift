@@ -7,26 +7,16 @@ class GravityMonitor: ObservableObject {
     @Published var connected = false
     @Published var projects: [ProjectInfo] = []
     @Published var inboxItems: [InboxInfo] = []
+    @Published var justFinished = false
 
-    var activeCount: Int {
-        projects.flatMap(\.sessions).filter { $0.status == "active" }.count
-    }
+    /// Tracks last-known claudeStatus per session for transition detection
+    private var previousStatuses: [String: String] = [:]
 
-    var hasResponding: Bool {
-        projects.flatMap(\.sessions).contains { $0.claudeStatus == "responding" }
-    }
-
-    /// One dot per active session: .green (idle), .yellow (responding), .orange (waiting/inbox)
-    var sessionDots: [DotStatus] {
-        let waitingIds = Set(inboxItems.map(\.sessionId))
-        return projects.flatMap(\.sessions)
-            .filter { $0.status == "active" }
-            .map { session -> DotStatus in
-                if waitingIds.contains(session.id) { return .waiting }
-                if session.claudeStatus == "responding" { return .responding }
-                return .idle
-            }
-            .sorted { $0.priority > $1.priority }
+    var iconState: MenuBarIconState {
+        if !connected { return .disconnected }
+        if !inboxItems.isEmpty { return .attention }
+        if justFinished { return .justFinished }
+        return .neutral
     }
 
     private var socketFD: Int32 = -1
@@ -118,6 +108,8 @@ class GravityMonitor: ObservableObject {
             self.connected = false
             self.projects = []
             self.inboxItems = []
+            self.justFinished = false
+            self.previousStatuses = [:]
         }
     }
 
@@ -205,6 +197,12 @@ class GravityMonitor: ObservableObject {
                     }
                 )
             }
+            // Seed previousStatuses from snapshot (no transition on initial load)
+            for p in jsonProjects {
+                for s in p.sessions where s.status == "active" {
+                    previousStatuses[s.sessionId] = s.claudeStatus
+                }
+            }
 
         case "inbox.added":
             guard let item = msg.item else { return }
@@ -236,10 +234,21 @@ class GravityMonitor: ObservableObject {
             }
 
         case "session.update":
-            // For status changes, request a fresh overview
-            if let patches = msg.patches {
-                let hasStatusChange = patches.contains { p in
-                    p.op == "set_status" || p.op == "set_claude_status"
+            if let sessionId = msg.sessionId, let patches = msg.patches {
+                var hasStatusChange = false
+                for patch in patches {
+                    if patch.op == "set_claude_status", let newStatus = patch.claudeStatus {
+                        let oldStatus = previousStatuses[sessionId]
+                        previousStatuses[sessionId] = newStatus
+                        if oldStatus == "responding" && newStatus == "idle" {
+                            justFinished = true
+                        } else if newStatus == "responding" {
+                            justFinished = false
+                        }
+                        hasStatusChange = true
+                    } else if patch.op == "set_status" {
+                        hasStatusChange = true
+                    }
                 }
                 if hasStatusChange {
                     sendRequest(TerminalRequest(type: "request.overview"))
@@ -247,6 +256,9 @@ class GravityMonitor: ObservableObject {
             }
 
         case "session.removed":
+            if let sessionId = msg.sessionId {
+                previousStatuses.removeValue(forKey: sessionId)
+            }
             sendRequest(TerminalRequest(type: "request.overview"))
 
         default:

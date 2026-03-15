@@ -1,24 +1,28 @@
 import SwiftUI
 
-// MARK: - Dot Status (menu bar label)
+// MARK: - Menu Bar Icon State
 
-enum DotStatus {
-    case idle, responding, waiting
+enum MenuBarIconState {
+    case neutral       // connected, all idle or no sessions
+    case justFinished  // a session just went responding→idle
+    case attention     // inbox items present
+    case disconnected  // not connected to server
 
-    var color: Color {
+    var systemImage: String {
         switch self {
-        case .idle: return .green
-        case .responding: return .yellow
-        case .waiting: return .orange
+        case .neutral:      return "bolt.fill"
+        case .justFinished: return "bolt.fill"
+        case .attention:    return "exclamationmark.bubble.fill"
+        case .disconnected: return "bolt.slash.fill"
         }
     }
 
-    /// Higher = shown first in the label
-    var priority: Int {
+    var color: Color {
         switch self {
-        case .idle: return 0
-        case .responding: return 1
-        case .waiting: return 2
+        case .neutral:      return .secondary
+        case .justFinished: return .green
+        case .attention:    return .orange
+        case .disconnected: return .secondary
         }
     }
 }
