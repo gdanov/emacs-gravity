@@ -131,9 +131,12 @@ emacs-gravity/
 │   ├── emacs-bridge/              ; Claude Code plugin (one-shot shim)
 │   │   ├── src/index.ts
 │   │   └── hooks/                 ; Shell scripts + _ensure-server
-│   └── gravity-server/            ; Stateful backend (state, enrichment, protocol)
-│       ├── src/gravity-server.ts
-│       └── test/
+│   ├── gravity-server/            ; Stateful backend (state, enrichment, protocol)
+│   │   ├── src/gravity-server.ts
+│   │   └── test/
+│   └── gravity-menubar/           ; macOS menu bar app (Swift)
+│       ├── GravityMenuBar/        ; SwiftUI app, monitor, models
+│       └── Package.swift
 ├── Makefile
 └── test/
     └── claude-gravity-test.el     ; ERT tests

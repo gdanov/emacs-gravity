@@ -19,10 +19,11 @@ This guide covers building, testing, and debugging the emacs-gravity project.
 
 ### Monorepo Setup
 
-The project uses npm workspaces with three packages under `packages/`:
+The project uses npm workspaces with three TypeScript packages under `packages/`, plus a standalone Swift package:
 - `@gravity/shared` — Shared types and utilities
 - `emacs-bridge` — Claude Code plugin (one-shot hook forwarder)
 - `@gravity/server` — Stateful backend (session state, terminal protocol)
+- `gravity-menubar` — macOS menu bar app (Swift, standalone — not part of npm workspaces)
 
 **Install all dependencies (first time):**
 ```bash
@@ -65,6 +66,23 @@ npx -w packages/gravity-server tsx src/gravity-server.ts
 ```
 
 Sockets: `~/.local/state/gravity-hooks.sock` (bridge → server) and `~/.local/state/gravity-terminal.sock` (server → terminals). Override with `GRAVITY_HOOK_SOCK` / `GRAVITY_TERMINAL_SOCK`.
+
+### Menu Bar (packages/gravity-menubar)
+
+macOS menu bar app written in Swift. Standalone Swift package (not part of npm workspaces).
+
+**Build and run:**
+```bash
+cd packages/gravity-menubar && swift build && swift run
+```
+
+**Build release binary:**
+```bash
+cd packages/gravity-menubar && swift build -c release
+# Binary at .build/release/GravityMenuBar
+```
+
+Requires macOS 13+ and Swift 5.9+. Connects to the same terminal socket as Emacs (`~/.local/state/gravity-terminal.sock`). Override with `GRAVITY_TERMINAL_SOCK` env var.
 
 ### Emacs Lisp
 

@@ -90,6 +90,12 @@ Launch and manage Claude Code sessions in tmux directly from Emacs. Compose prom
 
 Sessions started outside of emacs are integrated as well via hooks (but no prompting). External sessions running inside tmux are fully integrated.
 
+### macOS Menu Bar
+
+`gravity-menubar` is a lightweight Swift menu bar app that connects to gravity-server alongside Emacs. It shows one colored dot per active session — green for idle, yellow for responding, orange for waiting on user action. Click to see a dropdown with sessions grouped by project and pending inbox items.
+
+Build and run: `cd packages/gravity-menubar && swift build && swift run`
+
 ## Architecture
 
 ```
@@ -100,12 +106,12 @@ emacs-bridge (Node.js one-shot shim)
 gravity-server (TypeScript, long-running backend)
     ├── enrichment, state management, inbox
     ↓ semantic patches over terminal socket
-Emacs client (claude-gravity-client.el — 15 modules, ~11k lines)
-    ↓
-magit-section UI
+Terminal clients
+    ├── Emacs client (claude-gravity-client.el — 15 modules, ~11k lines) → magit-section UI
+    └── macOS menu bar (gravity-menubar, Swift) → status dots + dropdown
 ```
 
-Server-driven: Claude Code fires hooks → bridge forwards to gravity-server → server manages state and emits semantic patches → Emacs applies patches and renders via magit-section. Bidirectional flows (PermissionRequest, plan review) route through the server's inbox.
+Server-driven: Claude Code fires hooks → bridge forwards to gravity-server → server manages state and emits semantic patches → terminal clients apply patches and render. Emacs provides the full interactive UI (session detail, plan review, permissions). The macOS menu bar provides at-a-glance status. Bidirectional flows (PermissionRequest, plan review) route through the server's inbox.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
 

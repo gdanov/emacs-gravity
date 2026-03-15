@@ -16,14 +16,14 @@ emacs-bridge (Node.js, one-shot shim)
 gravity-server (TypeScript, long-running)
     ├── enrichment, state management, inbox
     ↓ semantic patches over terminal socket (~/.local/state/gravity-terminal.sock)
-Emacs client (claude-gravity-client.el)
-    ↓
-magit-section UI
+Terminal clients
+    ├── Emacs client (claude-gravity-client.el) → magit-section UI
+    └── macOS menu bar (gravity-menubar, Swift) → status dots + dropdown
 ```
 
-**Server-driven architecture:** gravity-server owns all session state. Emacs is a thin terminal client that receives semantic patches and sends user actions (permission responses, plan review feedback). Multiple terminals can connect simultaneously.
+**Server-driven architecture:** gravity-server owns all session state. Terminal clients receive semantic patches and send user actions. Multiple terminals can connect simultaneously. Currently two clients: the Emacs package (full session UI) and a macOS menu bar app (at-a-glance status).
 
-**Monorepo structure:** `packages/{shared, emacs-bridge, gravity-server}` with npm workspaces.
+**Monorepo structure:** `packages/{shared, emacs-bridge, gravity-server, gravity-menubar}` with npm workspaces (menubar is a standalone Swift package).
 
 For detailed architecture, see @ARCHITECTURE.md. For the v3 design rationale, see @docs/refactor-implementation.md.
 

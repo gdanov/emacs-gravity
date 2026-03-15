@@ -16,9 +16,11 @@ gravity-server (TypeScript/Effect, long-running)
     ├── state manager (sessions, turn tree, indexes, inbox)
     ├── event handler (hook → state mutations → semantic patches)
     ↓ terminal socket (~/.local/state/gravity-terminal.sock)
-Emacs client (claude-gravity-client.el)
-    ↓ read-replica plist tree
-magit-section renderer
+Terminal clients
+    ├── Emacs client (claude-gravity-client.el)
+    │       ↓ read-replica plist tree → magit-section renderer
+    └── macOS menu bar (gravity-menubar, Swift)
+            ↓ colored status dots + session dropdown
 ```
 
 ### Three-Tier Architecture
@@ -27,7 +29,9 @@ magit-section renderer
 
 2. **gravity-server** (long-running): The stateful backend. Enriches events (transcript parsing, agent attribution), manages session state (turn tree, tool/agent indexes, inbox), and broadcasts semantic patches to all connected terminals.
 
-3. **Emacs client** (long-lived connection): Connects to the terminal socket, receives session snapshots and incremental patches, maintains a local read-replica as plists, and renders via magit-section. Sends user actions (permission responses, plan review feedback) back to the server.
+3. **Terminal clients** (long-lived connections): Connect to the terminal socket, receive session snapshots and incremental patches.
+   - **Emacs client**: Maintains a read-replica as plists, renders via magit-section. Sends user actions (permission responses, plan review feedback) back to the server.
+   - **macOS menu bar** (`gravity-menubar`): Lightweight Swift app showing colored status dots per active session (green=idle, yellow=responding, orange=waiting) and a dropdown with session/inbox details. Read-only — no actions sent back to the server.
 
 ### Two-Socket Design
 
@@ -38,7 +42,7 @@ magit-section renderer
 - Override: `GRAVITY_HOOK_SOCK` environment variable
 
 **Terminal socket** (`~/.local/state/gravity-terminal.sock`):
-- Emacs (and future web/native clients) connect here, persistent connection
+- Emacs and gravity-menubar (macOS menu bar) connect here, persistent connection
 - Server → terminal: snapshots, patches, inbox events, overview refreshes
 - Terminal → server: permission/question/plan-review actions, session/overview requests
 - Override: `GRAVITY_TERMINAL_SOCK` environment variable
@@ -89,6 +93,12 @@ packages/
         log.ts                   -- Logging
     build.mjs                    -- esbuild → dist/gravity-server.mjs
     package.json
+  gravity-menubar/               -- macOS menu bar app (Swift)
+    GravityMenuBar/
+      GravityMenuBarApp.swift    -- SwiftUI app, MenuBarLabel (status dots)
+      GravityMonitor.swift       -- Terminal socket client, NDJSON parser
+      Models.swift               -- View models, JSON protocol types
+    Package.swift
 Makefile                         -- Build orchestration
 ```
 

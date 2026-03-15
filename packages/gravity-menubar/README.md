@@ -25,7 +25,7 @@ swift build -c release
 
 ## What it shows
 
-**Menu bar:** `● 2 !` — 2 active sessions, 1 attention item (or `○ off` when server offline)
+**Menu bar:** One colored dot per active session — green (idle), yellow (responding), orange (waiting on user). Icon switches to `!` bubble when inbox items need attention. Shows `⚡̸` when server is offline.
 
 **Dropdown menu:**
 - Sessions grouped by project with status (idle/responding/ended)
