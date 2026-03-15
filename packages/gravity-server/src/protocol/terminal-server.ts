@@ -63,6 +63,13 @@ export class TerminalServer {
     }
   }
 
+  /** Remove a session from all connections' subscriptions. */
+  unsubscribeAll(sessionId: string): void {
+    for (const conn of this.connections) {
+      conn.subscribedSessions.delete(sessionId);
+    }
+  }
+
   /** Number of connected terminals. */
   get connectionCount(): number {
     return this.connections.length;

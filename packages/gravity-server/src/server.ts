@@ -109,6 +109,24 @@ function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
     terminals.sendToSubscribers(sessionId, updateMsg);
   }
 
+  // Schedule purge for ended sessions, cancel if session self-heals
+  const session = store.get(sessionId);
+  if (session && session.status === "ended") {
+    store.schedulePurge(sessionId, 2 * 60 * 1000, () => {
+      store.delete(sessionId);
+      inbox.removeForSession(sessionId);
+      terminals.broadcast({ type: "session.removed", sessionId });
+      terminals.unsubscribeAll(sessionId);
+      terminals.broadcast({
+        type: "overview.snapshot",
+        projects: store.getProjectSummaries(),
+      });
+      log(`Purged ended session ${sessionId}`, "info");
+    });
+  } else if (session && session.status === "active") {
+    store.cancelPurge(sessionId);
+  }
+
   // Broadcast overview on status-changing events only
   const overviewEvents = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]);
   if (overviewEvents.has(eventName)) {
@@ -320,11 +338,13 @@ function handleTerminalMessage(
       }
 
       // DENY-AS-APPROVE workaround: Claude Code ignores ExitPlanMode "allow"
-      // from PermissionRequest hooks (#15755). Convert allow → deny with message.
+      // from PermissionRequest hooks (#15755). Enable with GRAVITY_DENY_AS_APPROVE=1
+      // if your Claude Code version still has this bug.
+      const DENY_AS_APPROVE = process.env.GRAVITY_DENY_AS_APPROVE === "1";
       const pending = inbox.getPending(itemId);
       const toolName = pending?.inboxItem.data?.tool_name;
       let finalDecision = decision;
-      if (toolName === "ExitPlanMode" && decision === "allow") {
+      if (DENY_AS_APPROVE && toolName === "ExitPlanMode" && decision === "allow") {
         finalDecision = "deny";
         message = message || "User approved the plan. Proceed with implementation.";
         log("Plan review: converting ExitPlanMode allow → deny-as-approve", "info");
@@ -364,6 +384,7 @@ function start(): void {
 
 function shutdown(): void {
   log("gravity-server shutting down...", "info");
+  store.clearAllPurgeTimers();
   hookServer?.close();
   terminalServer?.close();
   try { unlinkSync(HOOK_SOCKET); } catch {}
