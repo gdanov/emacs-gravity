@@ -1,7 +1,6 @@
 import { Effect, Layer, pipe } from "effect";
 import { join } from "path";
 import { log, initLogForSession } from "./log.js";
-import { isSafeBashCommand } from "@gravity/shared";
 import type { HookData } from "@gravity/shared";
 import { nextDumpSeq, writeDumpFile } from "./dump.js";
 import {
@@ -16,7 +15,7 @@ import {
 } from "./enrich.js";
 import { ProcessIO, ProcessIOLive } from "./services/process-io.js";
 import { BridgeConfig, BridgeConfigLive } from "./services/config.js";
-import { Fs, FsLive } from "./services/fs.js";
+import { FsLive } from "./services/fs.js";
 import { LoggerLive } from "./services/logger.js";
 import { EmacsSocket, EmacsSocketLive } from "./services/emacs-socket.js";
 import { HookSocketClient, HookSocketClientLive } from "./services/hook-socket.js";
@@ -48,7 +47,6 @@ const parseStdin = (raw: string): Effect.Effect<HookData> =>
 // --- Main program ---
 const program = Effect.gen(function* () {
   const io = yield* Effect.service(ProcessIO);
-  const fs = yield* Effect.service(Fs);
   const socket = yield* Effect.service(EmacsSocket);
   const hookSocket = yield* Effect.service(HookSocketClient);
   const config = yield* Effect.service(BridgeConfig);
@@ -131,7 +129,9 @@ const program = Effect.gen(function* () {
     });
   }
 
-  // --- Forward to gravity-server hook socket (fire-and-forget, informational) ---
+  // --- Routing: all events go through gravity-server ---
+  const isBidirectional = eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept";
+
   const hookMsg: HookSocketMessage = {
     event: eventName as HookEventName,
     session_id: sessionId,
@@ -139,132 +139,60 @@ const program = Effect.gen(function* () {
     pid,
     source: "bridge",
     data: enrichedData,
-    needs_response: eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept",
+    needs_response: isBidirectional,
   };
-  yield* hookSocket.send(hookMsg).pipe(
-    Effect.catch(() => Effect.logDebug("Hook socket send failed (server unavailable)"))
-  );
 
-  // --- Routing ---
-
-  // Auto-approve safe read-only Bash commands (skip Emacs round-trip)
-  if (eventName === "PermissionRequest" && !config.noAutoApprove && isSafeBashCommand(enrichedData)) {
-    yield* socket.send({
-      event: "PermissionAutoApproved",
-      session_id: sessionId,
-      cwd,
-      pid,
-      data: {
-        tool_name: enrichedData.tool_name,
-        tool_use_id: enrichedData.tool_use_id,
-        command: enrichedData.tool_input?.command,
-      },
-    });
-    yield* io.writeStdout(JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision: { behavior: "allow" },
-      },
-    }) + "\n");
-    return;
-  }
-
-  // Check if session is ignored — pass bidirectional hooks through to TUI
-  if (eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept") {
-    const ignored = yield* Effect.gen(function* () {
-      const ignoreFile = join(cwd, ".claude", "gravity-ignored-sessions.json");
-      const fileExists = yield* fs.exists(ignoreFile);
-      if (!fileExists) return false;
-      const content = yield* fs.readFile(ignoreFile).pipe(
-        Effect.catch(() => Effect.succeed("[]"))
-      );
-      const ignoredArr = JSON.parse(content);
-      return Array.isArray(ignoredArr) && ignoredArr.includes(sessionId);
-    });
-    if (ignored) {
-      yield* Effect.logDebug(`Session ${sessionId} is ignored, passing ${eventName} through to TUI`);
-      yield* socket.send({
-        event: eventName,
-        session_id: sessionId,
-        cwd,
-        pid,
-        data: enrichedData,
-        hook_input: rawHookInput,
-      });
-      yield* io.writeStdout(JSON.stringify({}) + "\n");
-      return;
-    }
-  }
-
-  // Send to Emacs — PermissionRequest and AskUserQuestionIntercept use bidirectional wait
-  if (eventName === "PermissionRequest") {
+  if (isBidirectional) {
+    // Bidirectional events routed through gravity-server.
+    // The server manages inbox, terminal UI, and DENY-AS-APPROVE workaround.
+    // Bridge just forwards and writes the response to stdout.
     const toolName = enrichedData.tool_name || "unknown";
-    yield* Effect.logWarning(`PermissionRequest: waiting for Emacs response [tool=${toolName}, session=${sessionId}]`);
-    const response = yield* socket.sendAndWait({
+    yield* Effect.logWarning(
+      `${eventName}: waiting for gravity-server response [tool=${toolName}, session=${sessionId}]`
+    );
+
+    // Also notify Emacs socket (fire-and-forget, for UI updates)
+    yield* socket.send({
       event: eventName,
       session_id: sessionId,
       cwd,
       pid,
       data: enrichedData,
       hook_input: rawHookInput,
-    });
+    }).pipe(Effect.catch(() => Effect.void));
+
+    const response = yield* hookSocket.sendAndWait(hookMsg).pipe(
+      Effect.catch(() => {
+        log(`${eventName}: hook socket sendAndWait failed`, "error");
+        return Effect.succeed({});
+      })
+    );
 
     // Guard against empty response
     if (!response || Object.keys(response).length === 0) {
-      yield* Effect.logError(`PermissionRequest: empty response from Emacs [tool=${toolName}, session=${sessionId}] — writing {} to stdout`);
+      yield* Effect.logError(
+        `${eventName}: empty response from gravity-server [tool=${toolName}, session=${sessionId}] — writing {} to stdout`
+      );
     }
 
-    // ── DENY-AS-APPROVE WORKAROUND ──────────────────────────────────────
-    // Bug: Claude Code silently ignores ExitPlanMode "allow" responses from
-    // PermissionRequest hooks. This is a regression of #15755.
-    // See ARCHITECTURE.md for full explanation.
-    //
-    // TO REMOVE: When Claude Code fixes #15755, delete this if-block.
-    // ─────────────────────────────────────────────────────────────────────
-    if (toolName === "ExitPlanMode" && response?.decision?.behavior === "allow") {
-      yield* Effect.logWarning(`PermissionRequest: converting ExitPlanMode allow → deny-as-approve [session=${sessionId}]`);
-      response.decision = {
-        behavior: "deny",
-        message: "User approved the plan. Proceed with implementation.",
-      };
-    }
-
+    // Write response directly to stdout — server provides the full hookSpecificOutput format
     const responseStr = JSON.stringify(response) + "\n";
-    // Hard timeout: ensure process exits even if stdout write callback never fires
     const hardExit = setTimeout(() => {
-      log(`PermissionRequest: hard exit timeout [tool=${toolName}]`, "error");
+      log(`${eventName}: hard exit timeout [tool=${toolName}]`, "error");
       process.exit(1);
     }, 5000);
     hardExit.unref();
     process.stdout.write(responseStr, () => {
-      log(`PermissionRequest: stdout write callback OK [tool=${toolName}]`, "warn");
+      log(`${eventName}: stdout write callback OK [tool=${toolName}]`, "warn");
       setTimeout(() => process.exit(0), 50);
     });
 
-  } else if (eventName === "AskUserQuestionIntercept") {
-    yield* Effect.logWarning("AskUserQuestionIntercept: waiting for Emacs response");
-    const response = yield* socket.sendAndWait({
-      event: "PreToolUse",
-      session_id: sessionId,
-      cwd,
-      pid,
-      data: enrichedData,
-      hook_input: rawHookInput,
-    });
-    const output = (response && response.hookSpecificOutput)
-      ? JSON.stringify(response)
-      : JSON.stringify({});
-    process.stdout.write(output + "\n", () => {
-      process.exit(0);
-    });
-
   } else {
-    // Fire-and-forget: send to Emacs and output {}
-    if (eventName === "SubagentStop") {
-      yield* Effect.logWarning(
-        `[FINAL_CHECK_BEFORE_SEND] agent_stop_text=${typeof enrichedData.agent_stop_text === "string" ? `"${(enrichedData.agent_stop_text as string).substring(0, 40)}"` : enrichedData.agent_stop_text}`
-      );
-    }
+    // Fire-and-forget: send to hook socket and Emacs socket
+    yield* hookSocket.send(hookMsg).pipe(
+      Effect.catch(() => Effect.logDebug("Hook socket send failed (server unavailable)"))
+    );
+
     yield* socket.send({
       event: eventName,
       session_id: sessionId,
@@ -273,7 +201,12 @@ const program = Effect.gen(function* () {
       data: enrichedData,
       hook_input: rawHookInput,
     });
-    yield* io.writeStdout(JSON.stringify({}) + "\n");
+    let hookResponse: Record<string, unknown> = {};
+    if (eventName === "SessionStart") {
+      const shortId = sessionId.slice(0, 8);
+      hookResponse.systemMessage = `emacs-gravity: connected (session ${shortId}, pid ${pid})`;
+    }
+    yield* io.writeStdout(JSON.stringify(hookResponse) + "\n");
   }
 });
 
