@@ -28,23 +28,18 @@ struct MenuBarLabel: View {
     var body: some View {
         HStack(spacing: 4) {
             if monitor.connected {
-                Circle()
-                    .fill(monitor.hasResponding ? .yellow : .green)
-                    .frame(width: 6, height: 6)
+                if monitor.inboxItems.count > 0 {
+                    Image(systemName: "exclamationmark.bubble.fill")
+                        .foregroundColor(.orange)
+                } else {
+                    Image(systemName: "bolt.fill")
+                        .foregroundColor(monitor.hasResponding ? .yellow : .green)
+                }
                 Text("\(monitor.activeCount)")
                     .font(.system(size: 12, weight: .medium))
-                if monitor.inboxItems.count > 0 {
-                    Text("⚠\(monitor.inboxItems.count)")
-                        .font(.system(size: 11))
-                        .foregroundColor(.orange)
-                }
             } else {
-                Circle()
-                    .fill(.gray)
-                    .frame(width: 6, height: 6)
-                Text("off")
-                    .font(.system(size: 11))
-                    .foregroundColor(.gray)
+                Image(systemName: "bolt.slash.fill")
+                    .foregroundColor(.secondary)
             }
         }
     }
@@ -60,12 +55,12 @@ struct MenuBarDropdown: View {
             if monitor.projects.isEmpty && monitor.inboxItems.isEmpty {
                 if monitor.connected {
                     Text("No active sessions")
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: 12))
                         .foregroundColor(.secondary)
                         .padding(.vertical, 8)
                 } else {
                     Text("gravity-server offline")
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: 12))
                         .foregroundColor(.secondary)
                         .padding(.vertical, 8)
                 }
@@ -111,8 +106,8 @@ struct MenuBarDropdown: View {
             .padding(.top, 2)
         }
         .padding(10)
-        .frame(width: 280)
-        .font(.system(size: 12, design: .monospaced))
+        .frame(width: 560)
+        .font(.system(size: 12))
     }
 }
 
@@ -122,7 +117,7 @@ struct ProjectSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(project.name)
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .font(.system(size: 12, weight: .bold))
                 .foregroundColor(.primary)
                 .padding(.top, 2)
 
@@ -147,8 +142,8 @@ struct SessionRow: View {
                 .lineLimit(1)
             Spacer()
             Text(session.statusLabel)
-                .foregroundColor(session.statusColor)
-                .font(.system(size: 11, design: .monospaced))
+                .foregroundColor(.secondary)
+                .font(.system(size: 11))
         }
         .padding(.vertical, 1)
     }
@@ -162,12 +157,12 @@ struct InboxRow: View {
             Text("⚠")
                 .font(.system(size: 11))
             Text(item.label)
-                .foregroundColor(.orange)
+                .foregroundColor(.primary)
                 .lineLimit(1)
             Spacer()
             Text(item.project ?? "")
                 .foregroundColor(.secondary)
-                .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: 11))
         }
         .padding(.vertical, 1)
     }
