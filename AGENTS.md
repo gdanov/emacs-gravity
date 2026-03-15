@@ -38,7 +38,7 @@ npm install               # Install all workspace dependencies (first time)
 make test                 # Run all tests (elisp + bridge + server)
 make test-bridge          # Bridge tests only
 make test-server          # Server tests only
-make build-server         # Build gravity-server → dist/server.mjs
+make build-server         # Build gravity-server → dist/gravity-server.mjs
 make sync-cache           # Sync dist to plugin marketplace cache (REQUIRED after changes)
 ```
 
@@ -132,7 +132,7 @@ emacs-gravity/
 │   │   ├── src/index.ts
 │   │   └── hooks/                 ; Shell scripts + _ensure-server
 │   └── gravity-server/            ; Stateful backend (state, enrichment, protocol)
-│       ├── src/server.ts
+│       ├── src/gravity-server.ts
 │       └── test/
 ├── Makefile
 └── test/

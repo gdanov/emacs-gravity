@@ -222,7 +222,7 @@ make test          # Run all tests (elisp + bridge + server)
 make test-elisp    # Run ERT tests only
 make test-bridge   # Run vitest bridge tests only
 make test-server   # Run vitest server tests only
-make build-server  # Build gravity-server → dist/server.mjs
+make build-server  # Build gravity-server → dist/gravity-server.mjs
 make sync-cache    # Sync dist to plugin marketplace cache (required after TS changes)
 make clean         # Remove node_modules and dist/
 ```

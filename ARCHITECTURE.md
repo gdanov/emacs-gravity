@@ -69,7 +69,7 @@ packages/
     package.json
   gravity-server/                -- Stateful backend
     src/
-      server.ts                  -- Entry, two sockets, message routing
+      gravity-server.ts           -- Entry, two sockets, message routing
       state/
         session-store.ts         -- Map<sessionId, Session>, project grouping
         session.ts               -- Session factory, mutation methods (emit patches)
@@ -87,7 +87,7 @@ packages/
         bidirectional.ts         -- Permission/question/plan-review flow
       util/
         log.ts                   -- Logging
-    build.mjs                    -- esbuild → dist/server.mjs
+    build.mjs                    -- esbuild → dist/gravity-server.mjs
     package.json
 Makefile                         -- Build orchestration
 ```

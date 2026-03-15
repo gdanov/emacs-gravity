@@ -202,7 +202,7 @@ packages/
     package.json
   gravity-server/                -- NEW: stateful backend
     src/
-      server.ts                  -- Entry, lifecycle, two sockets
+      gravity-server.ts           -- Entry, lifecycle, two sockets
       state/
         session-store.ts         -- Map<sessionId, Session>, project grouping
         session.ts               -- Session class, model mutation methods (emit patches)

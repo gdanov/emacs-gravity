@@ -61,7 +61,7 @@ make test-server
 
 **Start server manually:**
 ```bash
-npx -w packages/gravity-server tsx src/server.ts
+npx -w packages/gravity-server tsx src/gravity-server.ts
 ```
 
 Sockets: `~/.local/state/gravity-hooks.sock` (bridge → server) and `~/.local/state/gravity-terminal.sock` (server → terminals). Override with `GRAVITY_HOOK_SOCK` / `GRAVITY_TERMINAL_SOCK`.
@@ -105,7 +105,7 @@ In v3, agent state is managed in-memory by gravity-server (no file I/O). The leg
 ### Building and Deploying
 
 ```bash
-make build-server     # esbuild gravity-server → dist/server.mjs
+make build-server     # esbuild gravity-server → dist/gravity-server.mjs
 make sync-cache       # Sync bridge + server dist to plugin marketplace cache
 ```
 
