@@ -12,6 +12,7 @@ test-elisp:
 		-l cg-test-replay \
 		-l claude-gravity-test \
 		-l claude-gravity-contract-test \
+		-l claude-gravity-patch-test \
 		-f ert-run-tests-batch-and-exit
 
 test-bridge:
