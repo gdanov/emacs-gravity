@@ -176,14 +176,15 @@ describe("Event Handler", () => {
       expect(patches).toContainEqual({ op: "set_claude_status", claudeStatus: "idle" });
     });
 
-    it("removes inbox items for the session", () => {
+    it("does not remove inbox items (cleanup is in server.ts)", () => {
       startSession(deps);
       fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
       fire(deps, "Stop", "s1", { stop_text: "done" }); // creates idle inbox item
       expect(deps.inbox.all().length).toBe(1);
 
       fire(deps, "SessionEnd", "s1");
-      expect(deps.inbox.all().length).toBe(0);
+      // handleEvent no longer removes inbox items — that's server.ts's responsibility
+      expect(deps.inbox.all().length).toBe(1);
     });
 
     it("is a no-op for unknown session", () => {
@@ -268,15 +269,15 @@ describe("Event Handler", () => {
       expect(patches.some(p => p.op === "set_claude_status")).toBe(true);
     });
 
-    it("removes idle inbox items", () => {
+    it("does not remove idle inbox items (cleanup is in server.ts)", () => {
       startSession(deps);
       fire(deps, "UserPromptSubmit", "s1", { prompt: "first" });
       fire(deps, "Stop", "s1", { stop_text: "done" }); // creates idle item
       expect(deps.inbox.all().length).toBe(1);
 
       fire(deps, "UserPromptSubmit", "s1", { prompt: "second" });
-      // UserPromptSubmit removes all inbox items for session
-      expect(deps.inbox.all().length).toBe(0);
+      // handleEvent no longer removes inbox items — server.ts does it before calling handleEvent
+      expect(deps.inbox.all().length).toBe(1);
     });
 
     it("creates session if not exists", () => {
@@ -353,17 +354,19 @@ describe("Event Handler", () => {
       expect(items[0].sessionId).toBe("s1");
     });
 
-    it("replaces existing idle inbox item on new Stop", () => {
+    it("adds idle inbox item on Stop (cleanup is in server.ts)", () => {
       startSession(deps);
       fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
       fire(deps, "Stop", "s1", { stop_text: "First stop" });
       expect(deps.inbox.all().length).toBe(1);
 
-      // Second Stop should remove old idle and add new one
+      // Second Stop adds another idle — server.ts removes stale ones before handleEvent
       fire(deps, "Stop", "s1", { stop_text: "Second stop" });
       const items = deps.inbox.all();
-      expect(items.length).toBe(1);
-      expect(items[0].summary).toContain("Second stop");
+      expect(items.length).toBe(2);
+      // Both idle items present (cleanup is server.ts's job)
+      expect(items.some(i => i.summary.includes("First stop"))).toBe(true);
+      expect(items.some(i => i.summary.includes("Second stop"))).toBe(true);
     });
 
     it("returns set_claude_status, set_turn_stop, and token patches", () => {
@@ -1656,38 +1659,41 @@ describe("Event Handler", () => {
   // Inbox dismiss on boundaries
   // ────────────────────────────────────────────────────────────────────
 
-  describe("Inbox dismissal on boundaries", () => {
-    it("UserPromptSubmit removes all inbox items for session", () => {
+  describe("Inbox dismissal (moved to server.ts)", () => {
+    // NOTE: Inbox cleanup for stale bidirectional items now happens in server.ts's
+    // handleHookMessage, before calling handleEvent. These tests verify that
+    // handleEvent itself does NOT remove inbox items.
+
+    it("handleEvent does not remove inbox items on UserPromptSubmit", () => {
       startSession(deps);
-      // Manually add items
       deps.inbox.add("idle", "s1", "project", "s1", "idle", {});
       deps.inbox.add("permission", "s1", "project", "s1", "perm", {});
       expect(deps.inbox.all().length).toBe(2);
 
       fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
-      // UserPromptSubmit removes all for session, then removes idle specifically
-      expect(deps.inbox.all().length).toBe(0);
+      // Items remain — server.ts removes them before calling handleEvent
+      expect(deps.inbox.all().length).toBe(2);
     });
 
-    it("Stop removes all inbox items for session", () => {
+    it("handleEvent does not remove inbox items on Stop (but adds idle)", () => {
       startSession(deps);
       deps.inbox.add("idle", "s1", "project", "s1", "old idle", {});
       fire(deps, "Stop", "s1");
-      // Stop removes all, then adds a new idle
+      // Old idle remains, new idle added
       const items = deps.inbox.all();
-      expect(items.length).toBe(1);
-      expect(items[0].summary).not.toBe("old idle");
+      expect(items.length).toBe(2);
     });
 
-    it("SessionEnd removes all inbox items for session", () => {
+    it("handleEvent does not remove inbox items on SessionEnd", () => {
       startSession(deps);
       deps.inbox.add("idle", "s1", "project", "s1", "idle", {});
       deps.inbox.add("permission", "s1", "project", "s1", "perm", {});
       fire(deps, "SessionEnd", "s1");
-      expect(deps.inbox.all().length).toBe(0);
+      // Items remain — server.ts removes them before calling handleEvent
+      expect(deps.inbox.all().length).toBe(2);
     });
 
-    it("does not remove items from other sessions", () => {
+    it("items from other sessions are unaffected", () => {
       startSession(deps, "s1");
       startSession(deps, "s2");
       deps.inbox.add("idle", "s1", "project", "s1", "s1-idle", {});
@@ -1695,8 +1701,7 @@ describe("Event Handler", () => {
 
       fire(deps, "SessionEnd", "s1");
       const items = deps.inbox.all();
-      expect(items.length).toBe(1);
-      expect(items[0].sessionId).toBe("s2");
+      expect(items.length).toBe(2);
     });
   });
 

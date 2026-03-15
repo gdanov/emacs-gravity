@@ -142,11 +142,6 @@ export function handleEvent(
     });
   }
 
-  // Dismiss stale inbox items on turn/session boundaries
-  if (["UserPromptSubmit", "Stop", "SessionEnd"].includes(eventName)) {
-    inbox.removeForSession(sessionId);
-  }
-
   const patches: Patch[] = [];
 
   switch (eventName) {
@@ -179,7 +174,6 @@ export function handleEvent(
       if (session) {
         patches.push(...sessionEnd(session));
       }
-      inbox.removeForSession(sessionId);
       break;
     }
 
@@ -202,8 +196,6 @@ export function handleEvent(
         );
       }
       patches.push(...setClaudeStatus(session, "responding"));
-      // Remove idle inbox items
-      inbox.removeForSession(sessionId, "idle");
       break;
     }
 
@@ -232,7 +224,6 @@ export function handleEvent(
       const snippet = stopText
         ? stopText.replace(/[\n\r\t]+/g, " ").substring(0, 80)
         : "idle";
-      inbox.removeForSession(sessionId, "idle");
       inbox.add("idle", sessionId, session.project, session.slug || sessionId.substring(0, 8), snippet, { turn, snippet });
       break;
     }

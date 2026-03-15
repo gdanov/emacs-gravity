@@ -99,6 +99,18 @@ function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
 
   log(`Hook event: ${eventName} session=${sessionId}`, "info");
 
+  // Clean up stale bidirectional inbox items before processing.
+  // Any non-bidirectional event means Claude Code has moved past any pending
+  // permission/question (e.g. user approved in TUI, then PostToolUse fires).
+  const bidirectionalEvents = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
+  if (!bidirectionalEvents.has(eventName)) {
+    const staleRemoved = inbox.removeForSession(sessionId);
+    for (const item of staleRemoved) {
+      log(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`, "info");
+      terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+    }
+  }
+
   const patches = handleEvent(
     eventName,
     sessionId,
