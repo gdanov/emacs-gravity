@@ -79,7 +79,10 @@
       "Bash(swift build:*)",
       "Bash(make test-server:*)",
       "Bash(make menubar:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(make test:*)",
+      "Bash(make build-server:*)",
+      "Bash(make sync-cache:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",

@@ -26,9 +26,9 @@ struct MenuBarLabel: View {
     @ObservedObject var monitor: GravityMonitor
 
     var body: some View {
-        let state = monitor.iconState
-        Image(systemName: state.systemImage)
-            .foregroundColor(state.color)
+        Image(systemName: monitor.iconState.systemImage)
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(monitor.iconState.color)
     }
 }
 

@@ -7,16 +7,23 @@ class GravityMonitor: ObservableObject {
     @Published var connected = false
     @Published var projects: [ProjectInfo] = []
     @Published var inboxItems: [InboxInfo] = []
-    @Published var justFinished = false
+    @Published var iconState: MenuBarIconState = .disconnected
 
     /// Tracks last-known claudeStatus per session for transition detection
     private var previousStatuses: [String: String] = [:]
+    private var justFinished = false
+    private var hasResponding = false
 
-    var iconState: MenuBarIconState {
-        if !connected { return .disconnected }
-        if !inboxItems.isEmpty { return .attention }
-        if justFinished { return .justFinished }
-        return .neutral
+    private func updateIconState() {
+        let newState: MenuBarIconState
+        if !connected { newState = .disconnected }
+        else if justFinished { newState = .justFinished }
+        else if hasResponding { newState = .neutral }
+        else if !inboxItems.isEmpty { newState = .attention }
+        else { newState = .neutral }
+        if iconState != newState {
+            iconState = newState
+        }
     }
 
     private var socketFD: Int32 = -1
@@ -88,6 +95,7 @@ class GravityMonitor: ObservableObject {
 
         DispatchQueue.main.async {
             self.connected = true
+            self.updateIconState()
         }
 
         startReading()
@@ -109,7 +117,9 @@ class GravityMonitor: ObservableObject {
             self.projects = []
             self.inboxItems = []
             self.justFinished = false
+            self.hasResponding = false
             self.previousStatuses = [:]
+            self.updateIconState()
         }
     }
 
@@ -215,10 +225,12 @@ class GravityMonitor: ObservableObject {
                 label: item.label,
                 summary: item.summary
             ))
+            updateIconState()
 
         case "inbox.removed":
             guard let itemId = msg.itemId else { return }
             inboxItems.removeAll { $0.id == itemId }
+            updateIconState()
 
         case "inbox.snapshot":
             guard let items = msg.items else { return }
@@ -232,6 +244,7 @@ class GravityMonitor: ObservableObject {
                     summary: item.summary
                 )
             }
+            updateIconState()
 
         case "session.update":
             if let sessionId = msg.sessionId, let patches = msg.patches {
@@ -245,12 +258,14 @@ class GravityMonitor: ObservableObject {
                         } else if newStatus == "responding" {
                             justFinished = false
                         }
+                        hasResponding = previousStatuses.values.contains("responding")
                         hasStatusChange = true
                     } else if patch.op == "set_status" {
                         hasStatusChange = true
                     }
                 }
                 if hasStatusChange {
+                    updateIconState()
                     sendRequest(TerminalRequest(type: "request.overview"))
                 }
             }

@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Menu Bar Icon State
 
-enum MenuBarIconState {
+enum MenuBarIconState: Equatable {
     case neutral       // connected, all idle or no sessions
     case justFinished  // a session just went responding→idle
     case attention     // inbox items present

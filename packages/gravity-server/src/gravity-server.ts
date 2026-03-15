@@ -128,7 +128,7 @@ function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
       sessionId,
       patches,
     };
-    terminals.sendToSubscribers(sessionId, updateMsg);
+    terminals.broadcast(updateMsg);
   }
 
   // Schedule purge for ended sessions, cancel if session self-heals
