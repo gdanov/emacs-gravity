@@ -32,7 +32,7 @@ function readMessages(socket: Socket): Promise<ServerMessage[]> {
   });
 }
 
-/** Send a hook message and disconnect */
+/** Send a hook message and disconnect (fire-and-forget) */
 function sendHookEvent(msg: HookSocketMessage): Promise<void> {
   return new Promise((resolve, reject) => {
     const client = createConnection(HOOK_SOCK, () => {
@@ -40,6 +40,32 @@ function sendHookEvent(msg: HookSocketMessage): Promise<void> {
       client.end();
     });
     client.on("close", () => resolve());
+    client.on("error", (err) => reject(err));
+  });
+}
+
+/** Send a bidirectional hook message: keeps socket open, returns response */
+function sendBidirectionalHookEvent(msg: HookSocketMessage): Promise<{ socket: Socket; response: Promise<Record<string, unknown>> }> {
+  return new Promise((resolve, reject) => {
+    const client = createConnection(HOOK_SOCK, () => {
+      client.write(JSON.stringify(msg) + "\n");
+      // Don't end — keep open for response
+      const response = new Promise<Record<string, unknown>>((res) => {
+        let buf = "";
+        client.on("data", (chunk) => {
+          buf += chunk.toString();
+          const idx = buf.indexOf("\n");
+          if (idx !== -1) {
+            const line = buf.substring(0, idx).trim();
+            if (line.length > 0) res(JSON.parse(line));
+          }
+        });
+        client.on("close", () => {
+          if (buf.trim().length > 0) res(JSON.parse(buf.trim()));
+        });
+      });
+      resolve({ socket: client, response });
+    });
     client.on("error", (err) => reject(err));
   });
 }
@@ -119,6 +145,13 @@ describe("Integration: Server end-to-end", () => {
               });
             }
           }
+          // Broadcast inbox items for bidirectional events
+          if (msg.event === "PermissionRequest" || msg.event === "AskUserQuestionIntercept") {
+            const items = inbox.all();
+            if (items.length > 0) {
+              terminals.broadcast({ type: "inbox.added", item: items[0] });
+            }
+          }
         }
       });
     });
@@ -150,6 +183,40 @@ describe("Integration: Server end-to-end", () => {
             terminals.sendTo(conn, {
               type: "overview.snapshot", projects: store.getProjectSummaries(),
             });
+          } else if (msg.type === "action.permission") {
+            inbox.respond(msg.itemId, {
+              hookSpecificOutput: {
+                hookEventName: "PermissionRequest",
+                decision: { behavior: msg.decision, message: msg.message },
+              },
+            });
+            terminals.broadcast({ type: "inbox.removed", itemId: msg.itemId });
+          } else if (msg.type === "action.plan-review") {
+            const pending = inbox.getPending(msg.itemId);
+            const toolName = pending?.inboxItem.data?.tool_name;
+            let finalDecision = msg.decision;
+            let message: string | undefined = undefined;
+            if (msg.feedback) {
+              const parts: string[] = ["# Plan Feedback\n"];
+              if (msg.feedback.generalComment) {
+                parts.push("## General comment");
+                parts.push(msg.feedback.generalComment);
+              }
+              message = parts.join("\n");
+            }
+            // DENY_AS_APPROVE controlled by env var
+            const DENY_AS_APPROVE = process.env.GRAVITY_DENY_AS_APPROVE === "1";
+            if (DENY_AS_APPROVE && toolName === "ExitPlanMode" && finalDecision === "allow") {
+              finalDecision = "deny";
+              message = message || "User approved the plan. Proceed with implementation.";
+            }
+            inbox.respond(msg.itemId, {
+              hookSpecificOutput: {
+                hookEventName: "PermissionRequest",
+                decision: { behavior: finalDecision, message },
+              },
+            });
+            terminals.broadcast({ type: "inbox.removed", itemId: msg.itemId });
           }
         }
       });
@@ -366,6 +433,143 @@ describe("Integration: Server end-to-end", () => {
     expect(allPatches).toContain("complete_tool");
     expect(allPatches).toContain("set_turn_stop");
     expect(allPatches).toContain("set_token_usage");
+
+    termSocket.end();
+  });
+
+  it("ExitPlanMode PermissionRequest creates plan-review inbox item and allow passes through", async () => {
+    // Start session
+    await sendHookEvent({
+      event: "SessionStart",
+      session_id: "test-plan",
+      cwd: "/test/project",
+      pid: 42,
+      source: "bridge",
+      data: {},
+      needs_response: false,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Connect terminal
+    const termSocket = createConnection(TERMINAL_SOCK);
+    await new Promise<void>((resolve) => termSocket.on("connect", resolve));
+    sendTerminalMessage(termSocket, { type: "request.session", sessionId: "test-plan" });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Collect messages
+    const collectedMessages: ServerMessage[] = [];
+    let buf = "";
+    termSocket.on("data", (chunk) => {
+      buf += chunk.toString();
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.substring(0, idx).trim();
+        buf = buf.substring(idx + 1);
+        if (line.length > 0) collectedMessages.push(JSON.parse(line));
+      }
+    });
+    // Drain initial
+    await new Promise((r) => setTimeout(r, 100));
+    collectedMessages.length = 0;
+
+    // Send PermissionRequest for ExitPlanMode (bidirectional — keeps hook socket open)
+    const { response: hookResponse } = await sendBidirectionalHookEvent({
+      event: "PermissionRequest",
+      session_id: "test-plan",
+      cwd: "/test/project",
+      pid: 42,
+      source: "bridge",
+      data: { tool_name: "ExitPlanMode", tool_input: { plan: "1. Do stuff\n2. Do more" } },
+      needs_response: true,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Terminal should receive inbox.added with type plan-review
+    const inboxAdded = collectedMessages.find((m) => m.type === "inbox.added") as Extract<ServerMessage, { type: "inbox.added" }>;
+    expect(inboxAdded).toBeDefined();
+    expect(inboxAdded.item.type).toBe("plan-review");
+    const itemId = inboxAdded.item.id;
+
+    // Terminal sends plan-review approve
+    sendTerminalMessage(termSocket, {
+      type: "action.plan-review",
+      itemId,
+      decision: "allow",
+    } as any);
+
+    // Wait for hook socket to get the response
+    const resp = await hookResponse;
+    expect((resp as any).hookSpecificOutput.decision.behavior).toBe("allow");
+
+    // Terminal should receive inbox.removed
+    await new Promise((r) => setTimeout(r, 50));
+    const inboxRemoved = collectedMessages.find((m) => m.type === "inbox.removed") as Extract<ServerMessage, { type: "inbox.removed" }>;
+    expect(inboxRemoved).toBeDefined();
+    expect(inboxRemoved.itemId).toBe(itemId);
+
+    termSocket.end();
+  });
+
+  it("non-ExitPlanMode PermissionRequest creates permission inbox item", async () => {
+    // Start session
+    await sendHookEvent({
+      event: "SessionStart",
+      session_id: "test-perm",
+      cwd: "/test/project",
+      pid: 42,
+      source: "bridge",
+      data: {},
+      needs_response: false,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Connect terminal
+    const termSocket = createConnection(TERMINAL_SOCK);
+    await new Promise<void>((resolve) => termSocket.on("connect", resolve));
+    sendTerminalMessage(termSocket, { type: "request.session", sessionId: "test-perm" });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Collect messages
+    const collectedMessages: ServerMessage[] = [];
+    let buf = "";
+    termSocket.on("data", (chunk) => {
+      buf += chunk.toString();
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.substring(0, idx).trim();
+        buf = buf.substring(idx + 1);
+        if (line.length > 0) collectedMessages.push(JSON.parse(line));
+      }
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    collectedMessages.length = 0;
+
+    // Send PermissionRequest for Bash (bidirectional)
+    const { response: hookResponse } = await sendBidirectionalHookEvent({
+      event: "PermissionRequest",
+      session_id: "test-perm",
+      cwd: "/test/project",
+      pid: 42,
+      source: "bridge",
+      data: { tool_name: "Bash", tool_input: { command: "npm test" } },
+      needs_response: true,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Terminal should receive inbox.added with type permission
+    const inboxAdded = collectedMessages.find((m) => m.type === "inbox.added") as Extract<ServerMessage, { type: "inbox.added" }>;
+    expect(inboxAdded).toBeDefined();
+    expect(inboxAdded.item.type).toBe("permission");
+
+    // Terminal allows via action.permission
+    sendTerminalMessage(termSocket, {
+      type: "action.permission",
+      itemId: inboxAdded.item.id,
+      decision: "allow",
+    } as any);
+
+    const resp = await hookResponse;
+    expect((resp as any).hookSpecificOutput.decision.behavior).toBe("allow");
 
     termSocket.end();
   });

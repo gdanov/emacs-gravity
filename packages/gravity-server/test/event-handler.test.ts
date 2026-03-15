@@ -1119,7 +1119,7 @@ describe("Event Handler", () => {
   // ────────────────────────────────────────────────────────────────────
 
   describe("PermissionRequest", () => {
-    it("creates inbox item with hook socket reference", () => {
+    it("creates plan-review inbox item for ExitPlanMode", () => {
       startSession(deps);
       const socket = makeMockSocket();
       const patches = fire(deps, "PermissionRequest", "s1", {
@@ -1128,7 +1128,7 @@ describe("Event Handler", () => {
 
       const items = deps.inbox.all();
       expect(items.length).toBe(1);
-      expect(items[0].type).toBe("permission");
+      expect(items[0].type).toBe("plan-review");
       expect(items[0].sessionId).toBe("s1");
       expect(items[0].summary).toBe("ExitPlanMode");
 
@@ -1136,6 +1136,18 @@ describe("Event Handler", () => {
       const pending = deps.inbox.getPending(items[0].id);
       expect(pending).toBeDefined();
       expect(pending!.hookSocket).toBe(socket);
+    });
+
+    it("creates permission inbox item for non-ExitPlanMode tools", () => {
+      startSession(deps);
+      const socket = makeMockSocket();
+      fire(deps, "PermissionRequest", "s1", {
+        tool_name: "Bash",
+      }, 123, socket);
+
+      const items = deps.inbox.all();
+      expect(items.length).toBe(1);
+      expect(items[0].type).toBe("permission");
     });
 
     it("returns empty patches (handled asynchronously)", () => {
@@ -1155,7 +1167,7 @@ describe("Event Handler", () => {
       });
 
       // No socket means no inbox item, just returns empty
-      const items = deps.inbox.all().filter(i => i.type === "permission");
+      const items = deps.inbox.all().filter(i => i.type === "plan-review" || i.type === "permission");
       expect(items.length).toBe(0);
     });
 

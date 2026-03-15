@@ -438,10 +438,11 @@ export function handleEvent(
       const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const toolName = data.tool_name || "unknown";
       const summary = toolName; // TODO: tool signature like Emacs
+      const inboxType = toolName === "ExitPlanMode" ? "plan-review" as const : "permission" as const;
 
       if (hookSocket) {
         const item = inbox.add(
-          "permission",
+          inboxType,
           sessionId,
           session.project,
           session.slug || sessionId.substring(0, 8),

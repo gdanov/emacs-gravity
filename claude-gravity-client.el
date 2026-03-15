@@ -218,7 +218,13 @@ PROC is the process, EVENT is the status change."
                              claude-gravity-server-terminal-sock)
         ;; Request overview on connect
         (claude-gravity--send-to-server
-         '((type . "request.overview"))))
+         '((type . "request.overview")))
+        ;; Re-subscribe to previously-opened session details
+        (maphash (lambda (sid _)
+                   (claude-gravity--send-to-server
+                    `((type . "request.session")
+                      (sessionId . ,sid))))
+                 claude-gravity--client-subscribed-sessions))
     (error
      (claude-gravity--log 'error "Failed to connect to gravity-server: %s" err)
      (claude-gravity--schedule-reconnect))))
