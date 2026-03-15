@@ -58,23 +58,6 @@ Diffs longer than this are truncated with an ellipsis indicator."
   :group 'claude-gravity)
 
 
-(defcustom claude-gravity-tmux-default-columns 80
-  "Default column width for managed tmux sessions.
-Used as the initial tmux window width when no Emacs window is
-displaying the session buffer yet.  Once a session buffer is
-visible, the tmux width tracks the Emacs window width."
-  :type 'integer
-  :group 'claude-gravity)
-
-
-(defcustom claude-gravity-tmux-sync-width nil
-  "Whether to sync tmux window width to the Emacs session buffer width.
-When non-nil, resizes the tmux window whenever the Emacs window
-displaying the session buffer changes size, and sets the initial
-width on session creation."
-  :type 'boolean
-  :group 'claude-gravity)
-
 
 (defvar claude-gravity-log-level 'warn
   "Minimum log level.  One of: debug, info, warn, error.

@@ -13,7 +13,6 @@
 (declare-function claude-gravity--write-allow-pattern-for-tool "claude-gravity-session")
 (declare-function claude-gravity--send-permission-response "claude-gravity-client")
 (declare-function claude-gravity--current-session-tmux-p "claude-gravity-tmux")
-(declare-function claude-gravity--tmux-sync-width-for-buffer "claude-gravity-tmux")
 (declare-function claude-gravity-toggle-permission-mode "claude-gravity-tmux")
 (declare-function claude-gravity--current-session-daemon-p "claude-gravity-daemon")
 (declare-function claude-gravity-daemon-start-session "claude-gravity-daemon")
@@ -1146,11 +1145,9 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
             #'claude-gravity--session-on-focus nil t))
 
 (defun claude-gravity--session-on-focus (_frame)
-  "Refresh session buffer when it gains focus.
-Also syncs tmux window width to match the new window size."
+  "Refresh session buffer when it gains focus."
   (when (and (derived-mode-p 'claude-gravity-session-mode)
              claude-gravity--buffer-session-id)
-    (claude-gravity--tmux-sync-width-for-buffer (current-buffer))
     (let ((session (claude-gravity--get-session claude-gravity--buffer-session-id)))
       (when session
         (claude-gravity--render-session-buffer session)))))
