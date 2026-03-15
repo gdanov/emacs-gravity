@@ -11,8 +11,8 @@ struct ProjectInfo: Identifiable {
 struct SessionInfo: Identifiable {
     let id: String
     let slug: String?
-    let status: String        // "active" | "ended"
-    let claudeStatus: String  // "idle" | "responding"
+    var status: String        // "active" | "ended"
+    var claudeStatus: String  // "idle" | "responding"
     let toolCount: Int
     let lastEventTime: Double
 
@@ -20,21 +20,22 @@ struct SessionInfo: Identifiable {
         slug ?? String(id.prefix(8))
     }
 
-    var claudeStatusLabel: String {
-        if status == "ended" { return "ended" }
-        if claudeStatus == "responding" { return "responding" }
-        let elapsed = Date().timeIntervalSince1970 * 1000 - lastEventTime
-        let minutes = Int(elapsed / 60_000)
-        if minutes > 0 {
-            return "idle \(minutes)m"
-        }
-        return "idle"
-    }
-
     var statusColor: Color {
         if status == "ended" { return .gray }
         if claudeStatus == "responding" { return .yellow }
         return .green
+    }
+
+    var statusLabel: String {
+        if status == "ended" { return "ended" }
+        if claudeStatus == "responding" { return "responding" }
+        let elapsed = Date().timeIntervalSince1970 - lastEventTime
+        if elapsed > 3600 {
+            return "idle \(Int(elapsed / 3600))h"
+        } else if elapsed > 60 {
+            return "idle \(Int(elapsed / 60))m"
+        }
+        return "idle"
     }
 }
 

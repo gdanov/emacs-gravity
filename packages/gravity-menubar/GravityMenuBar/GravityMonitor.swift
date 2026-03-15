@@ -8,12 +8,12 @@ class GravityMonitor: ObservableObject {
     @Published var projects: [ProjectInfo] = []
     @Published var inboxItems: [InboxInfo] = []
 
-    var activeSessionCount: Int {
+    var activeCount: Int {
         projects.flatMap(\.sessions).filter { $0.status == "active" }.count
     }
 
-    var attentionCount: Int {
-        inboxItems.filter { $0.type != "idle" }.count
+    var hasResponding: Bool {
+        projects.flatMap(\.sessions).contains { $0.claudeStatus == "responding" }
     }
 
     private var socketFD: Int32 = -1
