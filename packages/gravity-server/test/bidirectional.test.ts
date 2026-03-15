@@ -121,6 +121,59 @@ describe("InboxManager", () => {
     });
   });
 
+  describe("removeStaleForSession", () => {
+    it("removes items without pending responses", () => {
+      inbox.add("permission", "s1", "proj", "A", "s", {});
+      inbox.add("permission", "s1", "proj", "B", "s", {});
+      const removed = inbox.removeStaleForSession("s1");
+      expect(removed).toHaveLength(2);
+      expect(inbox.all()).toHaveLength(0);
+    });
+
+    it("preserves items with active pending responses", () => {
+      const sock = mockSocket();
+      inbox.add("permission", "s1", "proj", "A", "s", {}, sock);
+      const removed = inbox.removeStaleForSession("s1");
+      expect(removed).toHaveLength(0);
+      expect(inbox.all()).toHaveLength(1);
+      expect(inbox.all()[0].label).toBe("A");
+    });
+
+    it("removes stale items but keeps pending ones", () => {
+      const sock = mockSocket();
+      inbox.add("permission", "s1", "proj", "Pending", "s", {}, sock);
+      inbox.add("permission", "s1", "proj", "Stale", "s", {});
+      const removed = inbox.removeStaleForSession("s1");
+      expect(removed).toHaveLength(1);
+      expect(removed[0].label).toBe("Stale");
+      expect(inbox.all()).toHaveLength(1);
+      expect(inbox.all()[0].label).toBe("Pending");
+    });
+
+    it("filters by type when provided", () => {
+      inbox.add("permission", "s1", "proj", "Perm", "s", {});
+      inbox.add("question", "s1", "proj", "Q", "s", {});
+      const removed = inbox.removeStaleForSession("s1", "permission");
+      expect(removed).toHaveLength(1);
+      expect(removed[0].label).toBe("Perm");
+      expect(inbox.all()).toHaveLength(1);
+      expect(inbox.all()[0].label).toBe("Q");
+    });
+
+    it("returns empty array for unknown session", () => {
+      const removed = inbox.removeStaleForSession("unknown");
+      expect(removed).toHaveLength(0);
+    });
+
+    it("does not touch pending map entries for preserved items", () => {
+      const sock = mockSocket();
+      const item = inbox.add("permission", "s1", "proj", "A", "s", {}, sock);
+      inbox.removeStaleForSession("s1");
+      expect(inbox.getPending(item.id)).toBeDefined();
+      expect(inbox.getPending(item.id)!.hookSocket).toBe(sock);
+    });
+  });
+
   describe("find", () => {
     it("finds item by ID", () => {
       const item = inbox.add("permission", "s1", "proj", "A", "s", {});

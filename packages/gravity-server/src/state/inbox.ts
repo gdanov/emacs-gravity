@@ -69,6 +69,21 @@ export class InboxManager {
     return removed;
   }
 
+  /** Remove items for session that have NO active pending response (stale). */
+  removeStaleForSession(sessionId: string, type?: InboxItemType): InboxItem[] {
+    const removed: InboxItem[] = [];
+    this.items = this.items.filter((item) => {
+      if (item.sessionId === sessionId && (!type || item.type === type)) {
+        // Keep items with active pending responses — bridge is still waiting
+        if (this.pending.has(item.id)) return true;
+        removed.push(item);
+        return false;
+      }
+      return true;
+    });
+    return removed;
+  }
+
   /** Find an inbox item by ID. */
   find(id: number): InboxItem | undefined {
     return this.items.find((i) => i.id === id);
