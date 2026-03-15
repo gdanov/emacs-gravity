@@ -11,50 +11,45 @@ Emacs UI for Claude Code, inspired by Google's AntiGravity and Cursor. Provides 
 ```
 Claude Code (11 hooks)
     ↓
-emacs-bridge (Node.js, one-shot)
-    ↓ enriched events
-    ├──→ Emacs socket (legacy direct mode)
-    └──→ gravity-server hook socket (new server mode)
-              ↓ state management + patches
-         gravity-server (TypeScript, long-running)
-              ↓ semantic patches over terminal socket
-         Emacs client (claude-gravity-client.el)
-              ↓
-         magit-section UI
+emacs-bridge (Node.js, one-shot shim)
+    ↓ hook socket (~/.local/state/gravity-hooks.sock)
+gravity-server (TypeScript, long-running)
+    ├── enrichment, state management, inbox
+    ↓ semantic patches over terminal socket (~/.local/state/gravity-terminal.sock)
+Emacs client (claude-gravity-client.el)
+    ↓
+magit-section UI
 ```
 
-**Two modes of operation:**
-1. **Legacy (direct):** Bridge → Emacs socket → `claude-gravity-events.el` handles state
-2. **Server mode (new):** Bridge → gravity-server → patches → `claude-gravity-client.el` applies patches
-
-Both modes coexist during migration. The bridge dual-writes to both sockets.
+**Server-driven architecture:** gravity-server owns all session state. Emacs is a thin terminal client that receives semantic patches and sends user actions (permission responses, plan review feedback). Multiple terminals can connect simultaneously.
 
 **Monorepo structure:** `packages/{shared, emacs-bridge, gravity-server}` with npm workspaces.
 
-For detailed architecture, see @ARCHITECTURE.md.
+For detailed architecture, see @ARCHITECTURE.md. For the v3 design rationale, see @docs/refactor-implementation.md.
 
 ## Module Structure (Summary)
 
-The Emacs package is split into 13 modular files:
+The Emacs package is split into 15 modular files:
 
 | Module | Purpose |
 |--------|---------|
-| `claude-gravity-core.el` | Utilities, logging, custom variables |
+| `claude-gravity-core.el` | Utilities, logging, custom variables, tlist |
 | `claude-gravity-faces.el` | 37 faces and fringe bitmaps |
 | `claude-gravity-session.el` | Session state CRUD |
-| `claude-gravity-state.el` | Model API, mutation functions |
+| `claude-gravity-discovery.el` | Plugin/skill/agent/MCP capability discovery |
+| `claude-gravity-state.el` | Model API, mutation functions (read-replica) |
 | `claude-gravity-events.el` | Event dispatcher (11 hook types) |
 | `claude-gravity-text.el` | Text rendering: dividers, markdown, wrapping |
 | `claude-gravity-diff.el` | Inline diffs, tool/plan display |
 | `claude-gravity-render.el` | UI section rendering |
 | `claude-gravity-ui.el` | Buffers, keymaps, transient menu |
-| `claude-gravity-socket.el` | Socket server, plan review (legacy) |
-| `claude-gravity-client.el` | Client connection to gravity-server (new) |
-| `claude-gravity-actions.el` | Permission and question buffers |
+| `claude-gravity-plan-review.el` | Plan review buffer and feedback flow |
+| `claude-gravity-client.el` | Terminal socket client to gravity-server |
+| `claude-gravity-actions.el` | Permission and question action buffers |
 | `claude-gravity-tmux.el` | Tmux session management |
 | `claude-gravity.el` | Thin loader |
 
-**Load order:** `core → {faces,session} → state → events → {text,diff} → render → ui ↔ socket → {actions,tmux}`
+**Load order:** `core → {faces,session,discovery} → state → events → {text,diff} → render → ui → plan-review → client → {actions,tmux}`
 
 For line counts, key functions, and dependency details, see @ARCHITECTURE.md.
 
@@ -83,7 +78,7 @@ For complete visual specification and keybindings, see @UI-SPEC.md.
 
 For build commands, dependencies, debugging, and testing, see @DEVELOPMENT.md.
 
-Use `npm install` in emacs-bridge and `M-x eval-defun` for Emacs Lisp changes.
+Use `npm install` at the monorepo root, `make test` for all tests, and `M-x eval-defun` for Emacs Lisp changes.
 
 ## Related Documentation
 
@@ -95,5 +90,7 @@ Use @path to read detailed information on specific topics:
 - @UI-SPEC.md — Visual specification for all UI states and keybindings
 - @AGENTS.md — Agent workflow and landing-the-plane protocol
 - @plan.md — Project roadmap and feature backlog
-- @docs/emacs-driven-sessions.md — Managed sessions research and implementation
+- @docs/refactor-implementation.md — v3 design: gravity-server architecture and terminal protocol
+- @docs/session-data-model.md — Session plist structure and turn tree reference
+- @docs/emacs-driven-sessions.md — Managed sessions research (historical)
 - @docs/tmux-interactive-sessions.md — Tmux integration approach

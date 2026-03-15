@@ -445,6 +445,7 @@ SESSION-JSON is an alist from json-parse-string."
           :streaming-text (funcall jnil (alist-get 'streamingText session-json))
           :permission-mode (funcall jnil (alist-get 'permissionMode session-json))
           :model-name (funcall jnil (alist-get 'modelName session-json))
+          :tmux-session (funcall jnil (alist-get 'tmuxSession session-json))
           :turns turns-tl
           :current-turn (or (alist-get 'currentTurn session-json) 0)
           :tool-index tool-index
@@ -632,6 +633,12 @@ MSG contains sessionId and full session state."
           (plist-put session :buffer buf))))
     ;; Store session
     (puthash session-id session claude-gravity--sessions)
+    ;; Register tmux mapping if present
+    (let ((tmux-name (plist-get session :tmux-session)))
+      (when (and tmux-name (not (gethash session-id claude-gravity--tmux-sessions)))
+        (puthash session-id tmux-name claude-gravity--tmux-sessions)
+        (claude-gravity--log 'info "Client: registered tmux mapping: %s → %s"
+                             session-id tmux-name)))
     ;; Refresh UI
     (claude-gravity--schedule-refresh)
     (claude-gravity--schedule-session-refresh session-id)
@@ -690,12 +697,18 @@ MSG contains sessionId and patches array."
        (let ((slug (alist-get 'slug patch))
              (branch (alist-get 'branch patch))
              (pid (alist-get 'pid patch))
-             (model-name (alist-get 'modelName patch)))
+             (model-name (alist-get 'modelName patch))
+             (tmux-session (alist-get 'tmuxSession patch)))
          (when slug (plist-put session :slug slug))
          (when branch (plist-put session :branch branch))
          (when (and pid (numberp pid) (> pid 0))
            (plist-put session :pid pid))
          (when model-name (plist-put session :model-name model-name))
+         (when tmux-session
+           (plist-put session :tmux-session tmux-session)
+           (let ((sid (plist-get session :session-id)))
+             (when (and sid (not (gethash sid claude-gravity--tmux-sessions)))
+               (puthash sid tmux-session claude-gravity--tmux-sessions))))
          (plist-put session :last-event-time (current-time))))
 
       ("add_turn"

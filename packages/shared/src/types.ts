@@ -107,6 +107,7 @@ export interface Session {
   branch: string | null;
   pid: number | null;
   modelName: string | null;
+  tmuxSession: string | null;
   startTime: number;
   lastEventTime: number;
   tokenUsage: TokenUsage | null;
@@ -262,7 +263,7 @@ export type Patch =
   | { op: "set_plan"; plan: Plan | null }
   | { op: "set_streaming_text"; text: string | null }
   | { op: "set_permission_mode"; mode: string | null }
-  | { op: "set_meta"; slug?: string; branch?: string; pid?: number; modelName?: string }
+  | { op: "set_meta"; slug?: string; branch?: string; pid?: number; modelName?: string; tmuxSession?: string }
   | { op: "add_turn"; turn: TurnNode }
   | { op: "freeze_turn"; turnNumber: number }
   | { op: "set_turn_stop"; turnNumber: number; stopText?: string; stopThinking?: string }

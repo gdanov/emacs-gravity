@@ -92,7 +92,7 @@ After this, every new shell in the project directory automatically has Emacs, No
 
 ```bash
 git clone https://github.com/anthropics/emacs-gravity.git  # or your fork
-cd emacs-gravity/emacs-bridge
+cd emacs-gravity
 npm install
 ```
 
@@ -113,7 +113,7 @@ The bridge is a Claude Code plugin. Register it by creating `~/.claude/plugins/m
     {
       "name": "emacs-bridge",
       "description": "Bridge to Emacs via Unix Socket",
-      "source": "/absolute/path/to/emacs-gravity/emacs-bridge"
+      "source": "/absolute/path/to/emacs-gravity/packages/emacs-bridge"
     }
   ]
 }
@@ -133,7 +133,7 @@ Add to your Emacs init file (`~/.emacs.d/init.el` or `~/.config/emacs/init.el`):
 (claude-gravity-server-start)
 ```
 
-This starts the Unix domain socket server that receives events from the bridge.
+This starts gravity-server (if not already running) and connects Emacs as a terminal client.
 
 **With Nix:** Make sure you launch Emacs from inside the dev shell (`nix develop --command emacs`) or via direnv, so the correct Emacs with magit-section and transient is used.
 
@@ -164,7 +164,11 @@ tail -f /tmp/emacs-bridge.log
 
 ### Socket path mismatch
 
-The bridge and Emacs must agree on the socket path. Default: `~/.local/state/claude-gravity.sock`. Override with the `CLAUDE_GRAVITY_SOCK` environment variable.
+The system uses two Unix sockets:
+- **Hook socket:** `~/.local/state/gravity-hooks.sock` (bridge → gravity-server). Override: `GRAVITY_HOOK_SOCK`
+- **Terminal socket:** `~/.local/state/gravity-terminal.sock` (gravity-server → Emacs). Override: `GRAVITY_TERMINAL_SOCK`
+
+Both are created by gravity-server on startup.
 
 ### Plugin not loading
 
@@ -174,7 +178,7 @@ Verify the plugin is registered:
 cat ~/.claude/plugins/marketplace.json
 ```
 
-Ensure the `source` path points to the `emacs-bridge` directory (not the project root) and that `src/index.ts` exists inside it.
+Ensure the `source` path points to the `packages/emacs-bridge` directory (not the project root) and that `src/index.ts` exists inside it.
 
 ### Nix: "experimental feature 'flakes' is disabled"
 

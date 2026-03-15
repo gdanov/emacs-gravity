@@ -1,6 +1,6 @@
 # Session Data Model
 
-Reference documentation for how session transcript state is stored in-memory in Emacs.
+Reference documentation for how session state is stored. gravity-server (TypeScript) holds the authoritative state; Emacs maintains a read-replica as plists, kept in sync via semantic patches from the server.
 
 ## Session Plist
 
@@ -41,17 +41,17 @@ Session (plist)
 
 ## Turn Tree
 
-The primary data structure. Mirrors the screen layout: Session → Turns → Cycles → Tools.
-Hooks write directly to the tree at insertion time; the renderer iterates it without grouping or dedup.
+The primary data structure. Mirrors the screen layout: Session → Turns → Steps → Tools.
+State mutations write directly to the tree at insertion time; the renderer iterates it without grouping or dedup.
 
-Defined in `claude-gravity-state.el:276`.
+Defined in `claude-gravity-state.el`.
 
 ```
 :turns (tlist)
 └── turn-node (alist)
     ├── turn-number    integer    — 0-based, monotonic
     ├── prompt         alist|nil  — user prompt for this turn (see below)
-    ├── steps          tlist      — response steps (see below)
+    ├── steps          tlist      — response steps (step-nodes, see below)
     ├── agents         tlist      — agents spawned in this turn
     ├── tasks          list       — task alists for this turn
     ├── tool-count     integer    — root tools in this turn (pre-computed)
@@ -65,7 +65,7 @@ Turn 0 is always pre-allocated for "pre-prompt activity" (tools that run before 
 
 ### Step Node
 
-A response step groups tools under a single assistant text/thinking block. Step boundaries are detected at insertion time in `claude-gravity--tree-add-tool` — the renderer just iterates.
+A response step groups tools under a single assistant text/thinking block. Step boundaries are detected at insertion time in `claude-gravity--ensure-step` — the renderer just iterates.
 
 ```
 step-node (alist)
@@ -74,10 +74,10 @@ step-node (alist)
 └── tools      tlist       — tool alists in this step
 ```
 
-New cycle is created when:
-- No current cycle exists (first tool in turn)
-- New `assistant_text` differs from current cycle's text
-- New `assistant_thinking` differs from current cycle's thinking
+A new step is created when:
+- No current step exists (first tool in turn)
+- New `assistant_text` differs from current step's text
+- New `assistant_thinking` differs from current step's thinking
 
 ## Prompt Alist
 
@@ -96,7 +96,7 @@ Stored as the `prompt` key of a turn-node. Created by UserPromptSubmit, AskUserQ
 
 ## Tool Alist
 
-In a cycle's `:tools` tlist. Created by PreToolUse, completed by PostToolUse.
+In a step-node's `:tools` tlist. Created by PreToolUse, completed by PostToolUse.
 
 ```
 ├── tool_use_id       string     — unique ID
@@ -126,7 +126,7 @@ In a cycle's `:tools` tlist. Created by PreToolUse, completed by PostToolUse.
 
 In a turn-node's `:agents` tlist. Created by SubagentStart, completed by SubagentStop.
 
-Agents have their own `:cycles` tlist (same structure as turn-node cycles), enabling nested tool rendering.
+Agents have their own `:steps` tlist (same structure as turn-node steps), enabling nested tool rendering.
 
 ```
 ├── agent_id          string     — unique ID
@@ -178,8 +178,8 @@ claude-gravity--sessions (hash-table)
     │   │
     │   ├─ turn-node [turn-number=0]  "Pre-prompt activity"
     │   │   ├── prompt: nil
-    │   │   ├── cycles (tlist)
-    │   │   │   └─ cycle-0
+    │   │   ├── steps (tlist)
+    │   │   │   └─ step-0
     │   │   │       ├── thinking: nil
     │   │   │       ├── text: nil
     │   │   │       └── tools (tlist)
@@ -191,14 +191,14 @@ claude-gravity--sessions (hash-table)
     │   │
     │   ├─ turn-node [turn-number=1]
     │   │   ├── prompt: {text:"Fix the auth bug" elapsed:45.2}
-    │   │   ├── cycles (tlist)
-    │   │   │   ├─ cycle-0
+    │   │   ├── steps (tlist)
+    │   │   │   ├─ step-0
     │   │   │   │   ├── thinking: nil
     │   │   │   │   ├── text: "Let me find the files..."
     │   │   │   │   └── tools (tlist)
     │   │   │   │       ├── {id:"tu_003" name:"Glob" status:"done"}
     │   │   │   │       └── {id:"tu_004" name:"Read" status:"done"}
-    │   │   │   └─ cycle-1
+    │   │   │   └─ step-1
     │   │   │       ├── thinking: nil
     │   │   │       ├── text: "I see the issue..."
     │   │   │       └── tools (tlist)
@@ -208,8 +208,8 @@ claude-gravity--sessions (hash-table)
     │   │   ├── agents (tlist)
     │   │   │   └── {agent_id:"ag_01" type:"Explore" status:"done"
     │   │   │         duration:3.1 task-tool:→tu_007
-    │   │   │         cycles (tlist)
-    │   │   │           └─ cycle-0
+    │   │   │         steps (tlist)
+    │   │   │           └─ step-0
     │   │   │               └── tools: [{name:"Glob"} {name:"Read"}]}
     │   │   ├── tasks: [{subject:"Fix auth" status:"completed"}]
     │   │   ├── stop_text: "All tests pass now."
@@ -217,8 +217,8 @@ claude-gravity--sessions (hash-table)
     │   │
     │   └─ turn-node [turn-number=2]
     │       ├── prompt: {text:"Also update the docs"}
-    │       ├── cycles (tlist)
-    │       │   └─ cycle-0
+    │       ├── steps (tlist)
+    │       │   └─ step-0
     │       │       ├── text: "Now for the docs..."
     │       │       └── tools (tlist)
     │       │           ├── {id:"tu_008" name:"Read" status:"done"}
@@ -226,9 +226,9 @@ claude-gravity--sessions (hash-table)
     │       └── tool-count: 2
     │
     ├── :tool-index (hash-table) ─────────────────────────────────
-    │   "tu_001" → ● (pointer to tool in turn-0/cycle-0)
-    │   "tu_003" → ● (pointer to tool in turn-1/cycle-0)
-    │   "tu_005" → ● (pointer to tool in turn-1/cycle-1)
+    │   "tu_001" → ● (pointer to tool in turn-0/step-0)
+    │   "tu_003" → ● (pointer to tool in turn-1/step-0)
+    │   "tu_005" → ● (pointer to tool in turn-1/step-1)
     │   ...
     │
     ├── :agent-index (hash-table) ────────────────────────────────
@@ -249,24 +249,24 @@ TREE STRUCTURE                          RENDERED UI
 ─────────────                           ──────────
 :turns tlist                            ── Turns (N) ──────
   turn-node[0]                            Pre-prompt activity  [0t 0a 2 tools]
-    cycle-0                                 ┊ 2 tools
+    step-0                                 ┊ 2 tools
       tool, tool                              [x] Glob  [x] Read
 
   turn-node[1]                          ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
     prompt                              ❯ Fix the auth bug  [1t 1a 4 tools]  45.2s
-    cycle-0                               ┊ Let me find the files...
+    step-0                               ┊ Let me find the files...
       tool, tool                            ┊ 2 tools  [x] Glob  [x] Read
-    cycle-1                               ┊ I see the issue...
+    step-1                               ┊ I see the issue...
       tool, tool                            ┊ 2 tools  [x] Edit  [x] Bash
     agents                                  [x] Explore (ag_01)  3.1s
-      agent.cycles                            ┊ 2 tools  [x] Glob  [x] Read
+      agent.steps                            ┊ 2 tools  [x] Glob  [x] Read
     tasks                                 Tasks (1/1)  [x] Fix auth
     stop_text                             ┊ All tests pass now.
 ```
 
 ## Key Design Points
 
-1. **Insertion-time grouping**: Cycle boundaries are detected when tools are added (`--tree-add-tool`), not at render time. This eliminates dedup logic from the renderer.
+1. **Insertion-time grouping**: Step boundaries are detected when tools are added (`--ensure-step`), not at render time. This eliminates dedup logic from the renderer.
 
 2. **O(1) lookups**: `:tool-index` and `:agent-index` hash tables store pointers to the same alist objects in the tree. Updates via `PostToolUse`/`SubagentStop` use hash lookup, not tree traversal.
 

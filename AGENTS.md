@@ -31,16 +31,15 @@ M-x ert t /Users/gdanov/work/playground/emacs-gravity/test/claude-gravity-test.e
 M-x ert t cg-test-user-prompt-advances-turn
 ```
 
-### Node.js Bridge (emacs-bridge/)
+### Node.js (monorepo)
 
 ```bash
-cd emacs-bridge
-npm install           # Install dependencies (first time)
-npm test              # Run vitest tests
-npx tsc --noEmit      # Type check without building
-
-# Run single test
-npx vittest run --testNamePattern "extractTrailingText"
+npm install               # Install all workspace dependencies (first time)
+make test                 # Run all tests (elisp + bridge + server)
+make test-bridge          # Bridge tests only
+make test-server          # Server tests only
+make build-server         # Build gravity-server → dist/server.mjs
+make sync-cache           # Sync dist to plugin marketplace cache (REQUIRED after changes)
 ```
 
 ---
@@ -89,7 +88,7 @@ npx vittest run --testNamePattern "extractTrailingText"
 - Never use `append` in loops
 - Use `magit-insert-section` macros as-is — don't refactor them
 
-### TypeScript (emacs-bridge/)
+### TypeScript (packages/emacs-bridge/, packages/gravity-server/, packages/shared/)
 
 **Naming & Formatting:**
 - Kebab-case files: `extract-transcript.ts`
@@ -103,7 +102,7 @@ npx vittest run --testNamePattern "extractTrailingText"
 
 **Error Handling:**
 - Always return valid JSON to stdout, even on errors
-- Log to `/tmp/emacs-bridge.log`
+- Log to `/tmp/emacs-bridge.log` (bridge) or stderr (gravity-server)
 
 ---
 
@@ -111,25 +110,33 @@ npx vittest run --testNamePattern "extractTrailingText"
 
 ```
 emacs-gravity/
-├── claude-gravity.el          ; Thin loader
-├── claude-gravity-core.el     ; Utilities, logging, custom variables
-├── claude-gravity-faces.el    ; Faces and fringe bitmaps
-├── claude-gravity-session.el  ; Session state CRUD
-├── claude-gravity-state.el    ; Model API, mutation functions
-├── claude-gravity-events.el   ; Event dispatcher (11 hook types)
-├── claude-gravity-text.el     ; Text rendering
-├── claude-gravity-diff.el     ; Inline diffs, tool/plan display
-├── claude-gravity-render.el   ; UI section rendering
-├── claude-gravity-ui.el       ; Buffers, keymaps, transient menu
-├── claude-gravity-socket.el   ; Socket server
-├── claude-gravity-actions.el  ; Permission/question buffers
-├── claude-gravity-tmux.el     ; Tmux session management
-├── claude-gravity-debug.el    ; Debug helpers
-├── emacs-bridge/              ; Node.js hook forwarder
-│   ├── src/index.ts
-│   └── test/*.test.ts
+├── claude-gravity.el              ; Thin loader
+├── claude-gravity-core.el         ; Utilities, logging, tlist
+├── claude-gravity-faces.el        ; Faces and fringe bitmaps
+├── claude-gravity-session.el      ; Session state CRUD
+├── claude-gravity-discovery.el    ; Plugin/skill/MCP capability discovery
+├── claude-gravity-state.el        ; Model API, mutation functions (read-replica)
+├── claude-gravity-events.el       ; Event dispatcher (11 hook types)
+├── claude-gravity-text.el         ; Text rendering
+├── claude-gravity-diff.el         ; Inline diffs, tool/plan display
+├── claude-gravity-render.el       ; UI section rendering
+├── claude-gravity-ui.el           ; Buffers, keymaps, transient menu
+├── claude-gravity-plan-review.el  ; Plan review buffer and feedback
+├── claude-gravity-client.el       ; Terminal socket client to gravity-server
+├── claude-gravity-actions.el      ; Permission/question action buffers
+├── claude-gravity-tmux.el         ; Tmux session management
+├── claude-gravity-debug.el        ; Debug helpers
+├── packages/
+│   ├── shared/                    ; Shared types (Session, Patch, messages)
+│   ├── emacs-bridge/              ; Claude Code plugin (one-shot shim)
+│   │   ├── src/index.ts
+│   │   └── hooks/                 ; Shell scripts + _ensure-server
+│   └── gravity-server/            ; Stateful backend (state, enrichment, protocol)
+│       ├── src/server.ts
+│       └── test/
+├── Makefile
 └── test/
-    └── claude-gravity-test.el ; ERT tests
+    └── claude-gravity-test.el     ; ERT tests
 ```
 
 ---

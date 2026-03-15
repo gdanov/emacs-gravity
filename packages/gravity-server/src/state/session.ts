@@ -34,6 +34,7 @@ export function createSession(sessionId: string, cwd: string): Session {
     branch: null,
     pid: null,
     modelName: null,
+    tmuxSession: null,
     startTime: Date.now(),
     lastEventTime: Date.now(),
     tokenUsage: null,
@@ -122,13 +123,14 @@ export function setPlan(s: Session, plan: Plan | null): Patch[] {
 
 export function updateMeta(
   s: Session,
-  opts: { pid?: number; slug?: string; branch?: string; modelName?: string },
+  opts: { pid?: number; slug?: string; branch?: string; modelName?: string; tmuxSession?: string },
 ): Patch[] {
   s.lastEventTime = Date.now();
   if (opts.pid && opts.pid > 0) s.pid = opts.pid;
   if (opts.slug && !s.slug) s.slug = opts.slug;
   if (opts.branch) s.branch = opts.branch;
   if (opts.modelName) s.modelName = opts.modelName;
+  if (opts.tmuxSession && !s.tmuxSession) s.tmuxSession = opts.tmuxSession;
   return [{ op: "set_meta", ...opts }];
 }
 

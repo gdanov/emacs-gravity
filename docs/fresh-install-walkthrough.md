@@ -77,25 +77,19 @@ direnv allow
 
 **What direnv provides:** Every new shell in the project directory gets Emacs 30 (with magit-section + transient), Node.js 22, and GNU Make — without any manual activation.
 
-## Step 4: Build the bridge
+## Step 4: Build the project
 
 ```bash
 cd emacs-gravity
 
 # With direnv (automatic):
-make build
+npm install
 
 # Without direnv (explicit):
-nix develop --command make build
+nix develop --command npm install
 ```
 
-Output:
-```
-cd emacs-bridge && npm ci
-added 56 packages, and audited 57 packages in 4s
-```
-
-**What this does:** Installs npm dependencies. The bridge runs TypeScript directly with tsx, so no build step is required.
+**What this does:** Installs npm dependencies for all workspace packages (`packages/shared`, `packages/emacs-bridge`, `packages/gravity-server`). The bridge runs TypeScript directly with tsx, so no separate build step is required.
 
 ## Step 5: Run tests
 
@@ -105,14 +99,16 @@ make test        # or: nix develop --command make test
 
 ### Expected results
 
-**Bridge tests (vitest):** 276/276 pass.
+**Bridge tests (vitest):** All pass.
+
+**Server tests (vitest):** All pass.
 
 **Elisp tests (ERT):** 73/74 pass. One pre-existing failure:
 - `cgc-notification-stores-message` — bug in notification event handler (unrelated to installation)
 
 ### Snapshot mismatches on first run
 
-The bridge snapshot tests (`test/enrichment.test.ts`) contain absolute paths from the original development machine. On a new machine, these 5 tests fail with path mismatches:
+The bridge snapshot tests (`packages/emacs-bridge/test/enrichment.test.ts`) contain absolute paths from the original development machine. On a new machine, these tests fail with path mismatches:
 
 ```
 - "transcript_path": "/Users/gdanov/work/playground/emacs-gravity/..."
@@ -122,10 +118,10 @@ The bridge snapshot tests (`test/enrichment.test.ts`) contain absolute paths fro
 **Fix:** Update snapshots for your machine:
 
 ```bash
-cd emacs-bridge && npx vitest run --update
+npx -w packages/emacs-bridge vitest run --update
 ```
 
-This rewrites `test/__snapshots__/enrichment.test.ts.snap` with your local paths. **Do not commit this change** — it's machine-specific.
+This rewrites snapshot files with your local paths. **Do not commit this change** — it's machine-specific.
 
 ### Nix flake checks
 
@@ -154,13 +150,13 @@ mkdir -p ~/.claude/plugins
     {
       "name": "emacs-bridge",
       "description": "Bridge to Emacs via Unix Socket",
-      "source": "/absolute/path/to/emacs-gravity/emacs-bridge"
+      "source": "/absolute/path/to/emacs-gravity/packages/emacs-bridge"
     }
   ]
 }
 ```
 
-**The `source` path must be absolute** and point to the `emacs-bridge` directory (not the project root). Claude Code resolves plugins at startup.
+**The `source` path must be absolute** and point to the `packages/emacs-bridge` directory (not the project root). Claude Code resolves plugins at startup.
 
 **Verify:** After restarting Claude Code, hook status messages appear in the Claude Code output (e.g., `gravity: session start`).
 
@@ -184,33 +180,14 @@ emacs
 nix develop --command emacs
 ```
 
-### Verify the socket server
+### Verify the server
+
+gravity-server is auto-started by hook scripts (via `_ensure-server`) or by Emacs (`claude-gravity-server-start`). You can verify the sockets exist:
 
 ```bash
 # In a separate terminal:
-ls -la ~/.local/state/claude-gravity.sock
-# Should exist and show type 's' (socket)
-```
-
-Or from Emacs batch mode:
-
-```bash
-nix develop --command emacs -nw --batch \
-  -L /path/to/emacs-gravity \
-  -l claude-gravity \
-  --eval '(progn
-    (claude-gravity-server-start)
-    (message "Socket: %s" claude-gravity-server-sock-path)
-    (message "Server: %s" (process-status claude-gravity-server-process))
-    (claude-gravity-server-stop)
-    (message "Stopped cleanly"))'
-```
-
-Expected output:
-```
-Socket: /home/youruser/.local/state/claude-gravity.sock
-Server: listen
-Stopped cleanly
+ls -la ~/.local/state/gravity-hooks.sock ~/.local/state/gravity-terminal.sock
+# Both should exist and show type 's' (socket)
 ```
 
 ## Step 8: End-to-end verification
@@ -241,11 +218,13 @@ nix develop .#nox            # nox: Emacs terminal-only + Node.js + Make
 ### Make targets
 
 ```bash
-make build       # Build the Node.js bridge (npm ci + tsc)
-make test        # Run all tests (elisp + bridge)
-make test-elisp  # Run ERT tests only
-make test-bridge # Run vitest bridge tests only
-make clean       # Remove node_modules and dist/
+make test          # Run all tests (elisp + bridge + server)
+make test-elisp    # Run ERT tests only
+make test-bridge   # Run vitest bridge tests only
+make test-server   # Run vitest server tests only
+make build-server  # Build gravity-server → dist/server.mjs
+make sync-cache    # Sync dist to plugin marketplace cache (required after TS changes)
+make clean         # Remove node_modules and dist/
 ```
 
 ### File layout
@@ -272,9 +251,11 @@ Harmless. The daemon module (on hold) has a top-level `make-network-process` cal
 
 First `direnv allow` triggers a full Nix evaluation and may download packages from the binary cache. Takes 2-5 minutes. Subsequent activations are instant (cached).
 
-### Socket path
+### Socket paths
 
-Default socket: `~/.local/state/claude-gravity.sock`. Override with `CLAUDE_GRAVITY_SOCK` environment variable. Both the bridge and Emacs must use the same path.
+Two Unix sockets, both created by gravity-server:
+- **Hook socket:** `~/.local/state/gravity-hooks.sock` (bridge → server). Override: `GRAVITY_HOOK_SOCK`
+- **Terminal socket:** `~/.local/state/gravity-terminal.sock` (server → Emacs). Override: `GRAVITY_TERMINAL_SOCK`
 
 ### Bridge logs
 

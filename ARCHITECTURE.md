@@ -9,94 +9,148 @@ Claude Code
     ↓ (hooks: PreToolUse, PostToolUse, PostToolUseFailure, Stop,
     │         UserPromptSubmit, SubagentStart, SubagentStop,
     │         SessionStart, SessionEnd, Notification, PermissionRequest)
-emacs-bridge (Node.js)
-    ↕ (JSON over Unix domain socket — bidirectional for PermissionRequest)
-claude-gravity.el (Emacs)
+emacs-bridge (Node.js, one-shot shim)
+    ↓ hook socket (~/.local/state/gravity-hooks.sock)
+gravity-server (TypeScript/Effect, long-running)
+    ├── enrichment (transcript parsing, agent attribution)
+    ├── state manager (sessions, turn tree, indexes, inbox)
+    ├── event handler (hook → state mutations → semantic patches)
+    ↓ terminal socket (~/.local/state/gravity-terminal.sock)
+Emacs client (claude-gravity-client.el)
+    ↓ read-replica plist tree
+magit-section renderer
 ```
 
-### One-Shot Architecture
+### Three-Tier Architecture
 
-**emacs-bridge** is a stateless one-shot process:
-1. Claude Code hook script invokes `tsx src/index.ts` with hook event name as argument
-2. Bridge reads event JSON from stdin
-3. Bridge forwards event over Unix domain socket to Emacs
-4. Bridge exits (process lifecycle is hook duration)
-5. Emacs receives and processes event asynchronously
+1. **Bridge shim** (one-shot): Receives hook data from Claude Code via stdin, forwards raw event to gravity-server's hook socket, exits. For bidirectional events (PermissionRequest, AskUserQuestion), keeps the socket open and waits for the server's response.
 
-**State persistence** between bridge invocations:
-- Agent tracking state: `.claude/emacs-bridge-agents.json` (gitignored)
-- Emacs maintains all session state in hash tables
-- Socket communication is stateless from bridge perspective
+2. **gravity-server** (long-running): The stateful backend. Enriches events (transcript parsing, agent attribution), manages session state (turn tree, tool/agent indexes, inbox), and broadcasts semantic patches to all connected terminals.
 
-### Socket Communication
+3. **Emacs client** (long-lived connection): Connects to the terminal socket, receives session snapshots and incremental patches, maintains a local read-replica as plists, and renders via magit-section. Sends user actions (permission responses, plan review feedback) back to the server.
 
-The socket path is `claude-gravity.sock` in the package directory, resolved via:
-1. `${CLAUDE_PLUGIN_ROOT}` environment variable (set by Claude Code)
-2. Fallback: relative to `load-file-name` (Emacs package directory)
+### Two-Socket Design
 
-**Bidirectional flow:**
-- All hooks are **fire-and-forget** (bridge sends event, exits)
-- Except `PermissionRequest` and `AskUserQuestion`: bridge keeps socket open, waits for Emacs response
-- Emacs sends structured JSON response back over the socket
-- Bridge reads response and writes it to stdout for Claude Code to consume
+**Hook socket** (`~/.local/state/gravity-hooks.sock`):
+- Bridge shims connect here, one connection per hook event
+- Newline-delimited JSON: `{ event, session_id, cwd, pid, data, needs_response }`
+- Fire-and-forget for most events; bidirectional for PermissionRequest/AskUserQuestion
+- Override: `GRAVITY_HOOK_SOCK` environment variable
 
-**Error handling:**
-- Bridge always returns valid JSON to stdout, even on socket errors
-- Prevents breaking Claude Code if Emacs is unavailable
-- Emacs buffers messages and renders them when next event arrives
+**Terminal socket** (`~/.local/state/gravity-terminal.sock`):
+- Emacs (and future web/native clients) connect here, persistent connection
+- Server → terminal: snapshots, patches, inbox events, overview refreshes
+- Terminal → server: permission/question/plan-review actions, session/overview requests
+- Override: `GRAVITY_TERMINAL_SOCK` environment variable
 
-## Bridge Design: Stable View Model
+### Auto-Start
 
-The bridge layer translates different session sources into a **stable, unified view model** that Emacs consumes. This ensures the UI renders identically regardless of how the session was started.
+Hook scripts source `_ensure-server` which:
+1. Checks if hook socket exists (fast path)
+2. Spawns gravity-server if missing (atomic lock prevents duplicate spawns)
+3. Waits up to 2s for socket to appear
 
-### Supported Bridges
-
-1. **One-Shot Bridge** (`emacs-bridge/src/index.ts`)
-   - Stateless process invoked by Claude Code hooks
-   - Extracts `stop_text` from transcript files
-   - Runs via tsx: `node_modules/.bin/tsx src/index.ts <event>`
-
-2. **PI Agent Bridge** (`emacs-bridge/src/pi-session.ts`)
-   - Stateful adapter for `@mariozechner/pi-agent-core`
-   - Translates pi-agent events to view model format
-   - Extracts `stop_text`/`stop_thinking` from agent message content
-   - Runs via tsx: `node_modules/.bin/tsx src/daemon.ts`
-
-3. **Daemon Bridge** (`emacs-bridge/src/daemon.ts`)
-   - Long-running process for SDK-based sessions (ON HOLD — API key restrictions)
-   - Manages sessions via `@anthropic-ai/claude-agent-sdk`
-
-### View Model Invariants
-
-All bridges MUST produce events conforming to this schema:
+## Monorepo Structure
 
 ```
-SessionStart: { session_id, cwd, model }
-UserPromptSubmit: { prompt }
-Stop: { stop_text?, stop_thinking?, token_usage? }
-SubagentStart: { agent_id, agent_type }
-SubagentStop: { agent_id, agent_stop_text?, agent_stop_thinking? }
-PreToolUse: { tool_name, tool_call_id }
-PostToolUse: { tool_name, tool_call_id, result, is_error? }
-PostToolUseFailure: { tool_name, tool_call_id, result }
+package.json                     -- npm workspace root
+packages/
+  shared/                        -- Shared types and utilities
+    src/
+      types.ts                   -- Session, TurnNode, Tool, Agent, Patch, messages
+      index.ts                   -- Re-exports
+    package.json
+  emacs-bridge/                  -- Claude Code plugin (thin shim)
+    src/
+      index.ts                   -- stdin → hook socket → stdout
+      services/                  -- Effect services (ProcessIO, Fs, HookSocket)
+    hooks/                       -- Shell scripts (one per hook event)
+      _ensure-server             -- Auto-start gravity-server
+    package.json
+  gravity-server/                -- Stateful backend
+    src/
+      server.ts                  -- Entry, two sockets, message routing
+      state/
+        session-store.ts         -- Map<sessionId, Session>, project grouping
+        session.ts               -- Session factory, mutation methods (emit patches)
+        inbox.ts                 -- InboxManager, PendingResponse
+      enrichment/
+        enrich.ts                -- Event enrichment (transcript parsing)
+        enrichment.ts            -- Pure extraction functions
+        agent-state.ts           -- In-memory agent state (no file I/O)
+      protocol/
+        messages.ts              -- Protocol message types
+        terminal-server.ts       -- Terminal connections, broadcast
+        patch.ts                 -- Patch types, collector
+      handlers/
+        event-handler.ts         -- Hook event → enrichment → state mutations
+        bidirectional.ts         -- Permission/question/plan-review flow
+      util/
+        log.ts                   -- Logging
+    build.mjs                    -- esbuild → dist/server.mjs
+    package.json
+Makefile                         -- Build orchestration
 ```
 
-**Key invariants:**
-- `stop_text` is always present on Stop events (empty string if no content)
-- `agent_stop_text` is always present on SubagentStop events
-- Turn numbers are sequential integers starting from 1
-- Tool attribution is deterministic regardless of bridge source
+## Terminal Protocol
 
-### Why This Matters
+### Server → Terminal Messages
 
-The Emacs view model should not know which bridge generated the event. This:
-- Allows testing bridges in isolation
-- Enables future bridges (e.g., CLI-only, MCP) without UI changes
-- Keeps the rendering layer simple and predictable
+```typescript
+{ type: "session.snapshot", sessionId: string, session: Session }
+{ type: "session.update", sessionId: string, patches: Patch[] }
+{ type: "session.removed", sessionId: string }
+{ type: "inbox.added", item: InboxItem }
+{ type: "inbox.removed", itemId: number }
+{ type: "overview.snapshot", projects: ProjectSummary[] }
+```
+
+### Terminal → Server Messages
+
+```typescript
+{ type: "action.permission", itemId: number, decision: "allow"|"deny", message?: string }
+{ type: "action.question", itemId: number, answers: string[] }
+{ type: "action.plan-review", itemId: number, decision: "allow"|"deny", feedback?: PlanFeedback }
+{ type: "action.turn-auto-approve", sessionId: string }
+{ type: "request.session", sessionId: string }
+{ type: "request.overview" }
+```
+
+### Semantic Patches
+
+Instead of JSON Patch (RFC 6902), the server emits **typed semantic operations** that map 1:1 to model mutations:
+
+```typescript
+type Patch =
+  | { op: "set_status", status: "active" | "ended" }
+  | { op: "set_claude_status", claudeStatus: "idle" | "responding" }
+  | { op: "set_token_usage", usage: TokenUsage }
+  | { op: "set_plan", plan: Plan | null }
+  | { op: "set_streaming_text", text: string | null }
+  | { op: "set_meta", slug?: string, branch?: string, pid?: number }
+  | { op: "add_turn", turn: TurnNode }
+  | { op: "freeze_turn", turnNumber: number }
+  | { op: "set_turn_stop", turnNumber, stopText?, stopThinking? }
+  | { op: "set_turn_tokens", turnNumber, tokenIn, tokenOut }
+  | { op: "add_step", turnNumber, agentId?, step: StepNode }
+  | { op: "add_tool", turnNumber, stepIndex, agentId?, tool: Tool }
+  | { op: "complete_tool", toolUseId, result, status, duration?, postText? }
+  | { op: "add_agent", agent: Agent }
+  | { op: "complete_agent", agentId, stopText?, stopThinking?, duration? }
+  | { op: "update_task", taskId, task: Task }
+  | { op: "track_file", path, fileOp }
+  | { op: "add_prompt", turnNumber, prompt: PromptEntry }
+  | { op: "set_prompt_answer", turnNumber, toolUseId, answer }
+```
+
+**Why semantic over JSON Patch:**
+- Terminals can render incrementally (e.g., `add_tool` → insert one magit section)
+- Typed — terminals validate, unknown ops trigger full refresh
+- Maps directly to both Emacs plist mutations and React state updates
 
 ## Hook System
 
-Hook scripts in `emacs-bridge/hooks/` are registered via `hooks.json`. Each hook is a shell script that pipes stdin to the Node.js bridge with the event name as an argument. The system handles 11 event types:
+Hook scripts in `packages/emacs-bridge/hooks/` are registered via `hooks.json`. Each hook sources `_ensure-server` (to auto-start gravity-server) then invokes `tsx src/index.ts <EventName>`. The system handles 11 event types:
 
 ### Session Lifecycle
 - **SessionStart**: User starts a new Claude Code conversation or runs `/clear`
@@ -113,131 +167,142 @@ Hook scripts in `emacs-bridge/hooks/` are registered via `hooks.json`. Each hook
 
 ### User Interaction
 - **UserPromptSubmit**: User sends a message to Claude (captured for display)
-- **Stop**: User stops Claude's generation (Ctrl+C)
+- **Stop**: Claude's generation completes or is interrupted
 - **Notification**: Informational messages (e.g., permission granted)
 
 ### Bidirectional
-- **PermissionRequest**: Bridge sends request, waits for Emacs response (Approve/Deny)
+- **PermissionRequest**: Bridge keeps socket open, waits for server response
   - Matcher: `ExitPlanMode` (when Claude Code exits plan mode)
   - Timeout: 96 hours
-  - Response: User clicks button in `*Claude Permissions*` buffer
+  - Response: routed through gravity-server inbox → terminal → user action → server → bridge
 
-## Module Structure
+## Emacs Module Structure
 
-The Emacs package is split into 13 modular files loaded via `claude-gravity.el` (thin loader):
+The Emacs package is split into 15 modular files loaded via `claude-gravity.el` (thin loader):
 
 | Module | Lines | Purpose | Key Functions |
 |--------|-------|---------|---|
-| `claude-gravity-core.el` | ~150 | defgroup, defcustom, logging | `claude-gravity-log`, `claude-gravity--session-path` |
-| `claude-gravity-faces.el` | ~250 | 37 defface declarations + fringe bitmaps | `claude-gravity-face-*` (37 faces) |
-| `claude-gravity-session.el` | ~190 | Session hash table, CRUD operations | `claude-gravity--session-get`, `claude-gravity--session-set` |
-| `claude-gravity-state.el` | ~530 | Inbox queue, file/task/agent tracking, model API | `claude-gravity--inbox-push`, `claude-gravity--add-tool`, `claude-gravity--update-task` |
-| `claude-gravity-events.el` | ~340 | Event dispatcher, hook handlers | `claude-gravity--handle-event` (all 11 hook types) |
-| `claude-gravity-text.el` | ~370 | Text utilities: dividers, tables, markdown, wrapping | `claude-gravity--wrap-text`, `claude-gravity--render-plan` |
-| `claude-gravity-diff.el` | ~650 | Inline diffs, tool display, plan revision diff | `claude-gravity--render-tool-diff`, `claude-gravity--plan-revision-diff` |
-| `claude-gravity-render.el` | ~990 | Section renderers, turn grouping, agent/tool/task UI | `claude-gravity--insert-turn-section`, `claude-gravity--insert-tool` |
-| `claude-gravity-ui.el` | ~920 | Overview/session buffers, modes, keymaps, transient | `claude-gravity-status` (main entry point), keymaps |
-| `claude-gravity-socket.el` | ~700 | Socket server, plan review, permissions | `claude-gravity--server-start`, `claude-gravity--handle-permission-request` |
-| `claude-gravity-actions.el` | ~480 | Permission/question action buffers | `claude-gravity--show-permission-buffer`, `claude-gravity--show-question-buffer` |
-| `claude-gravity-tmux.el` | ~610 | Tmux session management, compose buffer | `claude-gravity--tmux-start-session`, `claude-gravity--tmux-heartbeat` |
-| `claude-gravity.el` | ~30 | Thin loader: requires all modules | `claude-gravity` (main entry point) |
+| `claude-gravity-core.el` | ~270 | defgroup, defcustom, logging, tlist | `claude-gravity-log`, `claude-gravity--tlist-*` |
+| `claude-gravity-faces.el` | ~270 | 37 defface declarations + fringe bitmaps | `claude-gravity-face-*` |
+| `claude-gravity-session.el` | ~285 | Session hash table, CRUD operations | `claude-gravity--session-get`, `claude-gravity--session-set` |
+| `claude-gravity-discovery.el` | ~470 | Plugin/skill/agent/MCP capability discovery | `claude-gravity--discover-capabilities` |
+| `claude-gravity-state.el` | ~845 | Model API, mutation functions (read-replica) | `claude-gravity--add-tool`, `claude-gravity--update-task` |
+| `claude-gravity-events.el` | ~845 | Event dispatcher, hook handlers | `claude-gravity--handle-event` (all 11 hook types) |
+| `claude-gravity-text.el` | ~480 | Text utilities: dividers, tables, markdown, wrapping | `claude-gravity--wrap-text`, `claude-gravity--render-plan` |
+| `claude-gravity-diff.el` | ~690 | Inline diffs, tool display, plan revision diff | `claude-gravity--render-tool-diff` |
+| `claude-gravity-render.el` | ~860 | Section renderers, turn grouping, agent/tool/task UI | `claude-gravity--insert-turn-section`, `claude-gravity--insert-tool` |
+| `claude-gravity-ui.el` | ~2210 | Overview/session buffers, modes, keymaps, transient | `claude-gravity-status` (main entry point) |
+| `claude-gravity-plan-review.el` | ~550 | Plan review buffer, comment overlays, feedback flow | `claude-gravity-plan-review-approve`, `claude-gravity-plan-review-deny` |
+| `claude-gravity-client.el` | ~1010 | Terminal socket client to gravity-server | `claude-gravity-server-start`, `claude-gravity--apply-patch` |
+| `claude-gravity-actions.el` | ~920 | Permission/question action buffers, inbox handling | `claude-gravity--show-permission-buffer` |
+| `claude-gravity-tmux.el` | ~1320 | Tmux session management, compose buffer | `claude-gravity--tmux-start-session` |
+| `claude-gravity.el` | ~35 | Thin loader: requires all modules | Entry point |
 
 ### Load Order (Dependency DAG)
 
 ```
-core → {faces, session} → state → events → {text, diff} → render → ui
-                           ↓                                ↓
-                         socket ← ← ← ← ← ← ← ← ← ← ← ← ← ←
-                           ↓
-                      {actions, tmux}
+core → {faces, session, discovery} → state → events → {text, diff} → render → ui
+                                                                        ↓
+                                                                    plan-review
+                                                                        ↓
+                                                                      client
+                                                                        ↓
+                                                                  {actions, tmux}
 ```
 
-Explanation:
-- `core` defines utilities and custom vars (no dependencies)
-- `faces` and `session` depend on `core` only
+- `core` defines utilities, custom vars, tlist (no dependencies)
+- `faces`, `session`, `discovery` depend on `core` only
 - `state` depends on `core` and `session` (stores data in session hash table)
 - `events` depends on `core` and `state` (updates state based on events)
 - `text` and `diff` depend on `core` (pure text transformation)
 - `render` depends on all above (renders turns, tools, tasks, agents)
 - `ui` depends on `render` (main UI buffers and keymaps)
-- `socket` depends on `render` (needs rendering functions to send back to bridge)
-- `actions` and `tmux` depend on `socket` and `ui` (interactive buffers)
+- `plan-review` depends on `ui` (plan review buffer)
+- `client` depends on `plan-review` (terminal socket, patch application, server lifecycle)
+- `actions` and `tmux` depend on `client` and `ui` (interactive buffers, server actions)
 
 **Cross-module forward references:**
-- Use `declare-function` for functions you call before they're defined
+- Use `declare-function` for functions called before they're defined
 - Use bare `defvar` for variables (will be defined elsewhere)
-- This pattern allows modular loading without circular dependencies
 
-## Model API and State Management
+## State Management
 
-The state model is defined in `claude-gravity-state.el` as a set of mutation functions:
+### Server-Side (Authoritative)
+
+gravity-server maintains the authoritative session state. Each mutation method returns `Patch[]`:
+
+```typescript
+interface Session {
+  sessionId: string; cwd: string; project: string;
+  status: "active" | "ended";
+  claudeStatus: "idle" | "responding";
+  turns: TurnNode[];
+  toolIndex: Map<string, Tool>;      // O(1) by tool_use_id
+  agentIndex: Map<string, Agent>;    // O(1) by agent_id
+  tasks: Map<string, Task>;
+  files: Map<string, FileEntry>;
+  plan: Plan | null;
+  tokenUsage: TokenUsage | null;
+  totalToolCount: number;
+  // ... more fields
+}
+```
+
+### Client-Side (Read-Replica in Emacs)
+
+Emacs maintains a read-replica as plists in `claude-gravity--sessions` hash table. The shape mirrors the server's Session object:
 
 ```
 Session (plist)
-├── :slug (string) — unique session identifier
-├── :project (string) — working directory
-├── :status (symbol) — idle, responding, ended
-├── :turns (vector) — turn objects
-├── :tools (vector) — tool execution history
-├── :tasks (hash-table) — task tracking
-├── :files (hash-table) — file operation tracking
-├── :agents (hash-table) — subagent state
-├── :plan (plist) — current plan (if any)
-└── :inbox (list) — queued events (for deferred processing)
+├── :session-id, :cwd, :project, :slug, :status, :claude-status
+├── :turns (tlist of turn-node alists)
+├── :tool-index (hash-table: tool_use_id → tool alist)
+├── :agent-index (hash-table: agent_id → agent alist)
+├── :files, :tasks, :plan, :token-usage
+└── ...
 ```
 
-**Model API (mutation functions in `claude-gravity-state.el`):**
-- `claude-gravity--session-get(slug key)` — read session property
-- `claude-gravity--session-set(slug key value)` — write session property
-- `claude-gravity--inbox-push(slug event)` — queue event for processing
-- `claude-gravity--add-turn(slug turn-object)` — append turn
-- `claude-gravity--add-tool(slug turn-idx tool)` — append tool to turn
-- `claude-gravity--update-task(slug task-id fields)` — update task
-- `claude-gravity--add-file(slug file-path operation)` — track file op
-- `claude-gravity--add-agent(slug agent-id agent-object)` — track agent
-- `claude-gravity--remove-agent(slug agent-id)` — remove agent
-- `claude-gravity--update-agent(slug agent-id fields)` — update agent
-- `claude-gravity--set-plan(slug plan)` — set plan
-- (and ~17 more model functions)
+**Patch application** (`claude-gravity--apply-patch`): Each patch op maps to a `pcase` branch that mutates the local plist tree. The renderer reads the same plist structure as before — it doesn't know the data comes from patches.
 
-**Rendering adapts to model state:**
-- `claude-gravity-render.el` reads model state and produces magit-section UI
-- No impedance mismatch: model stores exactly what UI needs to display
-- Deferred rendering: UI refreshes on demand (`g` key) or after events
+**Model API** in `claude-gravity-state.el` still exists — the tree mutation functions are called by `apply-patch` instead of by event handlers directly.
+
+See @docs/session-data-model.md for the complete plist reference.
 
 ## Design Patterns
 
-### Tool Attribution with Multiple Agents
+### Bidirectional Flow (v3)
 
-When multiple agents are active, tools can be ambiguous. The system:
-1. Scans the transcript backward from each tool to find the most recent agent context
-2. For single-agent cases, uses optimized path (no scanning)
-3. Attributes tool to the correct agent's nested section
+```
+Bridge shim →(hook socket)→ gravity-server creates PendingResponse + InboxItem
+gravity-server →(terminal socket)→ all terminals see inbox.added
+Terminal (Emacs) →(terminal socket)→ server receives action (first responder wins)
+Server writes response →(hook socket)→ bridge shim reads → stdout → Claude Code
+```
 
-### Bidirectional PermissionRequest Flow
-
-PermissionRequest and AskUserQuestion keep the socket open:
-1. Bridge sends request JSON to Emacs
-2. Emacs renders interactive buffer (e.g., plan review, permission dialog)
-3. User interacts and submits response
-4. Emacs sends response JSON back over socket
-5. Bridge reads response and writes to stdout
-6. Claude Code receives response and continues
+Multiple terminals can view the same inbox item. First terminal to respond wins.
 
 ### Known Bug: ExitPlanMode Allow Ignored (Deny-as-Approve Workaround)
 
-Claude Code silently ignores `allow` responses from PermissionRequest hooks for `ExitPlanMode`. This is a regression of [#15755](https://github.com/anthropics/claude-code/issues/15755), still broken as of v2.1.50. The TUI prompt appears simultaneously with the hook — if the hook responds `allow`, Claude Code drops it. `deny` responses are always processed.
+Claude Code silently ignores `allow` responses from PermissionRequest hooks for `ExitPlanMode`. This is a regression of [#15755](https://github.com/anthropics/claude-code/issues/15755), still broken as of v2.1.50.
 
-**Workaround (commit `62b24d8`):** The bridge intercepts `allow` responses for ExitPlanMode and converts them to `deny` with the message "User approved the plan. Proceed with implementation." Claude reads the message content, sees approval, and proceeds.
+**Workaround:** gravity-server intercepts `allow` responses for ExitPlanMode and converts them to `deny` with the message "User approved the plan. Proceed with implementation." Claude reads the message content, sees approval, and proceeds.
 
-**What this means for the data flow:**
-1. Emacs `claude-gravity-plan-review-approve` sends `{"decision":{"behavior":"allow"}}`
-2. Bridge (`index.ts`, PermissionRequest block) intercepts and rewrites to `{"decision":{"behavior":"deny","message":"User approved the plan. Proceed with implementation."}}`
-3. Claude Code processes the deny, model reads the message, continues implementing
+**Data flow:**
+1. Emacs sends `action.plan-review` with `decision: "allow"` to server
+2. Server converts to `{"decision":{"behavior":"deny","message":"User approved the plan. Proceed with implementation."}}`
+3. Server writes response to bridge's hook socket
+4. Bridge reads and writes to stdout for Claude Code
 
-**Deny with feedback** (user annotated the plan) is already a deny — it passes through unchanged.
+**Deny with feedback** (user annotated the plan) is already a deny — passes through unchanged.
 
-**Removal:** When Claude Code fixes #15755, delete the `if (toolName === "ExitPlanMode" && response?.decision?.behavior === "allow")` block in `index.ts`. Emacs already sends the correct allow response.
+**Removal:** When Claude Code fixes #15755, delete the workaround in gravity-server's bidirectional handler.
+
+### Tool Attribution
+
+Enrichment (now in gravity-server) handles tool-to-agent attribution:
+1. Scans the transcript backward from each tool to find the most recent agent context
+2. For single-agent cases, uses optimized path (no scanning)
+3. Attributes tool to the correct agent's nested step
 
 ### PostToolUse Content Extraction
 
@@ -245,15 +310,14 @@ PostToolUse events extract both preceding and following assistant text:
 1. **Preceding content** (`extractPrecedingContent`): text before the tool in the same turn
 2. **Following content** (`extractFollowingContent`): text after the tool but before the next turn
 
-This allows displaying assistant commentary around tool execution.
-
 ### Agent Transcript Handling
 
 Agent transcripts are stored in "sidechain" format (separate files):
 1. Claude Code creates `agent_transcript_path` file during agent execution
 2. SubagentStop event provides path but no `stop_text`/`stop_thinking`
-3. Bridge detects sidechain format and extracts trailing content from agent transcript
-4. Emacs displays agent completion at turn level AND in nested agent section
+3. gravity-server's enrichment layer detects sidechain format, extracts trailing content
+4. Falls back to main transcript extraction if sidechain is empty
+5. Emacs displays agent completion at turn level AND in nested agent section
 
 ## Migration History
 
@@ -262,26 +326,29 @@ Agent transcripts are stored in "sidechain" format (separate files):
 - Define clean session state model in `claude-gravity-state.el`
 - Adapt all renderers to read from model state
 
-**Phase 2 (Completed):** Add managed process + JSON-output adapter
-- `docs/emacs-driven-sessions.md`: experiment with spawning Claude Code as managed subprocess
-- JSON-output adapter: reads stdout and feeds into model API
-- Hooks adapter: existing hook system forwards events to model API
-- Both adapters write to same model, allowing dual operation
+**Phase 2 (Completed):** Managed Claude Code subprocess
+- `docs/emacs-driven-sessions.md`: spawning `claude -p` as managed subprocess
+- Hooks adapter + managed process coexist
+
+**Phase 3 (Completed — v3):** gravity-server backend
+- Moved state management to long-running TypeScript backend
+- Emacs becomes thin terminal client (read-replica + patch application)
+- Bridge thinned to raw hook forwarder
+- Enrichment moved from bridge to server (benefits from in-memory state)
+- Two-socket architecture: hook socket + terminal socket
+- Inbox manager for bidirectional flows
+- `claude-gravity-socket.el` split into `claude-gravity-plan-review.el` + `claude-gravity-client.el`
+- See @docs/refactor-implementation.md for full design rationale
 
 **Daemon Bridge (ON HOLD — 2026-02):** Agent SDK daemon (`daemon.ts`, `daemon-session.ts`)
-- Long-running Node.js process managing SDK sessions via `@anthropic-ai/claude-agent-sdk`
-- **BLOCKED**: The Agent SDK requires a pay-per-use API key. Using Claude Max/Pro subscription with the SDK violates Anthropic's TOS and risks account ban. See [#6536](https://github.com/anthropics/claude-code/issues/6536), [#5891](https://github.com/anthropics/claude-code/issues/5891).
-- Code exists but is not usable without separate API billing. Revisit if Anthropic changes policy.
-
-**Phase 3 (Backlog):** Hooks-free mode
-- Remove dependency on Claude Code hooks
-- Run Claude Code entirely via managed process (eat-terminal)
-- All events sourced from JSON-output + subprocess exit handling
+- **BLOCKED**: Agent SDK requires pay-per-use API key. See [#6536](https://github.com/anthropics/claude-code/issues/6536).
+- Code exists but is not usable. Revisit if Anthropic changes policy.
 
 ## Related Documentation
 
-See the following for detailed information on specific topics:
 - @DEVELOPMENT.md — Build commands, dependencies, debugging, testing
 - @UI-SPEC.md — Visual specification for all UI states and keybindings
-- @docs/emacs-driven-sessions.md — Research on managed session architecture
+- @docs/refactor-implementation.md — v3 design: gravity-server architecture and terminal protocol
+- @docs/session-data-model.md — Session plist structure and turn tree reference
+- @docs/emacs-driven-sessions.md — Managed sessions research (historical)
 - @docs/tmux-interactive-sessions.md — Tmux integration approach

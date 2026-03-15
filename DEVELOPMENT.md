@@ -78,7 +78,7 @@ M-x eval-defun   ;; Evaluate the changed function
 M-x eval-region  ;; Evaluate a region of code
 ```
 
-**Important:** When editing `claude-gravity.el` modules, eval all changed/new defuns AND any callers that reference them. The server-filter is registered via `:filter 'claude-gravity--server-filter` (symbol reference), so re-eval of the defun is sufficient — but if it was byte-compiled at load time, the stale compiled version runs until re-eval'd.
+**Important:** When editing `claude-gravity-*.el` modules, eval all changed/new defuns AND any callers that reference them. The client filter is registered via `:filter 'claude-gravity--client-filter` (symbol reference), so re-eval of the defun is sufficient — but if it was byte-compiled at load time, the stale compiled version runs until re-eval'd.
 
 ## Debugging
 
@@ -94,14 +94,22 @@ View logs in real-time:
 tail -f /tmp/emacs-bridge.log
 ```
 
-### Agent State Persistence
+### Gravity Server Logs
 
-Agent state is persisted across bridge invocations:
-```
-{cwd}/.claude/emacs-bridge-agents.json
+gravity-server logs to stderr (visible in the Emacs `*gravity-server*` process buffer if started from Emacs).
+
+### Agent State
+
+In v3, agent state is managed in-memory by gravity-server (no file I/O). The legacy file `{cwd}/.claude/emacs-bridge-agents.json` is no longer used.
+
+### Building and Deploying
+
+```bash
+make build-server     # esbuild gravity-server → dist/server.mjs
+make sync-cache       # Sync bridge + server dist to plugin marketplace cache
 ```
 
-This file tracks active agents and is gitignored. Check it to understand state transitions.
+**CRITICAL:** After any TypeScript change, run `make sync-cache` to copy dist files to `~/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/2.0.0/dist/`. Without this, stale cached code runs instead of the dev version.
 
 ### Emacs Debugging
 
@@ -148,7 +156,7 @@ When the Stop hook fires, the next turn may have already started writing `tool_u
 
 ### Process Filter Context
 
-Interactive minibuffer functions cannot run inside a network process filter (`claude-gravity--server-filter`). They silently error. Use `(run-at-time 0 nil #'my-func args...)` to defer interactive calls to the Emacs command loop:
+Interactive minibuffer functions cannot run inside a network process filter (`claude-gravity--client-filter`). They silently error. Use `(run-at-time 0 nil #'my-func args...)` to defer interactive calls to the Emacs command loop:
 
 ```elisp
 ;; Wrong: This silently fails inside process-filter
@@ -168,11 +176,11 @@ The `magit-insert-section` macros expand into complex `unwind-protect` blocks. D
 
 Claude Code silently ignores `allow` responses from PermissionRequest hooks for ExitPlanMode. This is a regression of [#15755](https://github.com/anthropics/claude-code/issues/15755), still broken as of v2.1.50. `deny` responses always work.
 
-**Workaround:** The bridge converts ExitPlanMode `allow` → `deny` with message "User approved the plan. Proceed with implementation." See the `DENY-AS-APPROVE` comment block in `emacs-bridge/src/index.ts` and the "Known Bug" section in ARCHITECTURE.md.
+**Workaround:** gravity-server intercepts ExitPlanMode `allow` responses and converts them to `deny` with message "User approved the plan. Proceed with implementation." See the "Known Bug" section in ARCHITECTURE.md.
 
-**If plan approval via Emacs stops working:** Check that the bridge workaround is still in place and that Claude Code hasn't changed the PermissionRequest response format. Check `/tmp/emacs-bridge.log` for `converting ExitPlanMode allow → deny-as-approve`.
+**If plan approval via Emacs stops working:** Check that the server workaround is still in place. Check gravity-server logs for `converting ExitPlanMode allow → deny-as-approve`.
 
-**To remove:** When #15755 is fixed upstream, delete the workaround block in `index.ts` and the related comments in `claude-gravity-socket.el`.
+**To remove:** When #15755 is fixed upstream, delete the workaround in gravity-server's bidirectional handler and the related comments in `claude-gravity-plan-review.el`.
 
 ### Hook Configuration
 

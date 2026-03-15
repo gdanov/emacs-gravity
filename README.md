@@ -95,14 +95,17 @@ Sessions started outside of emacs are integrated as well via hooks (but no promp
 ```
 Claude Code (11 hook events)
     ↓
-emacs-bridge (Node.js one-shot plugin)
-    ↕ JSON over Unix domain socket
-claude-gravity.el (Emacs — 13 modules, ~5500 lines)
+emacs-bridge (Node.js one-shot shim)
+    ↓ hook socket
+gravity-server (TypeScript, long-running backend)
+    ├── enrichment, state management, inbox
+    ↓ semantic patches over terminal socket
+Emacs client (claude-gravity-client.el — 15 modules, ~11k lines)
     ↓
 magit-section UI
 ```
 
-Event-driven: Claude Code fires hooks → bridge forwards over socket → Emacs maintains state in hash tables → renders via magit-section. All hooks are fire-and-forget except PermissionRequest (bidirectional).
+Server-driven: Claude Code fires hooks → bridge forwards to gravity-server → server manages state and emits semantic patches → Emacs applies patches and renders via magit-section. Bidirectional flows (PermissionRequest, plan review) route through the server's inbox.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
 
@@ -113,10 +116,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
 - Node.js 18+ and npm
 - Claude Code CLI installed
 
-### 1. Build the Node.js bridge
+### 1. Install dependencies
 
 ```bash
-cd emacs-gravity/emacs-bridge
+cd emacs-gravity
 npm install
 ```
 
@@ -137,7 +140,7 @@ Create or edit `~/.claude/plugins/marketplace.json`:
     {
       "name": "emacs-bridge",
       "description": "Bridge to Emacs via Unix Socket",
-      "source": "/absolute/path/to/emacs-gravity/emacs-bridge"
+      "source": "/absolute/path/to/emacs-gravity/packages/emacs-bridge"
     }
   ]
 }
@@ -157,7 +160,7 @@ Add to your `~/.emacs.d/init.el`:
 (claude-gravity-server-start)
 ```
 
-This starts the Unix domain socket server that receives events from the bridge.
+This starts gravity-server (if not already running) and connects Emacs as a terminal client.
 
 ### Quick Start
 
@@ -173,7 +176,8 @@ RET                          — visit session or file
 - [ARCHITECTURE.md](ARCHITECTURE.md) — System design, modules, hooks, state API
 - [DEVELOPMENT.md](DEVELOPMENT.md) — Build, debug, test workflows
 - [UI-SPEC.md](UI-SPEC.md) — Visual specification for all UI states
-- [docs/emacs-driven-sessions.md](docs/emacs-driven-sessions.md) — Managed session architecture
+- [docs/refactor-implementation.md](docs/refactor-implementation.md) — v3 design: gravity-server and terminal protocol
+- [docs/session-data-model.md](docs/session-data-model.md) — Session plist structure reference
 - [docs/tmux-interactive-sessions.md](docs/tmux-interactive-sessions.md) — Tmux integration
 
 ## On Hold

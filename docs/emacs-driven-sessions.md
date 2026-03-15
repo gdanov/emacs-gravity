@@ -1,5 +1,7 @@
 # Research: Sending Prompts to Claude Code from Emacs
 
+> **Historical document.** This research informed the managed process feature (Phase 2). The v3 architecture (gravity-server) supersedes the "hooks-free" Phase 3 described here — see @docs/refactor-implementation.md for the current design.
+
 > **See also:** @/Users/gdanov/work/playground/emacs-gravity/ARCHITECTURE.md for system architecture overview and module structure.
 
 ## WARNING: Agent SDK Authentication (2026-02)

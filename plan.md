@@ -10,9 +10,9 @@ we show the current plan, tasks, todos, etc. in nice way so that user has conven
 
 we allow user to open the current plan and comment/annotate it similarly to how antigravity allows commenting plan, todos and files.
 
-## claude code plugin
+## claude code plugin + gravity-server
 
-we will produce a claude code plug-in (`emacs-bridge`) that hooks into lifecycle stages (e.g. `PostToolUse`) and pushes changes to Emacs via a Unix socket. Emacs will listen on this socket and update its UI.
+A Claude Code plugin (`emacs-bridge`) hooks into lifecycle stages (e.g. `PostToolUse`) and forwards events to `gravity-server` (long-running TypeScript backend) via a hook socket. The server manages all session state and broadcasts semantic patches to connected terminals (Emacs, future web/native). Emacs is a thin terminal client that applies patches and renders via magit-section.
 
 ## chatting with and "driving" claude code
 

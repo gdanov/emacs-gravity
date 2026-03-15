@@ -1448,6 +1448,27 @@ describe("Event Handler", () => {
       expect(modelPatch).toBeDefined();
     });
 
+    it("propagates tmux_session through set_meta patch and session state", () => {
+      const patches = fire(deps, "SessionStart", "s1", { tmux_session: "my-tmux" }, 42);
+      const metaPatch = patches.find(p => p.op === "set_meta" && "tmuxSession" in p);
+      expect(metaPatch).toBeDefined();
+      expect(metaPatch!.op === "set_meta" && metaPatch!.tmuxSession).toBe("my-tmux");
+
+      const session = deps.store.get("s1");
+      expect(session?.tmuxSession).toBe("my-tmux");
+    });
+
+    it("propagates tmux_session on non-SessionStart events via ensureSession", () => {
+      // First event for this session is PreToolUse (not SessionStart) — e.g. after server restart
+      const patches = fire(deps, "PreToolUse", "s1", {
+        tmux_session: "tmux-0",
+        tool_name: "Read",
+        tool_use_id: "tu_1",
+      }, 42);
+      const session = deps.store.get("s1");
+      expect(session?.tmuxSession).toBe("tmux-0");
+    });
+
     it("SessionEnd patches match session state", () => {
       startSession(deps);
       const patches = fire(deps, "SessionEnd", "s1");

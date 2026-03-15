@@ -91,10 +91,11 @@ export interface EventHandlerDeps {
 }
 
 /** Ensure a session exists, creating if needed. */
-function ensureSession(store: SessionStore, sessionId: string, cwd: string): Session {
+function ensureSession(store: SessionStore, sessionId: string, cwd: string, tmuxSession?: string): Session {
   let session = store.get(sessionId);
   if (!session) {
     session = createSession(sessionId, cwd);
+    if (tmuxSession) session.tmuxSession = tmuxSession;
     store.set(sessionId, session);
   }
   return session;
@@ -137,6 +138,7 @@ export function handleEvent(
       pid: pid ?? undefined,
       slug: data.slug ?? undefined,
       branch: data.branch ?? undefined,
+      tmuxSession: data.tmux_session ?? undefined,
     });
   }
 
@@ -153,11 +155,12 @@ export function handleEvent(
       if (session) {
         resetSession(session);
       }
-      const s = ensureSession(store, sessionId, cwd);
+      const s = ensureSession(store, sessionId, cwd, data.tmux_session);
       const metaPatches = updateMeta(s, {
         pid: pid ?? undefined,
         slug: data.slug ?? undefined,
         branch: data.branch ?? undefined,
+        tmuxSession: data.tmux_session ?? undefined,
       });
       patches.push(...metaPatches);
 
@@ -181,7 +184,7 @@ export function handleEvent(
     }
 
     case "UserPromptSubmit": {
-      const session = ensureSession(store, sessionId, cwd);
+      const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const rawPrompt = data.prompt as string | undefined;
       const promptText = stripSystemXml(rawPrompt);
       const displayText = promptText || extractSlashCommand(rawPrompt);
@@ -235,7 +238,7 @@ export function handleEvent(
     }
 
     case "SubagentStart": {
-      const session = ensureSession(store, sessionId, cwd);
+      const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       patches.push(
         ...addAgent(session, {
           agentId: (data.agent_id as string) || "unknown",
@@ -255,7 +258,7 @@ export function handleEvent(
     }
 
     case "SubagentStop": {
-      const session = ensureSession(store, sessionId, cwd);
+      const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const agentId = data.agent_id as string;
       if (agentId) {
         patches.push(
@@ -270,7 +273,7 @@ export function handleEvent(
     }
 
     case "PreToolUse": {
-      const session = ensureSession(store, sessionId, cwd);
+      const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const parentAgentId = data.parent_agent_id ?? null;
       const toolName = data.tool_name || "unknown";
       const toolUseId = data.tool_use_id || `unknown_${Date.now()}`;
@@ -341,7 +344,7 @@ export function handleEvent(
     }
 
     case "PostToolUse": {
-      const session = ensureSession(store, sessionId, cwd);
+      const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const toolUseId = data.tool_use_id as string;
       const postText = data.post_tool_text as string | undefined;
       const postThink = data.post_tool_thinking as string | undefined;
@@ -405,7 +408,7 @@ export function handleEvent(
     }
 
     case "PostToolUseFailure": {
-      const session = ensureSession(store, sessionId, cwd);
+      const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const toolUseId = data.tool_use_id as string;
       const errorMsg = (data as Record<string, unknown>).error as string || "Unknown error";
       const postText = data.post_tool_text as string | undefined;
@@ -432,7 +435,7 @@ export function handleEvent(
 
     case "PermissionRequest": {
       // Bidirectional: add inbox item, terminal responds later
-      const session = ensureSession(store, sessionId, cwd);
+      const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const toolName = data.tool_name || "unknown";
       const summary = toolName; // TODO: tool signature like Emacs
 
@@ -454,7 +457,7 @@ export function handleEvent(
 
     case "AskUserQuestionIntercept": {
       // Bidirectional: add question inbox item, terminal responds later
-      const session = ensureSession(store, sessionId, cwd);
+      const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const toolName = data.tool_name || "AskUserQuestion";
       const input = data.tool_input as Record<string, unknown> | undefined;
       const questions = input?.questions as Array<Record<string, unknown>> | undefined;
