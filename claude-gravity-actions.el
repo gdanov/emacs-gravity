@@ -484,7 +484,9 @@ Only meaningful when more than one question."
   (let ((q (claude-gravity--question-current)))
     (when q
       (let ((opts (alist-get 'options q)))
-        (when (vectorp opts) opts)))))
+        (cond ((vectorp opts) opts)
+              ((listp opts) (vconcat opts))
+              (t nil))))))
 
 
 (defun claude-gravity--question-multi-select-p ()
@@ -591,7 +593,9 @@ Erases and redraws the body while preserving buffer-local state."
       (claude-gravity-question-action-mode 1)
       (setq-local claude-gravity--action-inbox-item item)
       (setq-local claude-gravity--question-questions
-                  (if (vectorp questions) questions (vector)))
+                  (cond ((vectorp questions) questions)
+                        ((listp questions) (vconcat questions))
+                        (t (vector))))
       (setq-local claude-gravity--question-current-idx 0)
       (setq-local claude-gravity--question-answers (make-hash-table :test 'eql))
       (setq-local claude-gravity--question-focus 0)
@@ -897,7 +901,9 @@ remove the inbox item when plan review is acted on."
   (let ((data (alist-get 'data item))
         (session-id (alist-get 'session-id item))
         (inbox-id (alist-get 'id item)))
-    (claude-gravity--handle-plan-review data session-id)
+    (condition-case err
+        (claude-gravity--handle-plan-review data session-id)
+      (error (claude-gravity--log 'error "Plan review error: %S data=%S" err data)))
     ;; Store inbox-id on the plan review buffer so approve/deny can clean up
     (let ((buf (get-buffer (format "*Claude Plan Review: %s*"
                                     (or (alist-get 'label item)

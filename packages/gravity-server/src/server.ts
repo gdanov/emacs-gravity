@@ -174,9 +174,11 @@ function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
   if (eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept") {
     const items = inbox.all();
     if (items.length > 0) {
+      const item = items[0];
+      log(`Inbox broadcast: type=${item.type} tool_name=${(item.data as Record<string, unknown>)?.tool_name} id=${item.id}`, "info");
       terminals.broadcast({
         type: "inbox.added",
-        item: items[0],
+        item,
       });
     }
   }

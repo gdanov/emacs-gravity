@@ -938,6 +938,8 @@ MSG contains projects array with session summaries."
   "Handle inbox.added — add item to local inbox and trigger UI."
   (let* ((item-json (alist-get 'item msg))
          (item (claude-gravity--json-inbox-item-to-alist item-json)))
+    (claude-gravity--log 'info "Inbox added: id=%s type=%s summary=%s"
+                         (alist-get 'id item) (alist-get 'type item) (alist-get 'summary item))
     ;; Add to local inbox
     (push item claude-gravity--inbox)
     (claude-gravity--inbox-notify item)
