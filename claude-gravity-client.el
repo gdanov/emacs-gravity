@@ -959,8 +959,12 @@ MSG contains projects array with session summaries."
       (claude-gravity--schedule-session-refresh session-id))))
 
 (defun claude-gravity--handle-inbox-removed (msg)
-  "Handle inbox.removed — remove item from local inbox."
-  (let ((item-id (alist-get 'itemId msg)))
+  "Handle inbox.removed — remove item from local inbox and kill action buffers."
+  (let* ((item-id (alist-get 'itemId msg))
+         (item (claude-gravity--inbox-find item-id)))
+    ;; Kill any open action/plan-review buffer for this item
+    (when item
+      (claude-gravity--dismiss-single-inbox-item item))
     (claude-gravity--inbox-remove item-id)))
 
 (defun claude-gravity--json-inbox-item-to-alist (item-json)

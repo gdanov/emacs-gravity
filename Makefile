@@ -1,6 +1,6 @@
 EMACS ?= emacs
 
-.PHONY: test test-elisp test-bridge test-server build build-server sync-cache clean menubar
+.PHONY: test test-elisp test-bridge test-server build build-server sync-cache clean menubar restart-server
 
 PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/2.0.0
 
@@ -40,6 +40,11 @@ menubar:
 	-pkill -f GravityMenuBar
 	sleep 0.5
 	packages/gravity-menubar/.build/arm64-apple-macosx/debug/GravityMenuBar &
+
+restart-server: sync-cache
+	-pkill -f gravity-server
+	sleep 0.5
+	npx -w packages/gravity-server tsx src/server.ts &
 
 clean:
 	rm -rf node_modules packages/*/node_modules packages/*/dist
