@@ -1,12 +1,12 @@
 import * as esbuild from "esbuild";
 
 await esbuild.build({
-  entryPoints: ["src/server.ts"],
+  entryPoints: ["src/gravity-server.ts"],
   bundle: true,
   platform: "node",
   target: "node18",
   format: "esm",
-  outfile: "dist/server.mjs",
+  outfile: "dist/gravity-server.mjs",
   external: [
     "net", "fs", "path", "child_process", "os", "crypto", "stream", "util", "events",
   ],
@@ -22,4 +22,4 @@ const __dirname = __dirnameFn(__filename);
   },
 });
 
-console.log("Built dist/server.mjs");
+console.log("Built dist/gravity-server.mjs");

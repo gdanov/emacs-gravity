@@ -2,9 +2,9 @@
   "name": "@gravity/server",
   "version": "0.1.0",
   "type": "module",
-  "main": "src/server.ts",
+  "main": "src/gravity-server.ts",
   "scripts": {
-    "dev": "tsx src/server.ts",
+    "dev": "tsx src/gravity-server.ts",
     "build": "node build.mjs",
     "build:tsc": "tsc --noEmit",
     "test": "vitest run"
