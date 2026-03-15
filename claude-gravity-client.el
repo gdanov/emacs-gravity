@@ -98,7 +98,7 @@ If server is already running (socket exists), just connect."
   ;; Determine server binary path
   (unless claude-gravity--server-bin
     (setq claude-gravity--server-bin
-          (expand-file-name "packages/gravity-server/src/server.ts"
+          (expand-file-name "packages/gravity-server/src/gravity-server.ts"
                             (file-name-directory
                              (or load-file-name buffer-file-name
                                  default-directory)))))
@@ -137,22 +137,8 @@ If server is already running (socket exists), just connect."
     (delete-process claude-gravity--client-process))
   (setq claude-gravity--client-process nil)
   (setq claude-gravity--client-buffer "")
-  ;; Stop backend if we started it
-  (if (and claude-gravity--backend-process
-           (process-live-p claude-gravity--backend-process))
-      (progn
-        (interrupt-process claude-gravity--backend-process)
-        (setq claude-gravity--backend-process nil))
-    ;; No process handle — try PID file (bridge-started server)
-    (when (file-exists-p claude-gravity--server-pid-file)
-      (let ((pid (string-to-number
-                  (string-trim
-                   (with-temp-buffer
-                     (insert-file-contents claude-gravity--server-pid-file)
-                     (buffer-string))))))
-        (when (> pid 0)
-          (call-process "kill" nil nil nil (number-to-string pid))
-          (claude-gravity--log 'info "Killed gravity-server pid %d via PID file" pid)))))
+  ;; Stop backend — kill entire process group to avoid tsx wrapper zombies
+  (claude-gravity--kill-server-processes)
   (claude-gravity--log 'info "Gravity client stopped"))
 
 (defun claude-gravity-server-alive-p ()
@@ -160,11 +146,41 @@ If server is already running (socket exists), just connect."
   (and claude-gravity--client-process
        (process-live-p claude-gravity--client-process)))
 
-(defun claude-gravity--start-backend ()
-  "Start gravity-server as a subprocess."
+(defun claude-gravity--kill-server-processes ()
+  "Kill all gravity-server processes (tsx wrapper + node child).
+Uses process group kill when we have a process handle, falls back
+to PID file, and cleans up any orphans via pkill."
+  ;; 1. Kill via Emacs process handle (tsx parent) — use process group
   (when (and claude-gravity--backend-process
              (process-live-p claude-gravity--backend-process))
-    (interrupt-process claude-gravity--backend-process))
+    (let ((pid (process-id claude-gravity--backend-process)))
+      (when pid
+        ;; Kill entire process group (negative PID = process group)
+        (call-process "kill" nil nil nil "-TERM" (format "-%d" pid))
+        (claude-gravity--log 'info "Sent SIGTERM to process group -%d" pid)))
+    (setq claude-gravity--backend-process nil))
+  ;; 2. Kill via PID file (bridge-started or previous Emacs session)
+  (when (file-exists-p claude-gravity--server-pid-file)
+    (let ((pid (string-to-number
+                (string-trim
+                 (with-temp-buffer
+                   (insert-file-contents claude-gravity--server-pid-file)
+                   (buffer-string))))))
+      (when (and (> pid 0)
+                 (= 0 (call-process "kill" nil nil nil "-0" (number-to-string pid))))
+        ;; Kill process group for PID file pid too
+        (call-process "kill" nil nil nil "-TERM" (format "-%d" pid))
+        (call-process "kill" nil nil nil "-TERM" (number-to-string pid))
+        (claude-gravity--log 'info "Killed gravity-server pid %d via PID file" pid)))
+    (delete-file claude-gravity--server-pid-file))
+  ;; 3. Catch any remaining orphans
+  (call-process "pkill" nil nil nil "-f" "gravity-server\\.(ts|mjs)"))
+
+(defun claude-gravity--start-backend ()
+  "Start gravity-server as a subprocess."
+  ;; Kill any existing server processes first (handles Emacs restart, zombies)
+  (claude-gravity--kill-server-processes)
+  (sleep-for 0.3)
   (let ((tsx (executable-find "tsx")))
     (unless tsx
       (error "tsx not found. Install with: npm install -g tsx"))
@@ -904,15 +920,33 @@ MSG contains sessionId and patches array."
 
 (defun claude-gravity--handle-overview-snapshot (msg)
   "Handle overview.snapshot — update session list from server.
-MSG contains projects array with session summaries."
-  (let ((projects (alist-get 'projects msg)))
-    ;; Auto-subscribe to all sessions we don't know about yet
+MSG contains projects array with session summaries.
+Also prunes orphan sessions that the server no longer knows about."
+  (let ((projects (alist-get 'projects msg))
+        (server-ids (make-hash-table :test 'equal)))
+    ;; Collect all server session IDs
+    (dolist (proj projects)
+      (let ((sessions (alist-get 'sessions proj)))
+        (dolist (s sessions)
+          (let ((sid (alist-get 'sessionId s)))
+            (when sid
+              (puthash sid t server-ids))))))
+    ;; Auto-subscribe to new sessions
     (dolist (proj projects)
       (let ((sessions (alist-get 'sessions proj)))
         (dolist (s sessions)
           (let ((sid (alist-get 'sessionId s)))
             (when (and sid (not (gethash sid claude-gravity--sessions)))
               (claude-gravity--request-session sid))))))
+    ;; Prune orphan sessions: mark ended if server doesn't know them
+    (maphash
+     (lambda (sid session)
+       (when (and (not (gethash sid server-ids))
+                  (not (eq (plist-get session :status) 'ended)))
+         (claude-gravity--log 'info "Pruning orphan session %s (not on server)" sid)
+         (plist-put session :status 'ended)
+         (plist-put session :claude-status 'idle)))
+     claude-gravity--sessions)
     ;; Render overview
     (claude-gravity--schedule-refresh)))
 

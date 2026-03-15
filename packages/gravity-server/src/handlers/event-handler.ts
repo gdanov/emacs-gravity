@@ -126,23 +126,24 @@ export function handleEvent(
 
   log(`Handling event: ${eventName} for session: ${sessionId}`, "debug");
 
+  const patches: Patch[] = [];
+
   // Update meta on every event for existing sessions
   const existing = store.get(sessionId);
   if (existing) {
     // Self-heal: if session is ended but we're receiving events, it's alive
     if (existing.status === "ended" && eventName !== "SessionEnd") {
       existing.status = "active";
+      patches.push({ op: "set_status", status: "active" });
       log(`Session ${sessionId} self-healed to active on ${eventName}`, "info");
     }
-    updateMeta(existing, {
+    patches.push(...updateMeta(existing, {
       pid: pid ?? undefined,
       slug: data.slug ?? undefined,
       branch: data.branch ?? undefined,
       tmuxSession: data.tmux_session ?? undefined,
-    });
+    }));
   }
-
-  const patches: Patch[] = [];
 
   switch (eventName) {
     case "SessionStart": {
