@@ -96,6 +96,18 @@ export class InboxManager {
     return true;
   }
 
+  /** Remove all pending items whose hook socket matches. Returns removed items. */
+  removeBySocket(socket: Socket): InboxItem[] {
+    const removed: InboxItem[] = [];
+    for (const [id, pending] of this.pending) {
+      if (pending.hookSocket === socket) {
+        const item = this.remove(id);
+        if (item) removed.push(item);
+      }
+    }
+    return removed;
+  }
+
   /** All current items. */
   all(): InboxItem[] {
     return this.items;

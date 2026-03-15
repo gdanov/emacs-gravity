@@ -70,6 +70,16 @@ function startHookServer(): Server {
     socket.on("error", (err) => {
       log(`Hook socket connection error: ${err.message}`, "error");
     });
+
+    socket.on("close", () => {
+      // Bridge shim exited — permission was handled in TUI or bridge crashed.
+      // Remove any inbox items that were waiting on this socket.
+      const removed = inbox.removeBySocket(socket);
+      for (const item of removed) {
+        log(`Inbox item ${item.id} (${item.type}) auto-removed: hook socket closed`, "info");
+        terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+      }
+    });
   });
 
   server.listen(HOOK_SOCKET, () => {
