@@ -422,7 +422,7 @@ LABEL gets detail-label face, VALUE gets optional FACE."
           (when truncated
             (insert (propertize (concat (claude-gravity--indent) "...\n")
                                 'face 'claude-gravity-detail-label)))
-          (when allowed-prompts
+          (when (and allowed-prompts (listp allowed-prompts))
             (claude-gravity--insert-label "Permissions: ")
             (claude-gravity--insert-wrapped
              (claude-gravity--format-allowed-prompts allowed-prompts) nil))

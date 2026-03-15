@@ -223,7 +223,7 @@ export interface FileEntry {
 export interface Plan {
   content: string;
   filePath: string | null;
-  allowedPrompts: string[] | null;
+  allowedPrompts: string[];
 }
 
 export interface PromptEntry {

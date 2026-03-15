@@ -373,7 +373,7 @@ export function handleEvent(
             ...setPlan(session, {
               content: planContent,
               filePath: filePath ?? null,
-              allowedPrompts: allowedPrompts ?? null,
+              allowedPrompts: allowedPrompts ?? [],
             }),
           );
         }
