@@ -73,7 +73,13 @@
       "Bash(gh issue:*)",
       "WebFetch(domain:code.visualstudio.com)",
       "WebFetch(domain:effect.website)",
-      "WebFetch(domain:www.sandromaglione.com)"
+      "WebFetch(domain:www.sandromaglione.com)",
+      "Bash(sw_vers)",
+      "Bash(cd:*)",
+      "Bash(swift build:*)",
+      "Bash(make test-server:*)",
+      "Bash(make menubar:*)",
+      "Bash(pkill:*)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",
