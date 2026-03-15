@@ -26,22 +26,29 @@ struct MenuBarLabel: View {
     @ObservedObject var monitor: GravityMonitor
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             if monitor.connected {
-                if monitor.inboxItems.count > 0 {
-                    Image(systemName: "exclamationmark.bubble.fill")
-                        .foregroundColor(.orange)
-                } else {
-                    Image(systemName: "bolt.fill")
-                        .foregroundColor(monitor.hasResponding ? .yellow : .green)
+                let dots = monitor.sessionDots
+                Image(systemName: dots.contains(where: { $0 == .waiting })
+                      ? "exclamationmark.bubble.fill" : "bolt.fill")
+                    .foregroundColor(iconColor(dots))
+                ForEach(Array(dots.enumerated()), id: \.offset) { _, dot in
+                    Circle()
+                        .fill(dot.color)
+                        .frame(width: 5, height: 5)
                 }
-                Text("\(monitor.activeCount)")
-                    .font(.system(size: 12, weight: .medium))
             } else {
                 Image(systemName: "bolt.slash.fill")
                     .foregroundColor(.secondary)
             }
         }
+    }
+
+    private func iconColor(_ dots: [DotStatus]) -> Color {
+        if dots.contains(where: { $0 == .waiting }) { return .orange }
+        if dots.contains(where: { $0 == .responding }) { return .yellow }
+        if dots.isEmpty { return .secondary }
+        return .green
     }
 }
 

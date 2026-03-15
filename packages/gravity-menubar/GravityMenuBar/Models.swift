@@ -1,5 +1,28 @@
 import SwiftUI
 
+// MARK: - Dot Status (menu bar label)
+
+enum DotStatus {
+    case idle, responding, waiting
+
+    var color: Color {
+        switch self {
+        case .idle: return .green
+        case .responding: return .yellow
+        case .waiting: return .orange
+        }
+    }
+
+    /// Higher = shown first in the label
+    var priority: Int {
+        switch self {
+        case .idle: return 0
+        case .responding: return 1
+        case .waiting: return 2
+        }
+    }
+}
+
 // MARK: - View Models
 
 struct ProjectInfo: Identifiable {

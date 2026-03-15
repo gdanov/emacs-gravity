@@ -16,6 +16,19 @@ class GravityMonitor: ObservableObject {
         projects.flatMap(\.sessions).contains { $0.claudeStatus == "responding" }
     }
 
+    /// One dot per active session: .green (idle), .yellow (responding), .orange (waiting/inbox)
+    var sessionDots: [DotStatus] {
+        let waitingIds = Set(inboxItems.map(\.sessionId))
+        return projects.flatMap(\.sessions)
+            .filter { $0.status == "active" }
+            .map { session -> DotStatus in
+                if waitingIds.contains(session.id) { return .waiting }
+                if session.claudeStatus == "responding" { return .responding }
+                return .idle
+            }
+            .sorted { $0.priority > $1.priority }
+    }
+
     private var socketFD: Int32 = -1
     private var readSource: DispatchSourceRead?
     private var reconnectTimer: Timer?
