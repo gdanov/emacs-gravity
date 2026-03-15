@@ -1828,4 +1828,202 @@ describe("Event Handler", () => {
       expect(session.turns[2].stopText).toBe("Tests added");
     });
   });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Patch content completeness (strengthened assertions)
+  // ────────────────────────────────────────────────────────────────────
+
+  describe("Patch content completeness", () => {
+    it("set_meta patch contains all provided fields", () => {
+      const patches = fire(deps, "SessionStart", "s1", {
+        slug: "my-slug",
+        branch: "main",
+        tmux_session: "tmux-0",
+      }, 42);
+
+      const metaPatch = patches.find(p => p.op === "set_meta" && "slug" in p) as any;
+      expect(metaPatch).toBeDefined();
+      expect(metaPatch.slug).toBe("my-slug");
+      expect(metaPatch.branch).toBe("main");
+      expect(metaPatch.pid).toBe(42);
+      expect(metaPatch.tmuxSession).toBe("tmux-0");
+    });
+
+    it("add_tool patch contains full tool object", () => {
+      startSession(deps);
+      const patches = fire(deps, "PreToolUse", "s1", {
+        tool_name: "Read",
+        tool_use_id: "t1",
+        tool_input: { file_path: "/src/file.ts" },
+        assistant_text: "Let me read",
+      });
+
+      const addToolPatch = patches.find(p => p.op === "add_tool") as any;
+      expect(addToolPatch).toBeDefined();
+      expect(addToolPatch.tool.toolUseId).toBe("t1");
+      expect(addToolPatch.tool.name).toBe("Read");
+      expect(addToolPatch.tool.status).toBe("running");
+      expect(addToolPatch.tool.input).toEqual({ file_path: "/src/file.ts" });
+      expect(addToolPatch.tool.assistantText).toBe("Let me read");
+      expect(addToolPatch.turnNumber).toBe(0);
+      expect(addToolPatch.stepIndex).toBeTypeOf("number");
+    });
+
+    it("add_prompt patch contains prompt text and type", () => {
+      startSession(deps);
+      const patches = fire(deps, "UserPromptSubmit", "s1", { prompt: "Fix the bug" });
+
+      const promptPatch = patches.find(p => p.op === "add_prompt") as any;
+      expect(promptPatch).toBeDefined();
+      expect(promptPatch.prompt.text).toBe("Fix the bug");
+      expect(promptPatch.prompt.type).toBe("user");
+      expect(promptPatch.turnNumber).toBe(1);
+    });
+
+    it("set_turn_stop patch contains text and thinking", () => {
+      startSession(deps);
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      const patches = fire(deps, "Stop", "s1", {
+        stop_text: "All done",
+        stop_thinking: "I finished everything",
+        token_usage: makeTokenUsage(),
+      });
+
+      const stopPatch = patches.find(p => p.op === "set_turn_stop") as any;
+      expect(stopPatch).toBeDefined();
+      expect(stopPatch.stopText).toBe("All done");
+      expect(stopPatch.stopThinking).toBe("I finished everything");
+      expect(stopPatch.turnNumber).toBe(1);
+    });
+
+    it("set_claude_status patch contains exact status value", () => {
+      startSession(deps);
+      const patches = fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+
+      const statusPatch = patches.find(p => p.op === "set_claude_status") as any;
+      expect(statusPatch).toBeDefined();
+      expect(statusPatch.claudeStatus).toBe("responding");
+    });
+
+    it("add_agent patch contains full agent object", () => {
+      startSession(deps);
+      const patches = fire(deps, "SubagentStart", "s1", {
+        agent_id: "a1",
+        agent_type: "Explore",
+      } as HookData);
+
+      const agentPatch = patches.find(p => p.op === "add_agent") as any;
+      expect(agentPatch).toBeDefined();
+      expect(agentPatch.agent.agentId).toBe("a1");
+      expect(agentPatch.agent.type).toBe("Explore");
+      expect(agentPatch.agent.status).toBe("running");
+      expect(agentPatch.agent.steps).toEqual([]);
+      expect(agentPatch.agent.toolCount).toBe(0);
+    });
+
+    it("complete_agent patch includes transcriptPath", () => {
+      startSession(deps);
+      fire(deps, "SubagentStart", "s1", { agent_id: "a1", agent_type: "Explore" } as HookData);
+      const patches = fire(deps, "SubagentStop", "s1", {
+        agent_id: "a1",
+        agent_stop_text: "done",
+        agent_stop_thinking: "finished",
+        agent_transcript_path: "/tmp/transcript.json",
+      });
+
+      const completePatch = patches.find(p => p.op === "complete_agent") as any;
+      expect(completePatch).toBeDefined();
+      expect(completePatch.agentId).toBe("a1");
+      expect(completePatch.stopText).toBe("done");
+      expect(completePatch.stopThinking).toBe("finished");
+      expect(completePatch.transcriptPath).toBe("/tmp/transcript.json");
+      expect(completePatch.duration).toBeTypeOf("number");
+
+      // Also verify session state
+      const agent = deps.store.get("s1")!.turns[0].agents[0];
+      expect(agent.transcriptPath).toBe("/tmp/transcript.json");
+    });
+
+    it("track_file patch contains path and fileOp", () => {
+      startSession(deps);
+      const patches = fire(deps, "PreToolUse", "s1", {
+        tool_name: "Edit",
+        tool_use_id: "t1",
+        tool_input: { file_path: "/src/auth.ts" },
+      });
+
+      const filePatch = patches.find(p => p.op === "track_file") as any;
+      expect(filePatch).toBeDefined();
+      expect(filePatch.path).toBe("/src/auth.ts");
+      expect(filePatch.fileOp).toBe("edit");
+    });
+
+    it("set_token_usage patch contains full usage object", () => {
+      startSession(deps);
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      const usage = makeTokenUsage({ input_tokens: 500, output_tokens: 200 });
+      const patches = fire(deps, "Stop", "s1", { token_usage: usage });
+
+      const usagePatch = patches.find(p => p.op === "set_token_usage") as any;
+      expect(usagePatch).toBeDefined();
+      expect(usagePatch.usage.input_tokens).toBe(500);
+      expect(usagePatch.usage.output_tokens).toBe(200);
+    });
+
+    it("set_plan patch contains plan content and filePath", () => {
+      startSession(deps);
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "plan" });
+      fire(deps, "PreToolUse", "s1", {
+        tool_name: "ExitPlanMode",
+        tool_use_id: "t1",
+        tool_input: { plan: "1. Do X\n2. Do Y" },
+      });
+      const patches = fire(deps, "PostToolUse", "s1", {
+        tool_name: "ExitPlanMode",
+        tool_use_id: "t1",
+        tool_input: { plan: "1. Do X\n2. Do Y" },
+        tool_response: { filePath: "/plan.md" },
+      } as HookData);
+
+      const planPatch = patches.find(p => p.op === "set_plan") as any;
+      expect(planPatch).toBeDefined();
+      expect(planPatch.plan.content).toBe("1. Do X\n2. Do Y");
+      expect(planPatch.plan.filePath).toBe("/plan.md");
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // resetSession patch emission (bug fix)
+  // ────────────────────────────────────────────────────────────────────
+
+  describe("resetSession emits patches", () => {
+    it("SessionStart on existing session emits reset patches", () => {
+      // First session
+      startSession(deps, "s1", { slug: "original" });
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "do stuff" });
+      fire(deps, "PreToolUse", "s1", { tool_name: "Read", tool_use_id: "t1" });
+
+      const session = deps.store.get("s1")!;
+      expect(session.currentTurn).toBe(1);
+      expect(session.totalToolCount).toBe(1);
+
+      // /clear fires SessionEnd + SessionStart with same session ID
+      fire(deps, "SessionEnd", "s1");
+      const patches = fire(deps, "SessionStart", "s1");
+
+      // Should contain reset patches
+      expect(patches).toContainEqual({ op: "set_status", status: "active" });
+      expect(patches).toContainEqual({ op: "set_claude_status", claudeStatus: "idle" });
+      expect(patches).toContainEqual({ op: "set_plan", plan: null });
+      expect(patches).toContainEqual({ op: "set_streaming_text", text: null });
+      expect(patches.some(p => p.op === "set_token_usage")).toBe(true);
+
+      // Session state should be reset
+      const resetSession = deps.store.get("s1")!;
+      expect(resetSession.currentTurn).toBe(0);
+      expect(resetSession.totalToolCount).toBe(0);
+      expect(resetSession.turns.length).toBe(1);
+      expect(resetSession.plan).toBeNull();
+    });
+  });
 });

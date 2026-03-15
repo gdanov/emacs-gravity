@@ -272,7 +272,7 @@ export type Patch =
   | { op: "add_tool"; turnNumber: number; stepIndex: number; agentId?: string; tool: Tool }
   | { op: "complete_tool"; toolUseId: string; result: unknown; status: "done" | "error"; duration?: number; postText?: string; postThinking?: string }
   | { op: "add_agent"; agent: Agent }
-  | { op: "complete_agent"; agentId: string; stopText?: string; stopThinking?: string; duration?: number }
+  | { op: "complete_agent"; agentId: string; stopText?: string; stopThinking?: string; duration?: number; transcriptPath?: string }
   | { op: "update_task"; taskId: string; task: Task }
   | { op: "track_file"; path: string; fileOp: string }
   | { op: "add_prompt"; turnNumber: number; prompt: PromptEntry }

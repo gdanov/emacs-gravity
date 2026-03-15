@@ -153,7 +153,7 @@ export function handleEvent(
     case "SessionStart": {
       const session = store.get(sessionId);
       if (session) {
-        resetSession(session);
+        patches.push(...resetSession(session));
       }
       const s = ensureSession(store, sessionId, cwd, data.tmux_session);
       const metaPatches = updateMeta(s, {

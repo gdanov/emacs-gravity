@@ -830,7 +830,9 @@ MSG contains sessionId and patches array."
            (let ((sth (alist-get 'stopThinking patch)))
              (when sth (setf (alist-get 'stop_thinking agent) sth)))
            (let ((dur (alist-get 'duration patch)))
-             (when dur (setf (alist-get 'duration agent) dur))))))
+             (when dur (setf (alist-get 'duration agent) dur)))
+           (let ((tp (alist-get 'transcriptPath patch)))
+             (when tp (setf (alist-get 'transcript_path agent) tp))))))
 
       ("update_task"
        (let* ((task-id (alist-get 'taskId patch))

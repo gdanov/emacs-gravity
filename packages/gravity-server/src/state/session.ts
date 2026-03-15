@@ -84,7 +84,7 @@ export function sessionEnd(s: Session): Patch[] {
   return [{ op: "set_status", status: "ended" }, { op: "set_claude_status", claudeStatus: "idle" }];
 }
 
-export function resetSession(s: Session): void {
+export function resetSession(s: Session): Patch[] {
   s.status = "active";
   s.claudeStatus = "idle";
   s.turns = [createTurnNode(0)];
@@ -98,6 +98,14 @@ export function resetSession(s: Session): void {
   s.streamingText = null;
   s.tokenUsage = null;
   s.lastEventTime = Date.now();
+  // Emit patches so terminals clear stale data
+  return [
+    { op: "set_status", status: "active" },
+    { op: "set_claude_status", claudeStatus: "idle" },
+    { op: "set_plan", plan: null },
+    { op: "set_streaming_text", text: null },
+    { op: "set_token_usage", usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+  ];
 }
 
 export function setClaudeStatus(s: Session, status: "idle" | "responding"): Patch[] {
@@ -441,6 +449,7 @@ export function completeAgent(
     stopText: opts?.stopText,
     stopThinking: opts?.stopThinking,
     duration: agent.duration ?? undefined,
+    transcriptPath: opts?.transcriptPath,
   }];
 }
 
