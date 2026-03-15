@@ -1,0 +1,115 @@
+import SwiftUI
+
+// MARK: - View Models
+
+struct ProjectInfo: Identifiable {
+    let id: String
+    let name: String
+    let sessions: [SessionInfo]
+}
+
+struct SessionInfo: Identifiable {
+    let id: String
+    let slug: String?
+    let status: String        // "active" | "ended"
+    let claudeStatus: String  // "idle" | "responding"
+    let toolCount: Int
+    let lastEventTime: Double
+
+    var displayName: String {
+        slug ?? String(id.prefix(8))
+    }
+
+    var claudeStatusLabel: String {
+        if status == "ended" { return "ended" }
+        if claudeStatus == "responding" { return "responding" }
+        let elapsed = Date().timeIntervalSince1970 * 1000 - lastEventTime
+        let minutes = Int(elapsed / 60_000)
+        if minutes > 0 {
+            return "idle \(minutes)m"
+        }
+        return "idle"
+    }
+
+    var statusColor: Color {
+        if status == "ended" { return .gray }
+        if claudeStatus == "responding" { return .yellow }
+        return .green
+    }
+}
+
+struct InboxInfo: Identifiable {
+    let id: Int
+    let type: String
+    let sessionId: String
+    let project: String?
+    let label: String
+    let summary: String
+}
+
+// MARK: - JSON Protocol Types (server → terminal)
+
+/// Represents any message from gravity-server
+struct ServerMessage: Decodable {
+    let type: String
+
+    // overview.snapshot
+    let projects: [ProjectSummaryJSON]?
+
+    // inbox.added
+    let item: InboxItemJSON?
+
+    // inbox.removed
+    let itemId: Int?
+
+    // inbox.snapshot
+    let items: [InboxItemJSON]?
+
+    // session.update
+    let sessionId: String?
+    let patches: [PatchJSON]?
+
+    enum CodingKeys: String, CodingKey {
+        case type, projects, item, itemId, items, sessionId, patches
+    }
+}
+
+struct ProjectSummaryJSON: Decodable {
+    let project: String
+    let sessions: [SessionSummaryJSON]
+}
+
+struct SessionSummaryJSON: Decodable {
+    let sessionId: String
+    let slug: String?
+    let status: String
+    let claudeStatus: String
+    let toolCount: Int
+    let lastEventTime: Double
+}
+
+struct InboxItemJSON: Decodable {
+    let id: Int
+    let type: String
+    let sessionId: String
+    let project: String?
+    let label: String
+    let summary: String
+}
+
+/// Minimal patch decoding — we only care about status changes for the menu bar
+struct PatchJSON: Decodable {
+    let op: String
+    let status: String?
+    let claudeStatus: String?
+
+    enum CodingKeys: String, CodingKey {
+        case op, status, claudeStatus
+    }
+}
+
+// MARK: - Terminal → Server request
+
+struct TerminalRequest: Encodable {
+    let type: String
+}
