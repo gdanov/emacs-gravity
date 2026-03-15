@@ -1,2 +1,3 @@
 #!/bin/sh
-exec env CLAUDE_PID=$PPID node "$(dirname "$0")/../dist/index.mjs" PreToolUse
+. "$(dirname "$0")/_ensure-server"
+exec env CLAUDE_PID=$PPID GRAVITY_SERVER_MODE=1 npx tsx "$(dirname "$0")/../src/index.ts" PreToolUse

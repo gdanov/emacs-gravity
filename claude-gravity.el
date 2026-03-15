@@ -22,11 +22,14 @@
 (require 'claude-gravity-diff)
 (require 'claude-gravity-render)
 (require 'claude-gravity-ui)
-(require 'claude-gravity-socket)
+(require 'claude-gravity-plan-review)
 (require 'claude-gravity-actions)
+
+(require 'claude-gravity-client)
+
 (require 'claude-gravity-tmux)
 (require 'claude-gravity-daemon)
 (require 'claude-gravity-debug)
 
 (provide 'claude-gravity)
-;;; clatude-gravity.el ends here
+;;; claude-gravity.el ends here

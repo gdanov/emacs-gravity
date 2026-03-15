@@ -7,7 +7,7 @@
 
 import { createServer } from "net";
 import type { Server, Socket } from "net";
-import { existsSync, unlinkSync, mkdirSync } from "fs";
+import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 import type { HookEventName, HookData, Patch, ServerMessage } from "@gravity/shared";
@@ -25,6 +25,9 @@ const HOOK_SOCKET = process.env.GRAVITY_HOOK_SOCK
 
 const TERMINAL_SOCKET = process.env.GRAVITY_TERMINAL_SOCK
   ?? join(process.env.HOME || "/tmp", ".local", "state", "gravity-terminal.sock");
+
+const PID_FILE = process.env.GRAVITY_PID_FILE
+  ?? join(process.env.HOME || "/tmp", ".local", "state", "gravity-server.pid");
 
 // ── State ────────────────────────────────────────────────────────────
 
@@ -128,7 +131,7 @@ function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
   }
 
   // For inbox events, broadcast to all terminals
-  if (eventName === "PermissionRequest") {
+  if (eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept") {
     const items = inbox.all();
     if (items.length > 0) {
       terminals.broadcast({
@@ -230,8 +233,12 @@ function handleTerminalMessage(
 
     case "action.permission": {
       const { itemId, decision, message } = msg;
+      // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
       inbox.respond(itemId, {
-        decision: { behavior: decision, message },
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: decision, message },
+        },
       });
       terminals.broadcast({ type: "inbox.removed", itemId });
       break;
@@ -239,8 +246,16 @@ function handleTerminalMessage(
 
     case "action.question": {
       const { itemId, answers } = msg;
+      // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
+      // AskUserQuestionIntercept is sent as PreToolUse event to Claude Code
       inbox.respond(itemId, {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: `User answered: ${answers[0] || ""}`,
+        },
         answer: answers[0] || "",
+        answers,
       });
       terminals.broadcast({ type: "inbox.removed", itemId });
       break;
@@ -289,8 +304,12 @@ function handleTerminalMessage(
         log("Plan review: converting ExitPlanMode allow → deny-as-approve", "info");
       }
 
+      // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
       inbox.respond(itemId, {
-        decision: { behavior: finalDecision, message },
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: finalDecision, message },
+        },
       });
       terminals.broadcast({ type: "inbox.removed", itemId });
       break;
@@ -312,7 +331,9 @@ function start(): void {
   log("gravity-server starting...", "info");
   hookServer = startHookServer();
   terminalServer = startTerminalServer();
-  log("gravity-server ready", "info");
+  mkdirSync(dirname(PID_FILE), { recursive: true });
+  writeFileSync(PID_FILE, process.pid.toString());
+  log(`gravity-server ready (pid=${process.pid}, pidfile=${PID_FILE})`, "info");
 }
 
 function shutdown(): void {
@@ -321,6 +342,7 @@ function shutdown(): void {
   terminalServer?.close();
   try { unlinkSync(HOOK_SOCKET); } catch {}
   try { unlinkSync(TERMINAL_SOCKET); } catch {}
+  try { unlinkSync(PID_FILE); } catch {}
 }
 
 process.on("SIGINT", () => { shutdown(); process.exit(0); });

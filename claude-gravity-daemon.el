@@ -7,7 +7,7 @@
 (require 'claude-gravity-core)
 (require 'claude-gravity-session)
 (require 'claude-gravity-state)
-(require 'claude-gravity-socket)
+(require 'claude-gravity-client)
 
 (defvar claude-gravity-mode-map)
 (defvar claude-gravity--follow-mode)

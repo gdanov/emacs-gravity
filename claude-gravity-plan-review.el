@@ -1,4 +1,7 @@
-;;; claude-gravity-socket.el --- Socket server and bidirectional communication for Claude Gravity  -*- lexical-binding: t; -*-
+;;; claude-gravity-plan-review.el --- Plan review mode for Claude Gravity  -*- lexical-binding: t; -*-
+
+;; Plan review functionality extracted from socket.el to be backend-agnostic.
+;; Works with both legacy socket mode and new server mode.
 
 ;;; Code:
 
@@ -6,298 +9,18 @@
 (require 'claude-gravity-faces)
 (require 'claude-gravity-session)
 (require 'claude-gravity-state)
-(require 'claude-gravity-events)
-(require 'claude-gravity-text)
-(require 'claude-gravity-diff)
 
-(declare-function claude-gravity--render-overview "claude-gravity-ui")
+;; Forward declarations — functions from other modules
+(declare-function claude-gravity--display-buffer "claude-gravity-ui")
 (declare-function claude-gravity--session-buffer-name "claude-gravity-ui")
 (declare-function claude-gravity--follow-detect-manual "claude-gravity-ui")
-(declare-function claude-gravity--display-buffer "claude-gravity-ui")
-(declare-function claude-gravity--inbox-act-permission "claude-gravity-actions")
-(declare-function claude-gravity--inbox-act-question "claude-gravity-actions")
-(declare-function claude-gravity--inbox-act-plan-review "claude-gravity-actions")
-(declare-function claude-gravity--inbox-act-idle "claude-gravity-actions")
-(declare-function claude-gravity--debug-capture-message "claude-gravity-debug")
-(declare-function claude-gravity--recover-tmux-sessions "claude-gravity-tmux")
-(declare-function claude-gravity--tmux-alive-p "claude-gravity-tmux")
+(declare-function claude-gravity--plan-revision-diff-async "claude-gravity-diff")
+(declare-function claude-gravity--plan-review-apply-margin-indicators "claude-gravity-diff")
+(declare-function claude-gravity--send-plan-review-response "claude-gravity-client")
+(declare-function claude-gravity-handle-event "claude-gravity-events")
+
+;; Forward declarations — variables from other modules
 (defvar claude-gravity--tmux-sessions)
-(defvar claude-gravity--debug-messages-enabled)
-
-
-;;; Socket Server
-
-(defvar claude-gravity--server-stopping nil
-  "Non-nil when server stop is intentional (suppress sentinel auto-restart).")
-
-(defvar claude-gravity--health-timer nil
-  "Repeating timer that checks server liveness and reconciles sessions.")
-
-;;; Notification mode-line indicator
-
-(defvar claude-gravity--notification-indicator ""
-  "Mode-line string showing Claude notification status.
-Added to `global-mode-string' by `claude-gravity-server-start'.")
-
-(put 'claude-gravity--notification-indicator 'risky-local-variable t)
-
-(defun claude-gravity--update-notification-indicator (notification-type label)
-  "Update the mode-line indicator based on NOTIFICATION-TYPE and LABEL."
-  (setq claude-gravity--notification-indicator
-        (cond
-         ((equal notification-type "permission")
-          (propertize (format " [Claude: permission]") 'face 'claude-gravity-question))
-         ((or (equal notification-type "waiting")
-              (equal notification-type "tool"))
-          (propertize (format " [Claude: waiting]") 'face 'claude-gravity-status-responding))
-         (notification-type
-          (propertize (format " [Claude: %s]" notification-type) 'face 'claude-gravity-status-responding))
-         (t
-          (propertize " [Claude: notice]" 'face 'claude-gravity-status-responding))))
-  (force-mode-line-update t))
-
-
-(defun claude-gravity--clear-notification-indicator ()
-  "Clear the mode-line notification indicator.
-If there are inbox items needing attention, shows the inbox indicator instead."
-  (let ((attention (cl-count-if
-                    (lambda (item) (not (eq (alist-get 'type item) 'idle)))
-                    claude-gravity--inbox)))
-    (if (> attention 0)
-        (claude-gravity--update-inbox-indicator)
-      (when (not (string-empty-p claude-gravity--notification-indicator))
-        (setq claude-gravity--notification-indicator "")
-        (force-mode-line-update t)))))
-
-
-(defun claude-gravity--update-inbox-indicator ()
-  "Update the mode-line indicator based on inbox contents."
-  (let ((attention (cl-count-if
-                    (lambda (item) (not (eq (alist-get 'type item) 'idle)))
-                    claude-gravity--inbox))
-        (has-sessions (> (hash-table-count claude-gravity--sessions) 0)))
-    (setq claude-gravity--notification-indicator
-          (cond
-           ((> attention 0)
-            (propertize (format " [Claude: %d!]" attention)
-                        'face 'claude-gravity-question))
-           (has-sessions
-            (propertize " [Claude]" 'face 'claude-gravity-status-idle))
-           (t "")))
-    (force-mode-line-update t)))
-
-
-(defun claude-gravity--inbox-notify (item)
-  "Flash a message and update mode-line for new inbox ITEM."
-  (claude-gravity--update-inbox-indicator)
-  (let ((type-label (pcase (alist-get 'type item)
-                      ('permission "Permission")
-                      ('question "Question")
-                      ('plan-review "Plan review")
-                      ('idle "Idle")
-                      (_ "Notice")))
-        (project (or (alist-get 'project item) "?")))
-    (claude-gravity--log 'debug "Claude: %s from %s" type-label project)))
-
-
-(defvar claude-gravity-server-sock-path
-  (expand-file-name "claude-gravity.sock" (or (getenv "CLAUDE_GRAVITY_SOCK_DIR") "~/.local/state"))
-  "Path to the Unix socket for Claude Gravity communication.")
-
-
-(defvar claude-gravity-server-process nil
-  "The current Claude Gravity server process.")
-
-
-(defun claude-gravity--server-filter (proc string)
-  "Process incoming JSON events from PROC in STRING.
-Accumulates partial data per connection until complete lines arrive."
-  (let ((buf (concat (or (process-get proc 'claude-gravity--buffer) "") string)))
-    ;; Process all complete lines (terminated by newline)
-    (while (string-match "\n" buf)
-      (let ((line (substring buf 0 (match-beginning 0))))
-        (setq buf (substring buf (match-end 0)))
-        (when (> (length line) 0)
-          (condition-case err
-              (let* ((data (json-parse-string line :object-type 'alist :array-type 'array)))
-                (when claude-gravity--debug-messages-enabled
-                  (claude-gravity--debug-capture-message line data nil))
-                (claude-gravity--log 'debug "Claude Gravity received: %s" (alist-get 'event data))
-                (let ((event (alist-get 'event data))
-                      (session-id (alist-get 'session_id data))
-                      (cwd (alist-get 'cwd data))
-                      (pid (alist-get 'pid data))
-                      (source (alist-get 'source data))
-                      (payload (alist-get 'data data))
-                      (needs-response (alist-get 'needs_response data)))
-                  (when (equal source "pi")
-                    (claude-gravity--log 'debug "Pi bridge event: %s for session %s" event session-id))
-                  (if needs-response
-                      ;; Bidirectional: queue in inbox.
-                      ;; Do NOT call handle-event "PreToolUse" here — the generic
-                      ;; PreToolUse hook already fires for every tool and will
-                      ;; register it in session state separately.
-                      ;;
-                      ;; If session is ignored, auto-respond with empty JSON
-                      ;; so the TUI handles it instead of Emacs.
-                      (let ((tool-name (alist-get 'tool_name payload))
-                            (ignored-session (let ((s (claude-gravity--get-session session-id)))
-                                               (and s (plist-get s :ignored)))))
-                        (claude-gravity--ensure-session session-id cwd)
-                        (if ignored-session
-                            ;; Ignored: send empty response so TUI handles it
-                            (progn
-                              (claude-gravity--send-bidirectional-response proc '())
-                              (claude-gravity--log 'debug "Ignored session %s: passing %s to TUI"
-                                                   (claude-gravity--session-short-id session-id)
-                                                   (or tool-name "bidirectional hook")))
-                          (cond
-                           ((equal tool-name "AskUserQuestion")
-                            (claude-gravity--inbox-add 'question session-id payload proc))
-                           ((equal tool-name "ExitPlanMode")
-                            (claude-gravity--inbox-add 'plan-review session-id payload proc))
-                           (t
-                            (let ((auto (assoc session-id claude-gravity--turn-auto-approve)))
-                              (if (and auto
-                                       (let ((session (claude-gravity--get-session session-id)))
-                                         (and session
-                                              (eql (cdr auto) (plist-get session :current-turn)))))
-                                  (progn
-                                    (claude-gravity--send-permission-response proc "allow")
-                                    (claude-gravity--log 'debug "Turn auto-approved: %s"
-                                                         (alist-get 'tool_name payload)))
-                                (claude-gravity--inbox-add 'permission session-id payload proc)))))))
-                    (when event
-                      (condition-case err
-                          (claude-gravity-handle-event event session-id cwd payload pid source)
-                        (error
-                         (claude-gravity--log 'error "Event handler error for %s: %s" event err)))))))
-            (error
-             (when claude-gravity--debug-messages-enabled
-               (claude-gravity--debug-capture-message line nil err))
-             (claude-gravity--log 'error "Claude Gravity JSON error: %s" err))))))
-    ;; Store any remaining partial data
-    (process-put proc 'claude-gravity--buffer buf)))
-
-
-(defun claude-gravity-server-alive-p ()
-  "Return non-nil if the socket server is running."
-  (and claude-gravity-server-process
-       (process-live-p claude-gravity-server-process)))
-
-
-(defun claude-gravity--ensure-server ()
-  "Start the socket server if it is not already running.
-Respects `claude-gravity--server-stopping' to avoid restarting after intentional stop."
-  (unless (or claude-gravity--server-stopping
-              (claude-gravity-server-alive-p))
-    (claude-gravity-server-start)))
-
-
-(defun claude-gravity--server-sentinel (_proc event)
-  "Handle process state changes for server and client connections.
-EVENT is the process status change string."
-  (let ((trimmed (string-trim event)))
-    (cond
-     ;; Client connection/disconnection — normal traffic, debug only
-     ((or (string-prefix-p "open from" trimmed)
-          (string= "connection broken by remote peer" trimmed))
-      (claude-gravity--log 'debug "Server process event: %s" trimmed))
-     ;; Unexpected server/child event — log and attempt restart
-     (t
-      (claude-gravity--log 'warn "Server process event: %s" trimmed)
-      (unless claude-gravity--server-stopping
-        (run-at-time 1 nil #'claude-gravity--ensure-server))))))
-
-
-(defun claude-gravity--reconcile-sessions ()
-  "Re-check ended sessions and mark active if their PID is still alive.
-Called after server restart to recover sessions that were falsely marked ended."
-  (let ((recovered 0))
-    (maphash (lambda (_id session)
-               (let ((pid (plist-get session :pid)))
-                 (when (and (eq (plist-get session :status) 'ended)
-                            pid (numberp pid) (> pid 0)
-                            (claude-gravity--process-alive-p pid))
-                   (plist-put session :status 'active)
-                   (plist-put session :claude-status 'idle)
-                   (cl-incf recovered))))
-             claude-gravity--sessions)
-    (when (> recovered 0)
-      (claude-gravity--log 'info "Reconciled %d session(s) back to active" recovered)
-      (claude-gravity--render-overview))))
-
-
-(defun claude-gravity--health-check ()
-  "Periodic check: restart server if dead, reconcile session liveness."
-  (unless (claude-gravity-server-alive-p)
-    (claude-gravity--log 'warn "Health check: server dead, restarting")
-    (claude-gravity--ensure-server))
-  ;; Always reconcile: recover ended sessions whose PID is still alive
-  (claude-gravity--reconcile-sessions)
-  ;; Always try to recover lost tmux mappings
-  (claude-gravity--recover-tmux-sessions))
-
-
-(defun claude-gravity-server-start ()
-  "Start the Unix socket server for Claude Gravity."
-  (interactive)
-  (setq claude-gravity--server-stopping t)  ; suppress sentinel during restart
-  (claude-gravity-server-stop)
-  (setq claude-gravity--server-stopping nil)
-  (make-directory (file-name-directory claude-gravity-server-sock-path) t)
-  (when (file-exists-p claude-gravity-server-sock-path)
-    (delete-file claude-gravity-server-sock-path))
-  (setq claude-gravity-server-process
-        (make-network-process
-         :name "claude-gravity-server"
-         :server 128
-         :family 'local
-         :service claude-gravity-server-sock-path
-         :filter 'claude-gravity--server-filter
-         :sentinel 'claude-gravity--server-sentinel))
-  ;; Register notification indicator in global-mode-string (shown in mode-line misc-info).
-  ;; global-mode-string must start with "" for format-mode-line to work;
-  ;; without it, a bare symbol list is interpreted as an invalid mode-line construct.
-  (unless (memq 'claude-gravity--notification-indicator global-mode-string)
-    (if (or (null global-mode-string) (equal global-mode-string '("")))
-        (setq global-mode-string '("" claude-gravity--notification-indicator))
-      (push 'claude-gravity--notification-indicator (cdr (last global-mode-string)))))
-  ;; Clear wrap cache on window resize (fill-column depends on window width)
-  (add-hook 'window-size-change-functions
-            (lambda (_frame) (claude-gravity--wrap-cache-clear)))
-  ;; Start periodic health check (catches silent socket death from suspend/resume)
-  (when claude-gravity--health-timer
-    (cancel-timer claude-gravity--health-timer))
-  (setq claude-gravity--health-timer
-        (run-with-timer 30 30 #'claude-gravity--health-check))
-  (claude-gravity--log 'info "Claude Gravity server started at %s" claude-gravity-server-sock-path))
-
-
-(defun claude-gravity-server-stop ()
-  "Stop the Claude Gravity server."
-  (interactive)
-  (setq claude-gravity--server-stopping t)
-  (when claude-gravity--health-timer
-    (cancel-timer claude-gravity--health-timer)
-    (setq claude-gravity--health-timer nil))
-  (when claude-gravity-server-process
-    (delete-process claude-gravity-server-process)
-    (setq claude-gravity-server-process nil))
-  (when (file-exists-p claude-gravity-server-sock-path)
-    (delete-file claude-gravity-server-sock-path))
-  (claude-gravity--log 'info "Claude Gravity server stopped"))
-
-
-;;; Plan Review Mode
-
-(defvar claude-gravity--plan-review-queue nil
-  "Queue of pending plan review requests.
-Each entry is (event-data proc session-id).")
-
-
-(defvar-local claude-gravity--plan-review-proc nil
-  "The socket process to send the review decision back on.")
 
 
 (defvar-local claude-gravity--plan-review-original nil
@@ -373,143 +96,8 @@ for those tools are auto-approved within the session.")
   :keymap claude-gravity-plan-review-mode-map)
 
 
-(defun claude-gravity--handle-ask-user-question (event-data proc session-id cwd)
-  "Handle bidirectional AskUserQuestion from EVENT-DATA.
-PROC is the socket to respond on.  SESSION-ID and CWD identify the session."
-  ;; Fire normal PreToolUse handler to update session state
-  (claude-gravity-handle-event "PreToolUse" session-id cwd event-data)
-  ;; Defer interactive part to the command loop — completing-read
-  ;; cannot run inside a process filter.
-  (let ((tool-input (alist-get 'tool_input event-data))
-        (tid (alist-get 'tool_use_id event-data)))
-    (run-at-time 0 nil
-                 #'claude-gravity--ask-user-question-prompt
-                 tool-input proc session-id tid)))
-
-
-(defun claude-gravity--ask-user-question-prompt (tool-input proc session-id tid)
-  "Prompt user for AskUserQuestion answer via minibuffer.
-TOOL-INPUT is the question data, PROC the socket, SESSION-ID the session,
-TID the tool_use_id for updating prompts."
-  (let* ((questions (alist-get 'questions tool-input))
-         (first-q (and (vectorp questions) (> (length questions) 0) (aref questions 0)))
-         (q-text (and first-q (alist-get 'question first-q)))
-         (header (and first-q (alist-get 'header first-q)))
-         (options (and first-q (alist-get 'options first-q)))
-         (choices (when (vectorp options)
-                    (cl-loop for i from 0 below (length options)
-                             for opt = (aref options i)
-                             for label = (alist-get 'label opt)
-                             for desc = (alist-get 'description opt)
-                             collect (if desc (format "%s -- %s" label desc) label))))
-         (prompt-str (format "Claude asks [%s]: %s " (or header "?") (or q-text "?")))
-         (answer (if choices
-                     (completing-read prompt-str choices nil t)
-                   (read-string prompt-str)))
-         ;; Extract just the label (before " -- ")
-         (answer-label (if (string-match "\\`\\(.+?\\) -- " answer)
-                           (match-string 1 answer)
-                         answer)))
-    ;; Build deny response with the answer
-    ;; Include top-level 'answer' for OpenCode bridge extraction
-    (let ((response `((hookSpecificOutput
-                       . ((hookEventName . "PreToolUse")
-                          (permissionDecision . "deny")
-                          (permissionDecisionReason
-                           . ,(format "User answered from Emacs: %s\nQuestion: %s\nAnswer: %s"
-                                      answer-label (or q-text "") answer-label))))
-                      (answer . ,answer-label))))
-      (claude-gravity--send-bidirectional-response proc response))
-    ;; Update the prompt entry with the answer
-    (let ((session (claude-gravity--get-session session-id)))
-      (when (and session tid)
-        (claude-gravity-model-update-prompt-answer session tid answer-label)))
-    (claude-gravity--log 'debug "Answered: %s" answer-label)))
-
-
-;;; Tool Permission Requests
-
-(defun claude-gravity--handle-tool-permission (event-data proc session-id cwd)
-  "Handle a tool permission request from Claude Code.
-EVENT-DATA is the PermissionRequest payload, PROC the socket to respond on,
-SESSION-ID and CWD identify the session."
-  ;; Record the tool in session state for UI display
-  (claude-gravity-handle-event "PreToolUse" session-id cwd event-data)
-  ;; Defer interactive prompt out of process filter
-  (run-at-time 0 nil
-               #'claude-gravity--tool-permission-prompt
-               event-data proc session-id cwd))
-
-
-(defun claude-gravity--tool-permission-prompt (event-data proc session-id cwd)
-  "Prompt user to approve/deny a tool permission request.
-EVENT-DATA is the PermissionRequest payload, PROC the socket,
-SESSION-ID and CWD identify the session."
-  (let* ((tool-name (alist-get 'tool_name event-data))
-         (tool-input (alist-get 'tool_input event-data))
-         (signature (claude-gravity--tool-signature tool-name tool-input))
-         (choices '("Allow" "Allow always" "Deny"))
-         (answer (completing-read
-                  (format "Claude permission [%s]: " signature)
-                  choices nil t)))
-    (pcase answer
-      ("Allow"
-       (claude-gravity--send-permission-response proc "allow"))
-      ("Allow always"
-       (claude-gravity--send-permission-response proc "allow")
-       (claude-gravity--write-allow-pattern-for-tool tool-name tool-input session-id cwd))
-      ("Deny"
-       (let ((reason (read-string "Reason (optional): ")))
-         (if (string-empty-p reason)
-             (claude-gravity--send-permission-response proc "deny")
-           (claude-gravity--send-permission-response proc "deny" reason)))))))
-
-
-(defun claude-gravity--send-permission-response (proc behavior &optional message permissions)
-  "Send allow/deny response for a PermissionRequest.
-PROC is the socket, BEHAVIOR is \"allow\" or \"deny\", MESSAGE is optional reason.
-PERMISSIONS is an optional vector of permission rules for updatedPermissions."
-  (let* ((decision `((behavior . ,behavior)
-                     ,@(when message `((message . ,message)))
-                     ,@(when permissions `((updatedPermissions . ,permissions)))))
-         (response `((hookSpecificOutput
-                      . ((hookEventName . "PermissionRequest")
-                         (decision . ,decision))))))
-    (claude-gravity--send-bidirectional-response proc response)))
-
-
-(defun claude-gravity--write-allow-pattern-for-tool (tool-name tool-input session-id cwd)
-  "Write an allow pattern for TOOL-NAME/TOOL-INPUT to settings.local.json.
-SESSION-ID and CWD identify the session project."
-  (let* ((suggestions (claude-gravity--suggest-patterns tool-name tool-input))
-         (chosen (car suggestions))
-         (settings-path (expand-file-name ".claude/settings.local.json" cwd)))
-    (when chosen
-      (let* ((data (if (file-exists-p settings-path)
-                       (claude-gravity--json-read-file settings-path)
-                     (list (cons 'permissions (list (cons 'allow nil))))))
-             (perms (or (alist-get 'permissions data)
-                        (list (cons 'allow nil))))
-             (allow (or (alist-get 'allow perms) nil)))
-        (if (member chosen allow)
-            (claude-gravity--log 'debug "Pattern already exists: %s" chosen)
-          (setf (alist-get 'allow perms) (append allow (list chosen)))
-          (setf (alist-get 'permissions data) perms)
-          (let ((dir (file-name-directory settings-path)))
-            (unless (file-exists-p dir)
-              (make-directory dir t)))
-          (with-temp-file settings-path
-            (let ((json-encoding-pretty-print t))
-              (insert (json-encode data))))
-          (let ((session (claude-gravity--get-session session-id)))
-            (when session
-              (claude-gravity--load-allow-patterns session)))
-          (claude-gravity--log 'debug "Added allow pattern: %s" chosen))))))
-
-
-(defun claude-gravity--handle-plan-review (event-data proc session-id)
+(defun claude-gravity--handle-plan-review (event-data session-id)
   "Open a plan review buffer for EVENT-DATA.
-PROC is the socket connection to respond on.
 SESSION-ID identifies the Claude Code session."
   (let* ((tool-input (alist-get 'tool_input event-data))
          (plan-content (or (alist-get 'planContent tool-input)
@@ -552,7 +140,6 @@ SESSION-ID identifies the Claude Code session."
               (error nil))
             (forward-line 1))))
       ;; Store buffer-local state
-      (setq-local claude-gravity--plan-review-proc proc)
       (setq-local claude-gravity--plan-review-original
                   (buffer-substring-no-properties (point-min) (point-max)))
       (setq-local claude-gravity--plan-review-session-id session-id)
@@ -597,31 +184,16 @@ SESSION-ID identifies the Claude Code session."
       (claude-gravity--log 'debug "Plan review: C-c C-c approve | C-c C-k deny | c comment | C-c C-d diff"))))
 
 
-(defun claude-gravity--send-bidirectional-response (proc response)
-  "Send RESPONSE JSON to the bridge via socket PROC, then close."
-  (let ((json-str (json-encode response)))
-    (claude-gravity--log 'warn "Bidirectional response: proc=%s live=%s response=%s"
-                         proc (and proc (process-live-p proc))
-                         (substring json-str 0 (min 200 (length json-str)))))
-  (if (and proc (process-live-p proc))
-      (condition-case err
-          (progn
-            (process-send-string proc (concat (json-encode response) "\n"))
-            (run-at-time 0.5 nil (lambda (p) (when (process-live-p p) (delete-process p))) proc))
-        (error
-         (claude-gravity--log 'error "Bidirectional response send failed: %s" err)))
-    (claude-gravity--log 'error "Claude Gravity: bridge connection lost. Response not sent.")))
-
-
 (defun claude-gravity--plan-review-send-response (response)
-  "Send RESPONSE JSON to the bridge via the stored socket proc."
-  (claude-gravity--log 'warn "Plan review sending response: proc=%s live=%s session=%s"
-                       claude-gravity--plan-review-proc
-                       (and claude-gravity--plan-review-proc
-                            (process-live-p claude-gravity--plan-review-proc))
-                       claude-gravity--plan-review-session-id)
-  (claude-gravity--send-bidirectional-response claude-gravity--plan-review-proc response)
-  (setq-local claude-gravity--plan-review-proc nil))
+  "Send RESPONSE for the plan review via gravity-server."
+  (if claude-gravity--plan-review-inbox-id
+      (let* ((hook (alist-get 'hookSpecificOutput response))
+             (decision (alist-get 'decision hook))
+             (behavior (alist-get 'behavior decision))
+             (message (alist-get 'message decision)))
+        (claude-gravity--send-plan-review-response
+         claude-gravity--plan-review-inbox-id behavior message))
+    (claude-gravity--log 'warn "Plan review: no inbox-id for response")))
 
 
 (defun claude-gravity--plan-review-compute-diff ()
@@ -664,7 +236,7 @@ Returns the diff string or nil if no changes."
     (overlay-put ov 'face '(:underline (:style wave :color "orange")))
     (overlay-put ov 'help-echo text)
     (overlay-put ov 'after-string
-                 (propertize (format "  « %s »" text)
+                 (propertize (format "  \u00ab %s \u00bb" text)
                              'face '(:foreground "orange" :slant italic)))
     (overlay-put ov 'claude-plan-comment t)
     (push `((line . ,line-num)
@@ -807,16 +379,8 @@ incorporate the feedback (the allow channel cannot carry feedback)."
           (claude-gravity--enable-session-follow-mode session-id)
           (claude-gravity--log 'debug "Feedback detected — denied for revision"))
       ;; No feedback — clean approve with session-scoped permissions.
-      ;; NOTE: We send {"behavior":"allow"} here, but the bridge (index.ts)
-      ;; converts it to {"behavior":"deny","message":"User approved..."} before
-      ;; writing to stdout. This is the deny-as-approve workaround for Claude
-      ;; Code bug #15755 where ExitPlanMode "allow" from hooks is silently
-      ;; ignored. See the DENY-AS-APPROVE comment block in index.ts.
-      (claude-gravity--log 'warn "Plan approve: proc=%s live=%s session=%s"
-                           claude-gravity--plan-review-proc
-                           (and claude-gravity--plan-review-proc
-                                (process-live-p claude-gravity--plan-review-proc))
-                           session-id)
+      ;; NOTE: We send {"behavior":"allow"} here. The gravity-server handles
+      ;; the deny-as-approve workaround for Claude Code bug #15755.
       (let* ((perms claude-gravity--plan-review-session-permissions)
              (decision (if (and perms (> (length perms) 0))
                            `((behavior . "allow")
@@ -967,13 +531,12 @@ Collects inline comments, @claude markers, diff, and a general comment."
   "Handle plan review buffer being killed without explicit decision.
 Sends a deny response and cleans up inbox item."
   (when claude-gravity--plan-review-inbox-id
-    (claude-gravity--inbox-remove claude-gravity--plan-review-inbox-id))
-  (when claude-gravity--plan-review-proc
     (let ((response `((hookSpecificOutput
                        . ((hookEventName . "PermissionRequest")
                           (decision . ((behavior . "deny")
                                        (message . "Plan review cancelled (buffer closed)"))))))))
-      (claude-gravity--plan-review-send-response response))))
+      (claude-gravity--plan-review-send-response response))
+    (claude-gravity--inbox-remove claude-gravity--plan-review-inbox-id)))
 
 
 (defun claude-gravity-test-plan-review ()
@@ -983,8 +546,7 @@ No socket proc is attached — approve/deny will just message."
   (claude-gravity--handle-plan-review
    '((tool_input . ((planContent . "## Test Plan\n\n1. Step one\n2. Step two\n3. Step three\n")
                      (allowedPrompts . [((tool . "Bash") (prompt . "npm test"))]))))
-   nil
    "test-session"))
 
-(provide 'claude-gravity-socket)
-;;; claude-gravity-socket.el ends here
+(provide 'claude-gravity-plan-review)
+;;; claude-gravity-plan-review.el ends here

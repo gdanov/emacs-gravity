@@ -13,6 +13,14 @@ export interface HookSocketClientService {
    * Falls back gracefully if server is unavailable (logs, doesn't fail).
    */
   readonly send: (msg: HookSocketMessage) => Effect.Effect<void>;
+
+  /**
+   * Send a HookSocketMessage and wait for a response from the server.
+   * Used for bidirectional events (PermissionRequest, AskUserQuestionIntercept).
+   * The connection stays open until the server writes a response or timeout.
+   * Returns the parsed JSON response, or {} on error/timeout.
+   */
+  readonly sendAndWait: (msg: HookSocketMessage, timeoutMs?: number) => Effect.Effect<any>;
 }
 
 export const HookSocketClient = ServiceMap.Service<HookSocketClientService>("HookSocketClient");
@@ -69,6 +77,67 @@ export function makeHookSocketClient(socketPath: string): HookSocketClientServic
           }
         });
       }),
+
+    sendAndWait: (msg: HookSocketMessage, timeoutMs: number = 345600000) =>
+      Effect.callback<any>((resume) => {
+        // If socket file doesn't exist, return empty response
+        if (!existsSync(socketPath)) {
+          resume(Effect.succeed({}));
+          return;
+        }
+
+        const client = createConnection(socketPath);
+        let responded = false;
+        let buffer = "";
+
+        const timer = setTimeout(() => {
+          if (!responded) {
+            responded = true;
+            client.destroy();
+            resume(Effect.succeed({}));
+          }
+        }, timeoutMs);
+        timer.unref();
+
+        client.on("connect", () => {
+          // Mark as needing a response so the server keeps the socket open
+          const payload = JSON.stringify({ ...msg, needs_response: true }) + "\n";
+          client.write(payload);
+          // Don't end — wait for response
+        });
+
+        client.on("data", (chunk) => {
+          buffer += chunk.toString();
+          const newlineIdx = buffer.indexOf("\n");
+          if (newlineIdx >= 0 && !responded) {
+            responded = true;
+            clearTimeout(timer);
+            const line = buffer.substring(0, newlineIdx);
+            try {
+              resume(Effect.succeed(JSON.parse(line)));
+            } catch {
+              resume(Effect.succeed({}));
+            }
+            client.destroy();
+          }
+        });
+
+        client.on("error", () => {
+          if (!responded) {
+            responded = true;
+            clearTimeout(timer);
+            resume(Effect.succeed({}));
+          }
+        });
+
+        client.on("close", () => {
+          if (!responded) {
+            responded = true;
+            clearTimeout(timer);
+            resume(Effect.succeed({}));
+          }
+        });
+      }),
   };
 }
 
@@ -88,10 +157,19 @@ export const HookSocketClientLive = Layer.succeed(
 );
 
 /** Test layer that captures sent messages. */
-export const HookSocketClientTest = (opts?: { sent?: HookSocketMessage[] }) => {
+export const HookSocketClientTest = (opts?: {
+  sent?: HookSocketMessage[];
+  responses?: any[];
+}) => {
   const sent = opts?.sent ?? [];
+  const responses = [...(opts?.responses ?? [])];
   return Layer.succeed(HookSocketClient, {
     send: (msg: HookSocketMessage) =>
       Effect.sync(() => { sent.push(msg); }),
+    sendAndWait: (msg: HookSocketMessage) =>
+      Effect.sync(() => {
+        sent.push(msg);
+        return responses.shift() ?? {};
+      }),
   });
 };

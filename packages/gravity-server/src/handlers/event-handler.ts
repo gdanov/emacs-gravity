@@ -451,6 +451,31 @@ export function handleEvent(
       }
       break;
     }
+
+    case "AskUserQuestionIntercept": {
+      // Bidirectional: add question inbox item, terminal responds later
+      const session = ensureSession(store, sessionId, cwd);
+      const toolName = data.tool_name || "AskUserQuestion";
+      const input = data.tool_input as Record<string, unknown> | undefined;
+      const questions = input?.questions as Array<Record<string, unknown>> | undefined;
+      const firstQ = questions?.[0];
+      const questionText = (firstQ?.question as string) || toolName;
+      const summary = questionText.substring(0, 80);
+
+      if (hookSocket) {
+        inbox.add(
+          "question",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          data as Record<string, unknown>,
+          hookSocket,
+        );
+        return [];
+      }
+      break;
+    }
   }
 
   return patches;

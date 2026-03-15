@@ -1,0 +1,64 @@
+#!/bin/sh
+# Auto-start gravity-server if hook socket doesn't exist.
+# Sourced by all hook scripts before invoking the bridge.
+
+GRAVITY_SOCK="${GRAVITY_HOOK_SOCK:-$HOME/.local/state/gravity-hooks.sock}"
+GRAVITY_PID_FILE="${GRAVITY_PID_FILE:-$HOME/.local/state/gravity-server.pid}"
+
+# Fast path: socket exists → server is running
+[ -S "$GRAVITY_SOCK" ] && return 0
+
+# Check PID file — if process alive, socket may appear soon (startup race)
+if [ -f "$GRAVITY_PID_FILE" ]; then
+  pid=$(cat "$GRAVITY_PID_FILE" 2>/dev/null)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    # Process alive but socket not ready yet — wait briefly
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [ -S "$GRAVITY_SOCK" ] && return 0
+      sleep 0.1
+    done
+    return 0  # Give up waiting, bridge will handle gracefully
+  fi
+  # Stale PID file — clean up
+  rm -f "$GRAVITY_PID_FILE"
+fi
+
+# Find server binary
+if [ -n "$GRAVITY_SERVER_BIN" ] && [ -f "$GRAVITY_SERVER_BIN" ]; then
+  SERVER_BIN="$GRAVITY_SERVER_BIN"
+else
+  # Try monorepo layout: hooks/ → ../../gravity-server/dist/server.mjs
+  SERVER_BIN="$(dirname "$0")/../../gravity-server/dist/server.mjs"
+  if [ ! -f "$SERVER_BIN" ]; then
+    # Try plugin cache layout: hooks/ → ../dist/server.mjs
+    SERVER_BIN="$(dirname "$0")/../dist/server.mjs"
+  fi
+fi
+[ -f "$SERVER_BIN" ] || return 0  # Not found → skip, Emacs can start it
+
+# Atomic lock to prevent duplicate spawns from concurrent hooks
+LOCK_FILE="$HOME/.local/state/gravity-server.lock"
+mkdir -p "$(dirname "$LOCK_FILE")"
+if ! (set -C; echo $$ > "$LOCK_FILE") 2>/dev/null; then
+  # Another hook is already spawning — just wait for socket
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -S "$GRAVITY_SOCK" ] && break
+    sleep 0.1
+  done
+  return 0
+fi
+
+# Clean up stale sockets
+rm -f "$GRAVITY_SOCK" "$HOME/.local/state/gravity-terminal.sock"
+
+# Spawn server in background
+nohup node "$SERVER_BIN" >> /tmp/gravity-server.log 2>&1 &
+
+# Wait for socket (up to 2s)
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ -S "$GRAVITY_SOCK" ] && break
+  sleep 0.1
+done
+
+# Remove lock
+rm -f "$LOCK_FILE"

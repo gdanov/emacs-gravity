@@ -16,6 +16,7 @@
   :group 'tools)
 
 
+
 (defcustom claude-gravity-managed-statusline 'gravity
   "StatusLine override for managed (tmux) Claude sessions.
 `gravity' -- use built-in gravity statusline (sends data to Emacs, minimal terminal output).

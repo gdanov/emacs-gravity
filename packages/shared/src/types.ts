@@ -88,7 +88,8 @@ export type HookEventName =
   | "UserPromptSubmit"
   | "Stop"
   | "Notification"
-  | "PermissionRequest";
+  | "PermissionRequest"
+  | "AskUserQuestionIntercept";
 
 // ── View Model (session state tree) ──────────────────────────────────
 //
@@ -335,10 +336,31 @@ export interface HookSocketMessage {
   needs_response: boolean;
 }
 
+/**
+ * Response written back to the hook socket by the gravity-server.
+ *
+ * In server mode, this is the full stdout-ready payload that the bridge
+ * writes directly to stdout for Claude Code to consume.
+ *
+ * The hookSpecificOutput wrapper is required by Claude Code's hook protocol.
+ * Additional top-level fields (answer, answers) are included for
+ * AskUserQuestionIntercept responses.
+ */
 export interface HookSocketResponse {
+  hookSpecificOutput?: {
+    hookEventName: string;
+    decision?: {
+      behavior: "allow" | "deny";
+      message?: string;
+    };
+    permissionDecision?: string;
+    permissionDecisionReason?: string;
+  };
+  /** Legacy format (used by Emacs socket direct mode) */
   decision?: {
     behavior: "allow" | "deny";
     message?: string;
   };
   answer?: string;
+  answers?: string[];
 }

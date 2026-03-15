@@ -6,14 +6,14 @@
 (require 'claude-gravity-session)
 
 ; Forward declarations for functions in modules loaded later
-(declare-function claude-gravity--inbox-notify "claude-gravity-socket")
-(declare-function claude-gravity--update-inbox-indicator "claude-gravity-socket")
+(declare-function claude-gravity--inbox-notify "claude-gravity-client")
+(declare-function claude-gravity--update-inbox-indicator "claude-gravity-client")
 (declare-function claude-gravity--render-overview "claude-gravity-ui")
 (declare-function claude-gravity--render-session-buffer "claude-gravity-ui")
 (declare-function claude-gravity--session-buffer-name "claude-gravity-ui")
 (declare-function claude-gravity--tool-signature "claude-gravity-diff")
 (declare-function claude-gravity-tail "claude-gravity-ui")
-(declare-function claude-gravity--plan-review-on-kill "claude-gravity-socket")
+(declare-function claude-gravity--plan-review-on-kill "claude-gravity-plan-review")
 
 
 ;;; Inbox — Async queue for items needing user attention
@@ -125,9 +125,11 @@ item that was just added for the NEXT tool call."
                   (and (equal (alist-get 'session-id item) session-id)
                        (memq (alist-get 'type item)
                              '(permission question plan-review))
-                       ;; Only stale if proc is dead (bridge already exited)
+                       ;; Only stale if proc is dead (bridge already exited).
+                       ;; In client/server mode, socket-proc is nil — the server
+                       ;; owns the connection, so the item is NOT stale.
                        (let ((proc (alist-get 'socket-proc item)))
-                         (not (and proc (process-live-p proc))))))
+                         (and proc (not (process-live-p proc))))))
                 claude-gravity--inbox)))
     (when stale
       (dolist (item stale)

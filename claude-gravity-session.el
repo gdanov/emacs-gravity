@@ -251,5 +251,36 @@ SOURCE should be \"claude-code\" or \"opencode\"."
         (when (and start last-ev)
           (float-time (time-subtract last-ev start)))))))
 
+
+(declare-function claude-gravity--suggest-patterns "claude-gravity-ui")
+
+(defun claude-gravity--write-allow-pattern-for-tool (tool-name tool-input session-id cwd)
+  "Write an allow pattern for TOOL-NAME/TOOL-INPUT to settings.local.json.
+SESSION-ID and CWD identify the session project."
+  (let* ((suggestions (claude-gravity--suggest-patterns tool-name tool-input))
+         (chosen (car suggestions))
+         (settings-path (expand-file-name ".claude/settings.local.json" cwd)))
+    (when chosen
+      (let* ((data (if (file-exists-p settings-path)
+                       (claude-gravity--json-read-file settings-path)
+                     (list (cons 'permissions (list (cons 'allow nil))))))
+             (perms (or (alist-get 'permissions data)
+                        (list (cons 'allow nil))))
+             (allow (or (alist-get 'allow perms) nil)))
+        (if (member chosen allow)
+            (claude-gravity--log 'debug "Pattern already exists: %s" chosen)
+          (setf (alist-get 'allow perms) (append allow (list chosen)))
+          (setf (alist-get 'permissions data) perms)
+          (let ((dir (file-name-directory settings-path)))
+            (unless (file-exists-p dir)
+              (make-directory dir t)))
+          (with-temp-file settings-path
+            (let ((json-encoding-pretty-print t))
+              (insert (json-encode data))))
+          (let ((session (claude-gravity--get-session session-id)))
+            (when session
+              (claude-gravity--load-allow-patterns session)))
+          (claude-gravity--log 'debug "Added allow pattern: %s" chosen))))))
+
 (provide 'claude-gravity-session)
 ;;; claude-gravity-session.el ends here

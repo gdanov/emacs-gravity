@@ -6,8 +6,13 @@
 (require 'claude-gravity-faces)
 (require 'claude-gravity-session)
 (require 'claude-gravity-state)
-(require 'claude-gravity-socket)
 (require 'claude-gravity-text)
+
+;; Forward declarations — backend-provided functions
+(declare-function claude-gravity--send-permission-response "claude-gravity-client")
+(declare-function claude-gravity--send-bidirectional-response "claude-gravity-client")
+(declare-function claude-gravity--handle-plan-review "claude-gravity-plan-review")
+(declare-function claude-gravity--write-allow-pattern-for-tool "claude-gravity-session")
 
 
 ;;; ============================================================================
@@ -43,6 +48,15 @@
 
 (defvar-local claude-gravity--action-inbox-item nil
   "The inbox item associated with this action buffer.")
+
+
+(defun claude-gravity--inbox-item-handle (item)
+  "Return the response handle for inbox ITEM.
+In legacy mode: the socket process (for `process-send-string').
+In server mode: the inbox item ID (integer, for server API)."
+  (or (let ((p (alist-get 'socket-proc item)))
+        (and p (processp p) p))
+      (alist-get 'id item)))
 
 
 ;;; Rich permission views for Edit/Write tools
@@ -229,8 +243,8 @@ Called after finishing a permission or question action."
   "Allow the permission request."
   (interactive)
   (let* ((item claude-gravity--action-inbox-item)
-         (proc (alist-get 'socket-proc item)))
-    (claude-gravity--send-permission-response proc "allow")
+         (handle (claude-gravity--inbox-item-handle item)))
+    (claude-gravity--send-permission-response handle "allow")
     (claude-gravity--permission-action-finish)
     (claude-gravity--log 'debug "Permission allowed")))
 
@@ -240,13 +254,13 @@ Called after finishing a permission or question action."
   (interactive)
   (let* ((item claude-gravity--action-inbox-item)
          (data (alist-get 'data item))
-         (proc (alist-get 'socket-proc item))
+         (handle (claude-gravity--inbox-item-handle item))
          (tool-name (alist-get 'tool_name data))
          (tool-input (alist-get 'tool_input data))
          (session-id (alist-get 'session-id item))
          (session (claude-gravity--get-session session-id))
          (cwd (when session (plist-get session :cwd))))
-    (claude-gravity--send-permission-response proc "allow")
+    (claude-gravity--send-permission-response handle "allow")
     (when cwd
       (claude-gravity--write-allow-pattern-for-tool tool-name tool-input session-id cwd))
     (claude-gravity--permission-action-finish)
@@ -258,14 +272,14 @@ Called after finishing a permission or question action."
   (interactive)
   (let* ((item claude-gravity--action-inbox-item)
          (data (alist-get 'data item))
-         (proc (alist-get 'socket-proc item))
+         (handle (claude-gravity--inbox-item-handle item))
          (suggestions (alist-get 'permission_suggestions data)))
     (if (not suggestions)
         (progn
-          (claude-gravity--send-permission-response proc "allow")
+          (claude-gravity--send-permission-response handle "allow")
           (claude-gravity--log 'debug "No permission suggestions available, allowed without permissions"))
       (let ((chosen (elt suggestions 0)))
-        (claude-gravity--send-permission-response proc "allow" nil (vector chosen))
+        (claude-gravity--send-permission-response handle "allow" nil (vector chosen))
         (let ((type (alist-get 'type chosen))
               (tool (alist-get 'tool chosen)))
           (claude-gravity--log 'debug "Permission allowed + session rule: %s: %s" type (or tool "all")))))
@@ -281,11 +295,11 @@ turn are also automatically approved.  The flag is cleared on turn boundaries
   (interactive)
   (let* ((item claude-gravity--action-inbox-item)
          (session-id (alist-get 'session-id item))
-         (proc (alist-get 'socket-proc item))
+         (handle (claude-gravity--inbox-item-handle item))
          (session (claude-gravity--get-session session-id))
          (turn (when session (plist-get session :current-turn))))
     ;; Approve current item
-    (claude-gravity--send-permission-response proc "allow")
+    (claude-gravity--send-permission-response handle "allow")
     ;; Approve all other pending permissions for this session
     (let ((others (cl-remove-if-not
                    (lambda (it)
@@ -294,9 +308,9 @@ turn are also automatically approved.  The flag is cleared on turn boundaries
                           (not (eq (alist-get 'id it) (alist-get 'id item)))))
                    claude-gravity--inbox)))
       (dolist (other others)
-        (let ((p (alist-get 'socket-proc other)))
-          (when (and p (process-live-p p))
-            (claude-gravity--send-permission-response p "allow")))
+        (let ((h (claude-gravity--inbox-item-handle other)))
+          (when h
+            (claude-gravity--send-permission-response h "allow")))
         (remhash (alist-get 'id other) claude-gravity--inbox-action-buffers)
         (claude-gravity--inbox-remove (alist-get 'id other))))
     ;; Set turn-scoped auto-approve flag
@@ -319,11 +333,11 @@ turn are also automatically approved.  The flag is cleared on turn boundaries
   "Deny the permission request."
   (interactive)
   (let* ((item claude-gravity--action-inbox-item)
-         (proc (alist-get 'socket-proc item))
+         (handle (claude-gravity--inbox-item-handle item))
          (reason (read-string "Reason (optional): ")))
     (if (string-empty-p reason)
-        (claude-gravity--send-permission-response proc "deny")
-      (claude-gravity--send-permission-response proc "deny" reason))
+        (claude-gravity--send-permission-response handle "deny")
+      (claude-gravity--send-permission-response handle "deny" reason))
     (claude-gravity--permission-action-finish)
     (claude-gravity--log 'debug "Permission denied")))
 
@@ -738,7 +752,7 @@ Erases and redraws the body while preserving buffer-local state."
 (defun claude-gravity--question-do-submit ()
   "Send all answers and clean up."
   (let* ((item claude-gravity--action-inbox-item)
-         (proc (alist-get 'socket-proc item))
+         (handle (claude-gravity--inbox-item-handle item))
          (data (alist-get 'data item))
          (tid (alist-get 'tool_use_id data))
          (session-id (alist-get 'session-id item))
@@ -778,7 +792,7 @@ Erases and redraws the body while preserving buffer-local state."
                            . ,(format "User answered from Emacs:\n%s" summary))))
                       (answer . ,first-answer)
                       (answers . ,answers-vec))))
-      (claude-gravity--send-bidirectional-response proc response))
+      (claude-gravity--send-bidirectional-response handle response))
     ;; Update prompt entry with first answer
     (let ((session (claude-gravity--get-session session-id)))
       (when (and session tid)
@@ -881,10 +895,9 @@ Erases and redraws the body while preserving buffer-local state."
 Reuses existing `claude-gravity--handle-plan-review', modified to
 remove the inbox item when plan review is acted on."
   (let ((data (alist-get 'data item))
-        (proc (alist-get 'socket-proc item))
         (session-id (alist-get 'session-id item))
         (inbox-id (alist-get 'id item)))
-    (claude-gravity--handle-plan-review data proc session-id)
+    (claude-gravity--handle-plan-review data session-id)
     ;; Store inbox-id on the plan review buffer so approve/deny can clean up
     (let ((buf (get-buffer (format "*Claude Plan Review: %s*"
                                     (or (alist-get 'label item)

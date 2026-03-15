@@ -8,7 +8,7 @@
     {
       "name": "emacs-bridge",
       "description": "Bridge to Emacs via Unix Socket",
-      "source": "./emacs-bridge"
+      "source": "./packages/emacs-bridge"
     },
     {
       "name": "dev-loop",

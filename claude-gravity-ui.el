@@ -9,9 +9,9 @@
 (require 'claude-gravity-state)
 (require 'claude-gravity-render)
 
-(declare-function claude-gravity-server-alive-p "claude-gravity-socket")
-(declare-function claude-gravity--write-allow-pattern-for-tool "claude-gravity-socket")
-(declare-function claude-gravity--send-permission-response "claude-gravity-socket")
+(declare-function claude-gravity-server-alive-p "claude-gravity-client")
+(declare-function claude-gravity--write-allow-pattern-for-tool "claude-gravity-session")
+(declare-function claude-gravity--send-permission-response "claude-gravity-client")
 (declare-function claude-gravity--current-session-tmux-p "claude-gravity-tmux")
 (declare-function claude-gravity--tmux-sync-width-for-buffer "claude-gravity-tmux")
 (declare-function claude-gravity-toggle-permission-mode "claude-gravity-tmux")
@@ -467,7 +467,7 @@ Maintained for backward compatibility."
                                (branch-str (or (claude-gravity--branch-or-cwd session) ""))
                                (source-str (or (claude-gravity--source-indicator session) ""))
                                (uuid-prefix (propertize
-                                            (format " %s" (substring sid 0 (min 7 (length sid))))
+                                            (format " %s" (substring sid 0 (min 8 (length sid))))
                                             'face 'claude-gravity-detail-label))
                                (inbox-badge (claude-gravity--inbox-badges sid))
                                (ignored-badge
@@ -1078,7 +1078,7 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
          (segments nil))
     (push (concat " " dot " " status-word) segments)
     (push (concat "  " slug) segments)
-    (push (propertize (format " %s" (substring sid 0 (min 7 (length sid))))
+    (push (propertize (format " %s" (substring sid 0 (min 8 (length sid))))
                       'face 'claude-gravity-detail-label)
           segments)
     (when branch-str

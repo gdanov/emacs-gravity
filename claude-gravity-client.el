@@ -36,6 +36,9 @@
 (defvar claude-gravity--client-reconnect-timer nil
   "Timer for reconnection attempts.")
 
+(defvar claude-gravity--client-health-timer nil
+  "Repeating timer for connection health checks.")
+
 (defvar claude-gravity--client-subscribed-sessions (make-hash-table :test 'equal)
   "Set of session IDs we've requested detail for.")
 
@@ -59,6 +62,14 @@
   "Path to the gravity-server entry point.
 Set automatically from package directory.")
 
+(defvar claude-gravity--server-pid-file
+  (expand-file-name
+   (or (getenv "GRAVITY_PID_FILE")
+       "gravity-server.pid")
+   (or (getenv "GRAVITY_SOCK_DIR")
+       (expand-file-name ".local/state" (getenv "HOME"))))
+  "Path to gravity-server's PID file.")
+
 ;;; Notification mode-line indicator (shared with socket.el)
 
 (defvar claude-gravity--notification-indicator ""
@@ -68,6 +79,17 @@ Set automatically from package directory.")
 
 
 ;;; ── Server lifecycle ────────────────────────────────────────────────
+
+(defun claude-gravity--server-running-p ()
+  "Return non-nil if gravity-server is already running (PID file check)."
+  (when (file-exists-p claude-gravity--server-pid-file)
+    (let ((pid (string-to-number
+                (string-trim
+                 (with-temp-buffer
+                   (insert-file-contents claude-gravity--server-pid-file)
+                   (buffer-string))))))
+      (and (> pid 0)
+           (= 0 (call-process "kill" nil nil nil "-0" (number-to-string pid)))))))
 
 (defun claude-gravity-server-start ()
   "Start gravity-server and connect to its terminal socket.
@@ -80,8 +102,9 @@ If server is already running (socket exists), just connect."
                             (file-name-directory
                              (or load-file-name buffer-file-name
                                  default-directory)))))
-  ;; Start server if socket doesn't exist
-  (unless (file-exists-p claude-gravity-server-terminal-sock)
+  ;; Start server if not already running (PID file or socket check)
+  (unless (or (claude-gravity--server-running-p)
+              (file-exists-p claude-gravity-server-terminal-sock))
     (claude-gravity--start-backend))
   ;; Connect to terminal socket
   (claude-gravity--client-connect)
@@ -93,11 +116,19 @@ If server is already running (socket exists), just connect."
   ;; Window resize hook
   (add-hook 'window-size-change-functions
             (lambda (_frame) (claude-gravity--wrap-cache-clear)))
+  ;; Periodic health check — reconnect if dead, request overview refresh
+  (when claude-gravity--client-health-timer
+    (cancel-timer claude-gravity--client-health-timer))
+  (setq claude-gravity--client-health-timer
+        (run-with-timer 30 30 #'claude-gravity--client-health-check))
   (claude-gravity--log 'info "Gravity client started"))
 
 (defun claude-gravity-server-stop ()
   "Disconnect from gravity-server and optionally stop the backend."
   (interactive)
+  (when claude-gravity--client-health-timer
+    (cancel-timer claude-gravity--client-health-timer)
+    (setq claude-gravity--client-health-timer nil))
   (when claude-gravity--client-reconnect-timer
     (cancel-timer claude-gravity--client-reconnect-timer)
     (setq claude-gravity--client-reconnect-timer nil))
@@ -107,10 +138,21 @@ If server is already running (socket exists), just connect."
   (setq claude-gravity--client-process nil)
   (setq claude-gravity--client-buffer "")
   ;; Stop backend if we started it
-  (when (and claude-gravity--backend-process
-             (process-live-p claude-gravity--backend-process))
-    (interrupt-process claude-gravity--backend-process)
-    (setq claude-gravity--backend-process nil))
+  (if (and claude-gravity--backend-process
+           (process-live-p claude-gravity--backend-process))
+      (progn
+        (interrupt-process claude-gravity--backend-process)
+        (setq claude-gravity--backend-process nil))
+    ;; No process handle — try PID file (bridge-started server)
+    (when (file-exists-p claude-gravity--server-pid-file)
+      (let ((pid (string-to-number
+                  (string-trim
+                   (with-temp-buffer
+                     (insert-file-contents claude-gravity--server-pid-file)
+                     (buffer-string))))))
+        (when (> pid 0)
+          (call-process "kill" nil nil nil (number-to-string pid))
+          (claude-gravity--log 'info "Killed gravity-server pid %d via PID file" pid)))))
   (claude-gravity--log 'info "Gravity client stopped"))
 
 (defun claude-gravity-server-alive-p ()
@@ -193,6 +235,18 @@ PROC is the process, EVENT is the status change."
      (t
       (claude-gravity--log 'warn "Client connection event: %s" trimmed)))))
 
+(defun claude-gravity--client-health-check ()
+  "Periodic check: verify connection alive, request overview refresh."
+  (unless (claude-gravity-server-alive-p)
+    (claude-gravity--log 'warn "Health check: connection dead, reconnecting")
+    (if (file-exists-p claude-gravity-server-terminal-sock)
+        (claude-gravity--client-connect)
+      (claude-gravity--schedule-reconnect)))
+  ;; Request overview refresh to detect new/ended sessions
+  (when (claude-gravity-server-alive-p)
+    (claude-gravity--send-to-server '((type . "request.overview")))))
+
+
 (defun claude-gravity--schedule-reconnect ()
   "Schedule a reconnection attempt in 2 seconds."
   (when claude-gravity--client-reconnect-timer
@@ -222,13 +276,37 @@ PROC is the process, EVENT is the status change."
      `((type . "request.session")
        (sessionId . ,session-id)))))
 
-(defun claude-gravity--send-permission-response (item-id decision &optional message)
-  "Send permission response for inbox ITEM-ID with DECISION and optional MESSAGE."
+(defun claude-gravity--send-permission-response (item-id decision &optional message permissions)
+  "Send permission response for inbox ITEM-ID with DECISION and optional MESSAGE.
+PERMISSIONS is an optional vector of permission rules (ignored in server mode,
+server handles session-scoped permissions via plan-review)."
+  (ignore permissions)
   (claude-gravity--send-to-server
    `((type . "action.permission")
      (itemId . ,item-id)
      (decision . ,decision)
      ,@(when message `((message . ,message))))))
+
+(defun claude-gravity--send-bidirectional-response (handle response)
+  "Send RESPONSE for a bidirectional hook event.
+HANDLE is the inbox item ID in server mode.
+Dispatches to the appropriate server action based on hookEventName."
+  (let* ((hook-output (alist-get 'hookSpecificOutput response))
+         (event-name (alist-get 'hookEventName hook-output)))
+    (pcase event-name
+      ("PreToolUse"
+       ;; Question response — extract answers
+       (let ((answers (or (alist-get 'answers response) (vector))))
+         (claude-gravity--send-question-response handle (append answers nil))))
+      ("PermissionRequest"
+       ;; Permission response — extract decision
+       (let* ((decision (alist-get 'decision hook-output))
+              (behavior (alist-get 'behavior decision))
+              (message (alist-get 'message decision)))
+         (claude-gravity--send-permission-response handle behavior message)))
+      (_
+       (claude-gravity--log 'error "Unknown bidirectional event for server mode: %s"
+                            event-name)))))
 
 (defun claude-gravity--send-question-response (item-id answers)
   "Send question response for inbox ITEM-ID with ANSWERS list."

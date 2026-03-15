@@ -1,6 +1,6 @@
 {
   "name": "emacs-bridge",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Bridge to Emacs via Unix Socket",
   "hooks": {
     "SessionStart": [
@@ -9,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SessionStart",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/SessionStart",
             "statusMessage": "gravity: session start"
           }
         ]
@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SessionEnd",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/SessionEnd",
             "statusMessage": "gravity: session end"
           }
         ]
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/Stop",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/Stop",
             "statusMessage": "gravity: stop"
           }
         ]
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/UserPromptSubmit",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/UserPromptSubmit",
             "statusMessage": "gravity: prompt"
           }
         ]
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SubagentStart",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/SubagentStart",
             "statusMessage": "gravity: agent start"
           }
         ]
@@ -69,7 +69,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/SubagentStop",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/SubagentStop",
             "statusMessage": "gravity: agent stop"
           }
         ]
@@ -81,7 +81,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/Notification",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/Notification",
             "statusMessage": "gravity: notification"
           }
         ]
@@ -93,7 +93,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PreToolUse",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/PreToolUse",
             "statusMessage": "gravity: pre-tool"
           }
         ]
@@ -103,7 +103,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/AskUserQuestionIntercept",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/AskUserQuestionIntercept",
             "timeout": 345600,
             "statusMessage": "gravity: question"
           }
@@ -116,7 +116,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PostToolUse",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/PostToolUse",
             "statusMessage": "gravity: post-tool"
           }
         ]
@@ -128,7 +128,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PostToolUseFailure",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/PostToolUseFailure",
             "statusMessage": "gravity: tool failure"
           }
         ]
@@ -140,7 +140,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/PermissionRequest",
+            "command": "/Users/gdanov/work/playground/emacs-gravity/packages/emacs-bridge/hooks/PermissionRequest",
             "timeout": 345600,
             "statusMessage": "gravity: permission"
           }

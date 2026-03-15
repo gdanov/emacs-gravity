@@ -5,7 +5,7 @@
 (require 'claude-gravity-core)
 (require 'claude-gravity-session)
 (require 'claude-gravity-state)
-(require 'claude-gravity-socket)
+(require 'claude-gravity-client)
 
 (defvar claude-gravity-mode-map)
 (declare-function claude-gravity--session-header-line "claude-gravity-ui")
