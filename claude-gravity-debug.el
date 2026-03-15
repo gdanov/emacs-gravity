@@ -207,7 +207,7 @@ PARSE-ERROR is the error object (or nil)."
          (time-str (format-time-string "%H:%M:%S.%3N" timestamp))
          (event-str (or event "???"))
          (sid-str (when session-id
-                    (substring session-id 0 (min 7 (length session-id)))))
+                    (substring session-id 0 (min 8 (length session-id)))))
          (summary (claude-gravity--debug-message-summary event data))
          (expanded (gethash mid claude-gravity--debug-expanded)))
     (let ((start (point)))

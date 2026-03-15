@@ -33,7 +33,7 @@
          (propertize (format "  %s" slug) 'face 'claude-gravity-slug)
          (let ((sid (plist-get session :session-id)))
            (when sid
-             (propertize (format " %s" (substring sid 0 (min 7 (length sid))))
+             (propertize (format " %s" (substring sid 0 (min 8 (length sid))))
                          'face 'claude-gravity-detail-label)))
          (let ((tmux-name (gethash (plist-get session :session-id) claude-gravity--tmux-sessions)))
            (when tmux-name
