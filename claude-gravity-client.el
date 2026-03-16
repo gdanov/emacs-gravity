@@ -938,15 +938,22 @@ Also prunes orphan sessions that the server no longer knows about."
           (let ((sid (alist-get 'sessionId s)))
             (when (and sid (not (gethash sid claude-gravity--sessions)))
               (claude-gravity--request-session sid))))))
-    ;; Prune orphan sessions: mark ended if server doesn't know them
-    (maphash
-     (lambda (sid session)
-       (when (and (not (gethash sid server-ids))
-                  (not (eq (plist-get session :status) 'ended)))
-         (claude-gravity--log 'info "Pruning orphan session %s (not on server)" sid)
-         (plist-put session :status 'ended)
-         (plist-put session :claude-status 'idle)))
-     claude-gravity--sessions)
+    ;; Remove orphan sessions: server doesn't know them
+    (let ((orphans nil))
+      (maphash
+       (lambda (sid _session)
+         (unless (gethash sid server-ids)
+           (push sid orphans)))
+       claude-gravity--sessions)
+      (dolist (sid orphans)
+        (claude-gravity--log 'info "Removing orphan session %s (not on server)" sid)
+        (let ((session (gethash sid claude-gravity--sessions)))
+          (when session
+            (let ((buf (plist-get session :buffer)))
+              (when (and buf (buffer-live-p buf))
+                (kill-buffer buf)))))
+        (remhash sid claude-gravity--sessions)
+        (remhash sid claude-gravity--client-subscribed-sessions)))
     ;; Render overview
     (claude-gravity--schedule-refresh)))
 
