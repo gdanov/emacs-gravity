@@ -5,8 +5,14 @@
 GRAVITY_SOCK="${GRAVITY_HOOK_SOCK:-$HOME/.local/state/gravity-hooks.sock}"
 GRAVITY_PID_FILE="${GRAVITY_PID_FILE:-$HOME/.local/state/gravity-server.pid}"
 
-# Fast path: socket exists → server is running
-[ -S "$GRAVITY_SOCK" ] && return 0
+# Fast path: socket exists AND server process is alive → running
+if [ -S "$GRAVITY_SOCK" ] && [ -f "$GRAVITY_PID_FILE" ]; then
+  pid=$(cat "$GRAVITY_PID_FILE" 2>/dev/null)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  # PID dead but socket file exists → stale, fall through to restart
+fi
 
 # Check PID file — if process alive, socket may appear soon (startup race)
 if [ -f "$GRAVITY_PID_FILE" ]; then

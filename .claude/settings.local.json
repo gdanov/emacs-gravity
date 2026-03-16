@@ -82,7 +82,11 @@
       "Bash(pkill:*)",
       "Bash(make test:*)",
       "Bash(make build-server:*)",
-      "Bash(make sync-cache:*)"
+      "Bash(make sync-cache:*)",
+      "Bash(find:*)",
+      "Bash(make test-install:*)",
+      "Bash(swift:*)",
+      "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs -nw --batch --eval '\\(package-initialize\\)' -L /Users/gdanov/work/playground/emacs-gravity -f batch-byte-compile /Users/gdanov/work/playground/emacs-gravity/claude-gravity-debug.el 2>&1)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",
