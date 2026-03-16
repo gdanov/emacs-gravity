@@ -7,9 +7,19 @@ let package = Package(
         .macOS(.v13)  // MenuBarExtra requires macOS Ventura (13.0)
     ],
     targets: [
+        .target(
+            name: "GravityMenuBarLib",
+            path: "GravityMenuBar"
+        ),
         .executableTarget(
             name: "GravityMenuBar",
-            path: "GravityMenuBar"
+            dependencies: ["GravityMenuBarLib"],
+            path: "GravityMenuBarEntry"
+        ),
+        .testTarget(
+            name: "GravityMenuBarTests",
+            dependencies: ["GravityMenuBarLib"],
+            path: "Tests"
         )
     ]
 )

@@ -3,28 +3,13 @@ import Combine
 
 /// Connects to gravity-server's terminal socket, receives NDJSON broadcasts,
 /// and publishes state for the SwiftUI menu bar.
-class GravityMonitor: ObservableObject {
-    @Published var connected = false
-    @Published var projects: [ProjectInfo] = []
-    @Published var inboxItems: [InboxInfo] = []
-    @Published var iconState: MenuBarIconState = .disconnected
+public class GravityMonitor: ObservableObject {
+    @Published public var connected = false
+    @Published public var projects: [ProjectInfo] = []
+    @Published public var inboxItems: [InboxInfo] = []
+    @Published public var iconState: MenuBarIconState = .disconnected
 
-    /// Tracks last-known claudeStatus per session for transition detection
-    private var previousStatuses: [String: String] = [:]
-    private var justFinished = false
-    private var hasResponding = false
-
-    private func updateIconState() {
-        let newState: MenuBarIconState
-        if !connected { newState = .disconnected }
-        else if justFinished { newState = .justFinished }
-        else if hasResponding { newState = .neutral }
-        else if !inboxItems.isEmpty { newState = .attention }
-        else { newState = .neutral }
-        if iconState != newState {
-            iconState = newState
-        }
-    }
+    public let stateManager = MenuBarStateManager()
 
     private var socketFD: Int32 = -1
     private var readSource: DispatchSourceRead?
@@ -33,12 +18,17 @@ class GravityMonitor: ObservableObject {
 
     private let socketPath: String
 
-    init() {
+    public init() {
         if let envPath = ProcessInfo.processInfo.environment["GRAVITY_TERMINAL_SOCK"] {
             socketPath = envPath
         } else {
             socketPath = NSString(string: "~/.local/state/gravity-terminal.sock").expandingTildeInPath
         }
+
+        stateManager.onStateChange = { [weak self] in
+            self?.syncFromStateManager()
+        }
+
         connect()
     }
 
@@ -46,9 +36,17 @@ class GravityMonitor: ObservableObject {
         disconnect()
     }
 
+    /// Sync @Published properties from state manager
+    private func syncFromStateManager() {
+        connected = stateManager.connected
+        projects = stateManager.projects
+        inboxItems = stateManager.inboxItems
+        iconState = stateManager.iconState
+    }
+
     // MARK: - Connection
 
-    func reconnect() {
+    public func reconnect() {
         disconnect()
         connect()
     }
@@ -94,8 +92,7 @@ class GravityMonitor: ObservableObject {
         }
 
         DispatchQueue.main.async {
-            self.connected = true
-            self.updateIconState()
+            self.stateManager.setConnected(true)
         }
 
         startReading()
@@ -113,19 +110,13 @@ class GravityMonitor: ObservableObject {
             socketFD = -1
         }
         DispatchQueue.main.async {
-            self.connected = false
-            self.projects = []
-            self.inboxItems = []
-            self.justFinished = false
-            self.hasResponding = false
-            self.previousStatuses = [:]
-            self.updateIconState()
+            self.stateManager.resetOnDisconnect()
         }
     }
 
     private func scheduleReconnect() {
         DispatchQueue.main.async {
-            self.connected = false
+            self.stateManager.setConnected(false)
             self.reconnectTimer?.invalidate()
             self.reconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
                 self?.connect()
@@ -177,107 +168,16 @@ class GravityMonitor: ObservableObject {
             do {
                 let msg = try JSONDecoder().decode(ServerMessage.self, from: lineData)
                 DispatchQueue.main.async {
-                    self.handleMessage(msg)
+                    self.stateManager.handleMessage(msg)
+                    // Drain pending requests
+                    for request in self.stateManager.pendingRequests {
+                        self.sendRequest(request)
+                    }
+                    self.stateManager.pendingRequests.removeAll()
                 }
             } catch {
                 NSLog("gravity-menubar: JSON decode error: \(error)")
             }
-        }
-    }
-
-    // MARK: - Message Handling
-
-    private func handleMessage(_ msg: ServerMessage) {
-        switch msg.type {
-        case "overview.snapshot":
-            guard let jsonProjects = msg.projects else { return }
-            projects = jsonProjects.map { p in
-                ProjectInfo(
-                    id: p.project,
-                    name: p.project,
-                    sessions: p.sessions.map { s in
-                        SessionInfo(
-                            id: s.sessionId,
-                            slug: s.slug,
-                            status: s.status,
-                            claudeStatus: s.claudeStatus,
-                            toolCount: s.toolCount,
-                            lastEventTime: s.lastEventTime
-                        )
-                    }
-                )
-            }
-            // Seed previousStatuses from snapshot (no transition on initial load)
-            for p in jsonProjects {
-                for s in p.sessions where s.status == "active" {
-                    previousStatuses[s.sessionId] = s.claudeStatus
-                }
-            }
-
-        case "inbox.added":
-            guard let item = msg.item else { return }
-            inboxItems.removeAll { $0.id == item.id }
-            inboxItems.append(InboxInfo(
-                id: item.id,
-                type: item.type,
-                sessionId: item.sessionId,
-                project: item.project,
-                label: item.label,
-                summary: item.summary
-            ))
-            updateIconState()
-
-        case "inbox.removed":
-            guard let itemId = msg.itemId else { return }
-            inboxItems.removeAll { $0.id == itemId }
-            updateIconState()
-
-        case "inbox.snapshot":
-            guard let items = msg.items else { return }
-            inboxItems = items.map { item in
-                InboxInfo(
-                    id: item.id,
-                    type: item.type,
-                    sessionId: item.sessionId,
-                    project: item.project,
-                    label: item.label,
-                    summary: item.summary
-                )
-            }
-            updateIconState()
-
-        case "session.update":
-            if let sessionId = msg.sessionId, let patches = msg.patches {
-                var hasStatusChange = false
-                for patch in patches {
-                    if patch.op == "set_claude_status", let newStatus = patch.claudeStatus {
-                        let oldStatus = previousStatuses[sessionId]
-                        previousStatuses[sessionId] = newStatus
-                        if oldStatus == "responding" && newStatus == "idle" {
-                            justFinished = true
-                        } else if newStatus == "responding" {
-                            justFinished = false
-                        }
-                        hasResponding = previousStatuses.values.contains("responding")
-                        hasStatusChange = true
-                    } else if patch.op == "set_status" {
-                        hasStatusChange = true
-                    }
-                }
-                if hasStatusChange {
-                    updateIconState()
-                    sendRequest(TerminalRequest(type: "request.overview"))
-                }
-            }
-
-        case "session.removed":
-            if let sessionId = msg.sessionId {
-                previousStatuses.removeValue(forKey: sessionId)
-            }
-            sendRequest(TerminalRequest(type: "request.overview"))
-
-        default:
-            break
         }
     }
 

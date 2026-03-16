@@ -1,31 +1,16 @@
 import SwiftUI
 import AppKit
 
-@main
-struct GravityMenuBarApp: App {
-    @StateObject private var monitor = GravityMonitor()
-
-    init() {
-        // Hide from Dock — menu bar only
-        NSApplication.shared.setActivationPolicy(.accessory)
-    }
-
-    var body: some Scene {
-        MenuBarExtra {
-            MenuBarDropdown(monitor: monitor)
-        } label: {
-            MenuBarLabel(monitor: monitor)
-        }
-        .menuBarExtraStyle(.window)
-    }
-}
-
 // MARK: - Menu Bar Icon + Counts
 
-struct MenuBarLabel: View {
+public struct MenuBarLabel: View {
     @ObservedObject var monitor: GravityMonitor
 
-    var body: some View {
+    public init(monitor: GravityMonitor) {
+        self.monitor = monitor
+    }
+
+    public var body: some View {
         Image(systemName: monitor.iconState.systemImage)
             .symbolRenderingMode(.palette)
             .foregroundStyle(monitor.iconState.color)
@@ -34,10 +19,14 @@ struct MenuBarLabel: View {
 
 // MARK: - Dropdown Panel
 
-struct MenuBarDropdown: View {
+public struct MenuBarDropdown: View {
     @ObservedObject var monitor: GravityMonitor
 
-    var body: some View {
+    public init(monitor: GravityMonitor) {
+        self.monitor = monitor
+    }
+
+    public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if monitor.projects.isEmpty && monitor.inboxItems.isEmpty {
                 if monitor.connected {
@@ -141,7 +130,7 @@ struct InboxRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text("⚠")
+            Text("\u{26A0}")
                 .font(.system(size: 11))
             Text(item.label)
                 .foregroundColor(.primary)

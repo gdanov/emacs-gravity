@@ -1,10 +1,10 @@
 EMACS ?= emacs
 
-.PHONY: test test-elisp test-bridge test-server test-install test-install-shell build build-server sync-cache clean menubar kill-server restart-server
+.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-server sync-cache clean menubar kill-server restart-server
 
 PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/2.0.0
 
-test: test-elisp test-bridge test-server
+test: test-elisp test-bridge test-server test-menubar
 
 test-elisp:
 	$(EMACS) -nw --batch -L . -L test \
@@ -20,6 +20,9 @@ test-bridge:
 
 test-server:
 	cd packages/gravity-server && npx vitest run
+
+test-menubar:
+	cd packages/gravity-menubar && swift test
 
 build:
 	npm install

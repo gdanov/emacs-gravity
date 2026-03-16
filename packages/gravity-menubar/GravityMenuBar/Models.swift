@@ -2,13 +2,13 @@ import SwiftUI
 
 // MARK: - Menu Bar Icon State
 
-enum MenuBarIconState: Equatable {
+public enum MenuBarIconState: Equatable {
     case neutral       // connected, all idle or no sessions
     case justFinished  // a session just went responding→idle
     case attention     // inbox items present
     case disconnected  // not connected to server
 
-    var systemImage: String {
+    public var systemImage: String {
         switch self {
         case .neutral:      return "bolt.fill"
         case .justFinished: return "bolt.fill"
@@ -17,7 +17,7 @@ enum MenuBarIconState: Equatable {
         }
     }
 
-    var color: Color {
+    public var color: Color {
         switch self {
         case .neutral:      return .secondary
         case .justFinished: return .green
@@ -29,31 +29,46 @@ enum MenuBarIconState: Equatable {
 
 // MARK: - View Models
 
-struct ProjectInfo: Identifiable {
-    let id: String
-    let name: String
-    let sessions: [SessionInfo]
+public struct ProjectInfo: Identifiable {
+    public let id: String
+    public let name: String
+    public let sessions: [SessionInfo]
+
+    public init(id: String, name: String, sessions: [SessionInfo]) {
+        self.id = id
+        self.name = name
+        self.sessions = sessions
+    }
 }
 
-struct SessionInfo: Identifiable {
-    let id: String
-    let slug: String?
-    var status: String        // "active" | "ended"
-    var claudeStatus: String  // "idle" | "responding"
-    let toolCount: Int
-    let lastEventTime: Double
+public struct SessionInfo: Identifiable {
+    public let id: String
+    public let slug: String?
+    public var status: String        // "active" | "ended"
+    public var claudeStatus: String  // "idle" | "responding"
+    public let toolCount: Int
+    public let lastEventTime: Double
 
-    var displayName: String {
+    public init(id: String, slug: String?, status: String, claudeStatus: String, toolCount: Int, lastEventTime: Double) {
+        self.id = id
+        self.slug = slug
+        self.status = status
+        self.claudeStatus = claudeStatus
+        self.toolCount = toolCount
+        self.lastEventTime = lastEventTime
+    }
+
+    public var displayName: String {
         slug ?? String(id.prefix(8))
     }
 
-    var statusColor: Color {
+    public var statusColor: Color {
         if status == "ended" { return .gray }
         if claudeStatus == "responding" { return .yellow }
         return .green
     }
 
-    var statusLabel: String {
+    public var statusLabel: String {
         if status == "ended" { return "ended" }
         if claudeStatus == "responding" { return "responding" }
         let elapsed = Date().timeIntervalSince1970 - lastEventTime
@@ -66,78 +81,131 @@ struct SessionInfo: Identifiable {
     }
 }
 
-struct InboxInfo: Identifiable {
-    let id: Int
-    let type: String
-    let sessionId: String
-    let project: String?
-    let label: String
-    let summary: String
+public struct InboxInfo: Identifiable {
+    public let id: Int
+    public let type: String
+    public let sessionId: String
+    public let project: String?
+    public let label: String
+    public let summary: String
+
+    public init(id: Int, type: String, sessionId: String, project: String?, label: String, summary: String) {
+        self.id = id
+        self.type = type
+        self.sessionId = sessionId
+        self.project = project
+        self.label = label
+        self.summary = summary
+    }
 }
 
 // MARK: - JSON Protocol Types (server → terminal)
 
 /// Represents any message from gravity-server
-struct ServerMessage: Decodable {
-    let type: String
+public struct ServerMessage: Decodable {
+    public let type: String
 
     // overview.snapshot
-    let projects: [ProjectSummaryJSON]?
+    public let projects: [ProjectSummaryJSON]?
 
     // inbox.added
-    let item: InboxItemJSON?
+    public let item: InboxItemJSON?
 
     // inbox.removed
-    let itemId: Int?
+    public let itemId: Int?
 
     // inbox.snapshot
-    let items: [InboxItemJSON]?
+    public let items: [InboxItemJSON]?
 
-    // session.update
-    let sessionId: String?
-    let patches: [PatchJSON]?
+    // session.update / session.removed
+    public let sessionId: String?
+    public let patches: [PatchJSON]?
 
     enum CodingKeys: String, CodingKey {
         case type, projects, item, itemId, items, sessionId, patches
     }
+
+    /// Memberwise init for test factories
+    public init(type: String, projects: [ProjectSummaryJSON]? = nil, item: InboxItemJSON? = nil, itemId: Int? = nil, items: [InboxItemJSON]? = nil, sessionId: String? = nil, patches: [PatchJSON]? = nil) {
+        self.type = type
+        self.projects = projects
+        self.item = item
+        self.itemId = itemId
+        self.items = items
+        self.sessionId = sessionId
+        self.patches = patches
+    }
 }
 
-struct ProjectSummaryJSON: Decodable {
-    let project: String
-    let sessions: [SessionSummaryJSON]
+public struct ProjectSummaryJSON: Decodable {
+    public let project: String
+    public let sessions: [SessionSummaryJSON]
+
+    public init(project: String, sessions: [SessionSummaryJSON]) {
+        self.project = project
+        self.sessions = sessions
+    }
 }
 
-struct SessionSummaryJSON: Decodable {
-    let sessionId: String
-    let slug: String?
-    let status: String
-    let claudeStatus: String
-    let toolCount: Int
-    let lastEventTime: Double
+public struct SessionSummaryJSON: Decodable {
+    public let sessionId: String
+    public let slug: String?
+    public let status: String
+    public let claudeStatus: String
+    public let toolCount: Int
+    public let lastEventTime: Double
+
+    public init(sessionId: String, slug: String? = nil, status: String, claudeStatus: String, toolCount: Int = 0, lastEventTime: Double = 0) {
+        self.sessionId = sessionId
+        self.slug = slug
+        self.status = status
+        self.claudeStatus = claudeStatus
+        self.toolCount = toolCount
+        self.lastEventTime = lastEventTime
+    }
 }
 
-struct InboxItemJSON: Decodable {
-    let id: Int
-    let type: String
-    let sessionId: String
-    let project: String?
-    let label: String
-    let summary: String
+public struct InboxItemJSON: Decodable {
+    public let id: Int
+    public let type: String
+    public let sessionId: String
+    public let project: String?
+    public let label: String
+    public let summary: String
+
+    public init(id: Int, type: String, sessionId: String, project: String? = nil, label: String, summary: String = "") {
+        self.id = id
+        self.type = type
+        self.sessionId = sessionId
+        self.project = project
+        self.label = label
+        self.summary = summary
+    }
 }
 
 /// Minimal patch decoding — we only care about status changes for the menu bar
-struct PatchJSON: Decodable {
-    let op: String
-    let status: String?
-    let claudeStatus: String?
+public struct PatchJSON: Decodable {
+    public let op: String
+    public let status: String?
+    public let claudeStatus: String?
 
     enum CodingKeys: String, CodingKey {
         case op, status, claudeStatus
+    }
+
+    public init(op: String, status: String? = nil, claudeStatus: String? = nil) {
+        self.op = op
+        self.status = status
+        self.claudeStatus = claudeStatus
     }
 }
 
 // MARK: - Terminal → Server request
 
-struct TerminalRequest: Encodable {
-    let type: String
+public struct TerminalRequest: Encodable, Equatable {
+    public let type: String
+
+    public init(type: String) {
+        self.type = type
+    }
 }
