@@ -1,6 +1,6 @@
 EMACS ?= emacs
 
-.PHONY: test test-elisp test-bridge test-server build build-server sync-cache clean menubar kill-server restart-server
+.PHONY: test test-elisp test-bridge test-server test-install test-install-shell build build-server sync-cache clean menubar kill-server restart-server
 
 PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/2.0.0
 
@@ -58,6 +58,26 @@ kill-server:
 
 restart-server: sync-cache kill-server
 	npx -w packages/gravity-server tsx src/gravity-server.ts &
+
+test-install:
+	docker build -t gravity-smoke -f test/Dockerfile .
+	docker run --rm \
+		-v $(PWD):/workspace \
+		-v /workspace/node_modules \
+		-v /workspace/packages/emacs-bridge/node_modules \
+		-v /workspace/packages/gravity-server/node_modules \
+		-v /workspace/packages/shared/node_modules \
+		gravity-smoke bash test/test-install.sh
+
+test-install-shell:
+	docker build -t gravity-smoke -f test/Dockerfile .
+	docker run --rm -it \
+		-v $(PWD):/workspace \
+		-v /workspace/node_modules \
+		-v /workspace/packages/emacs-bridge/node_modules \
+		-v /workspace/packages/gravity-server/node_modules \
+		-v /workspace/packages/shared/node_modules \
+		gravity-smoke bash
 
 clean:
 	rm -rf node_modules packages/*/node_modules packages/*/dist
