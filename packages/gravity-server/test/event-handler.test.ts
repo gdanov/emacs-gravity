@@ -1153,14 +1153,23 @@ describe("Event Handler", () => {
       expect(items[0].type).toBe("permission");
     });
 
-    it("returns empty patches (handled asynchronously)", () => {
+    it("returns claude status idle patch (blocked waiting for user)", () => {
       startSession(deps);
+      // Set status to responding (as UserPromptSubmit would)
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "do something" });
+      const session = deps.store.get("s1")!;
+      expect(session.claudeStatus).toBe("responding");
+
       const socket = makeMockSocket();
       const patches = fire(deps, "PermissionRequest", "s1", {
         tool_name: "Bash",
       }, 123, socket);
 
-      expect(patches).toEqual([]);
+      // Should include set_claude_status: idle (Claude is blocked waiting)
+      const statusPatch = patches.find((p: any) => p.op === "set_claude_status");
+      expect(statusPatch).toBeDefined();
+      expect(statusPatch).toMatchObject({ op: "set_claude_status", claudeStatus: "idle" });
+      expect(session.claudeStatus).toBe("idle");
     });
 
     it("does not create inbox item without hook socket", () => {

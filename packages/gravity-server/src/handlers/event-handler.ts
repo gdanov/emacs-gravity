@@ -432,8 +432,11 @@ export function handleEvent(
       const summary = toolName; // TODO: tool signature like Emacs
       const inboxType = toolName === "ExitPlanMode" ? "plan-review" as const : "permission" as const;
 
+      // Claude is blocked waiting for user response — mark idle
+      patches.push(...setClaudeStatus(session, "idle"));
+
       if (hookSocket) {
-        const item = inbox.add(
+        inbox.add(
           inboxType,
           sessionId,
           session.project,
@@ -442,8 +445,7 @@ export function handleEvent(
           data as Record<string, unknown>,
           hookSocket,
         );
-        // Return empty patches — the inbox.added message will be sent separately
-        return [];
+        return patches;
       }
       break;
     }
@@ -458,6 +460,9 @@ export function handleEvent(
       const questionText = (firstQ?.question as string) || toolName;
       const summary = questionText.substring(0, 80);
 
+      // Claude is blocked waiting for user response — mark idle
+      patches.push(...setClaudeStatus(session, "idle"));
+
       if (hookSocket) {
         inbox.add(
           "question",
@@ -468,7 +473,7 @@ export function handleEvent(
           data as Record<string, unknown>,
           hookSocket,
         );
-        return [];
+        return patches;
       }
       break;
     }

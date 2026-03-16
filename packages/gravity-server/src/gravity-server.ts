@@ -150,7 +150,7 @@ function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
   }
 
   // Broadcast overview on status-changing events only
-  const overviewEvents = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]);
+  const overviewEvents = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
   if (overviewEvents.has(eventName)) {
     terminals.broadcast({
       type: "overview.snapshot",
