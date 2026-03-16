@@ -21,6 +21,8 @@
 (declare-function claude-gravity--inbox-act-plan-review "claude-gravity-actions")
 (declare-function claude-gravity--inbox-act-idle "claude-gravity-actions")
 (declare-function claude-gravity--wrap-cache-clear "claude-gravity-text")
+(declare-function claude-gravity--debug-capture-incoming "claude-gravity-debug")
+(declare-function claude-gravity--debug-capture-outgoing "claude-gravity-debug")
 
 ;;; Server process management
 
@@ -288,6 +290,7 @@ PROC is the process, EVENT is the status change."
   (when (and claude-gravity--client-process
              (process-live-p claude-gravity--client-process))
     (let ((json (concat (json-serialize msg) "\n")))
+      (claude-gravity--debug-capture-outgoing json msg)
       (process-send-string claude-gravity--client-process json))))
 
 (defun claude-gravity--request-session (session-id)
@@ -366,6 +369,7 @@ Accumulates partial data and processes complete newline-delimited JSON."
       (when (> (length line) 0)
         (condition-case err
             (let ((msg (json-parse-string line :object-type 'alist :array-type 'list)))
+              (claude-gravity--debug-capture-incoming line msg)
               (claude-gravity--handle-server-message msg))
           (error
            (claude-gravity--log 'error "Client JSON parse error: %s" err)))))))
