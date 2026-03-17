@@ -14,15 +14,15 @@ public enum MenuBarIconState: Equatable {
         case .neutral:      return "bolt.fill"
         case .responding:   return "bolt.fill"
         case .justFinished: return "bolt.fill"
-        case .attention:    return "exclamationmark.bubble.fill"
+        case .attention:    return "message.fill"
         case .disconnected: return "bolt.slash.fill"
         }
     }
 
     public var color: Color {
         switch self {
-        case .neutral:      return .secondary
-        case .responding:   return .yellow
+        case .neutral:      return .white
+        case .responding:   return .orange
         case .justFinished: return .green
         case .attention:    return .orange
         case .disconnected: return .secondary

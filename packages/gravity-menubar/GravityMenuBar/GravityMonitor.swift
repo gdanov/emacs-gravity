@@ -115,7 +115,6 @@ public class GravityMonitor: ObservableObject {
                     self.scheduleReconnect()
                     return
                 }
-                self.stateManager.clearJustFinishedIfStale()
                 self.sendRequest(TerminalRequest(type: "request.overview"))
             }
         }

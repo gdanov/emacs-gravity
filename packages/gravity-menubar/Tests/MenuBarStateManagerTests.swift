@@ -34,8 +34,8 @@ struct IconStatePriorityTests {
         #expect(sm.iconState == .disconnected)
     }
 
-    @Test("4: justFinished overrides attention")
-    func justFinishedOverridesAttention() {
+    @Test("4: attention overrides justFinished")
+    func attentionOverridesJustFinished() {
         let sm = MenuBarStateManager()
         sm.setConnected(true)
         // Seed a responding session
@@ -52,8 +52,8 @@ struct IconStatePriorityTests {
             type: "inbox.added",
             item: InboxItemJSON(id: 1, type: "permission", sessionId: "s1", label: "Allow Bash")
         ))
-        // justFinished should win over attention
-        #expect(sm.iconState == .justFinished)
+        // attention should win over justFinished
+        #expect(sm.iconState == .attention)
     }
 
     @Test("5: attention wins over responding")
@@ -485,8 +485,8 @@ struct BugFixTests {
         #expect(sm.iconState == .attention)
     }
 
-    @Test("30: Bug #4 — clearJustFinishedIfStale clears after timeout")
-    func justFinishedTimeout() {
+    @Test("30: justFinished persists until a session starts responding")
+    func justFinishedPersists() {
         let sm = MenuBarStateManager()
         sm.setConnected(true)
         sm.previousStatuses["s1"] = "responding"
@@ -498,13 +498,19 @@ struct BugFixTests {
             patches: [PatchJSON(op: "set_claude_status", claudeStatus: "idle")]
         ))
         #expect(sm.justFinished == true)
-        #expect(sm.justFinishedAt != nil)
-        // Simulate time passing by backdating justFinishedAt
-        sm.justFinishedAt = Date().addingTimeInterval(-5.0)
-        sm.clearJustFinishedIfStale(after: 3.0)
+        #expect(sm.iconState == .justFinished)
+        // justFinished persists — no timer clears it
+        sm.updateIconState()
+        #expect(sm.justFinished == true)
+        #expect(sm.iconState == .justFinished)
+        // Only clears when a session starts responding
+        sm.handleMessage(ServerMessage(
+            type: "session.update",
+            sessionId: "s1",
+            patches: [PatchJSON(op: "set_claude_status", claudeStatus: "responding")]
+        ))
         #expect(sm.justFinished == false)
-        #expect(sm.justFinishedAt == nil)
-        #expect(sm.iconState == .neutral)
+        #expect(sm.iconState == .responding)
     }
 
     @Test("31: responding icon state shown when session responding and no inbox")

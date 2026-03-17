@@ -17,9 +17,6 @@ public class MenuBarStateManager {
     public var justFinished = false
     public var hasResponding = false
 
-    /// Timestamp when justFinished was last set to true
-    public var justFinishedAt: Date?
-
     /// Side-effect queue: requests to send to gravity-server
     public var pendingRequests: [TerminalRequest] = []
 
@@ -33,8 +30,8 @@ public class MenuBarStateManager {
     public func updateIconState() {
         let newState: MenuBarIconState
         if !connected { newState = .disconnected }
-        else if justFinished { newState = .justFinished }
         else if !inboxItems.isEmpty { newState = .attention }
+        else if justFinished { newState = .justFinished }
         else if hasResponding { newState = .responding }
         else { newState = .neutral }
         if iconState != newState {
@@ -55,7 +52,6 @@ public class MenuBarStateManager {
         projects = []
         inboxItems = []
         justFinished = false
-        justFinishedAt = nil
         hasResponding = false
         previousStatuses = [:]
         updateIconState()
@@ -149,10 +145,8 @@ public class MenuBarStateManager {
                             previousStatuses[sessionId] = newStatus
                             if oldStatus == "responding" && newStatus == "idle" {
                                 justFinished = true
-                                justFinishedAt = Date()
                             } else if newStatus == "responding" {
                                 justFinished = false
-                                justFinishedAt = nil
                             }
                             hasResponding = previousStatuses.values.contains("responding")
                             hasStatusChange = true
@@ -249,17 +243,4 @@ public class MenuBarStateManager {
         return false
     }
 
-    // MARK: - Timeout support
-
-    /// Clear justFinished if it's been set for longer than the given interval.
-    /// Call this from a timer to prevent indefinite green flash.
-    public func clearJustFinishedIfStale(after interval: TimeInterval = 3.0) {
-        guard justFinished, let setAt = justFinishedAt else { return }
-        if Date().timeIntervalSince(setAt) >= interval {
-            justFinished = false
-            justFinishedAt = nil
-            updateIconState()
-            onStateChange?()
-        }
-    }
 }
