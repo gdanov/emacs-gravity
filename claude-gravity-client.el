@@ -260,27 +260,55 @@ PROC is the process, EVENT is the status change."
       (claude-gravity--log 'warn "Client connection event: %s" trimmed)))))
 
 (defun claude-gravity--client-health-check ()
-  "Periodic check: verify connection alive, request overview refresh."
+  "Periodic check: verify connection alive, request overview refresh.
+Also checks server PID liveness — if PID is dead, cleans up stale
+sockets and attempts to restart the server."
   (unless (claude-gravity-server-alive-p)
     (claude-gravity--log 'warn "Health check: connection dead, reconnecting")
-    (if (file-exists-p claude-gravity-server-terminal-sock)
-        (claude-gravity--client-connect)
-      (claude-gravity--schedule-reconnect)))
+    (cond
+     ;; Socket exists AND server PID is alive — just reconnect
+     ((and (file-exists-p claude-gravity-server-terminal-sock)
+           (claude-gravity--server-running-p))
+      (claude-gravity--client-connect))
+     ;; Socket exists but server PID is dead — stale socket, clean up and restart
+     ((file-exists-p claude-gravity-server-terminal-sock)
+      (claude-gravity--log 'warn "Health check: stale socket (server PID dead), restarting")
+      (ignore-errors (delete-file claude-gravity-server-terminal-sock))
+      (ignore-errors (delete-file claude-gravity-server-hook-sock))
+      (ignore-errors (delete-file claude-gravity--server-pid-file))
+      (claude-gravity--start-backend)
+      (claude-gravity--client-connect))
+     ;; No socket — schedule reconnect (server may appear via _ensure-server)
+     (t
+      (claude-gravity--schedule-reconnect))))
   ;; Request overview refresh to detect new/ended sessions
   (when (claude-gravity-server-alive-p)
     (claude-gravity--send-to-server '((type . "request.overview")))))
 
 
 (defun claude-gravity--schedule-reconnect ()
-  "Schedule a reconnection attempt in 2 seconds."
+  "Schedule a reconnection attempt in 2 seconds.
+Verifies server PID is alive before connecting; cleans up stale
+sockets if PID is dead."
   (when claude-gravity--client-reconnect-timer
     (cancel-timer claude-gravity--client-reconnect-timer))
   (setq claude-gravity--client-reconnect-timer
         (run-with-timer 2 nil
                         (lambda ()
                           (setq claude-gravity--client-reconnect-timer nil)
-                          (when (file-exists-p claude-gravity-server-terminal-sock)
-                            (claude-gravity--client-connect))))))
+                          (cond
+                           ;; Socket exists and server alive — connect
+                           ((and (file-exists-p claude-gravity-server-terminal-sock)
+                                 (claude-gravity--server-running-p))
+                            (claude-gravity--client-connect))
+                           ;; Socket exists but server dead — stale, clean up
+                           ((file-exists-p claude-gravity-server-terminal-sock)
+                            (claude-gravity--log 'warn "Reconnect: stale socket, cleaning up")
+                            (ignore-errors (delete-file claude-gravity-server-terminal-sock))
+                            (ignore-errors (delete-file claude-gravity-server-hook-sock))
+                            (ignore-errors (delete-file claude-gravity--server-pid-file)))
+                           ;; No socket — nothing to do, next health check will retry
+                           (t nil))))))
 
 
 ;;; ── Message sending ─────────────────────────────────────────────────

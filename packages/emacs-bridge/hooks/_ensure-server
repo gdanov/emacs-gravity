@@ -64,7 +64,7 @@ if [ -f "$GRAVITY_PID_FILE" ]; then
   rm -f "$GRAVITY_PID_FILE"
 fi
 # Catch any remaining orphans
-pkill -f "dist/server\\.mjs" 2>/dev/null || true
+pkill -f "gravity-server\\.(mjs|ts)" 2>/dev/null || true
 
 # Clean up stale sockets
 rm -f "$GRAVITY_SOCK" "$HOME/.local/state/gravity-terminal.sock"

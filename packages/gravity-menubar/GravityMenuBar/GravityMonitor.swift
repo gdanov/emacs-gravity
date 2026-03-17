@@ -18,6 +18,8 @@ public class GravityMonitor: ObservableObject {
 
     private let socketPath: String
 
+    private var healthTimer: Timer?
+
     public init() {
         if let envPath = ProcessInfo.processInfo.environment["GRAVITY_TERMINAL_SOCK"] {
             socketPath = envPath
@@ -85,14 +87,22 @@ public class GravityMonitor: ObservableObject {
         }
 
         guard result == 0 else {
+            NSLog("gravity-menubar: connect failed to %@, retrying in 5s", socketPath)
             Darwin.close(socketFD)
             socketFD = -1
             scheduleReconnect()
             return
         }
 
+        NSLog("gravity-menubar: connected to %@", socketPath)
+
         DispatchQueue.main.async {
             self.stateManager.setConnected(true)
+            // Start periodic overview refresh (30s heartbeat)
+            self.healthTimer?.invalidate()
+            self.healthTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+                self?.sendRequest(TerminalRequest(type: "request.overview"))
+            }
         }
 
         startReading()
@@ -103,6 +113,8 @@ public class GravityMonitor: ObservableObject {
     private func disconnect() {
         reconnectTimer?.invalidate()
         reconnectTimer = nil
+        healthTimer?.invalidate()
+        healthTimer = nil
         readSource?.cancel()
         readSource = nil
         if socketFD >= 0 {
@@ -119,6 +131,7 @@ public class GravityMonitor: ObservableObject {
             self.stateManager.setConnected(false)
             self.reconnectTimer?.invalidate()
             self.reconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+                NSLog("gravity-menubar: attempting reconnect...")
                 self?.connect()
             }
         }
@@ -146,9 +159,20 @@ public class GravityMonitor: ObservableObject {
         var buf = [UInt8](repeating: 0, count: 8192)
         let n = Darwin.read(socketFD, &buf, buf.count)
         if n <= 0 {
-            // Connection closed or error
+            // Connection closed or error — close FD first to prevent cancel handler race
+            NSLog("gravity-menubar: disconnected (EOF/error), scheduling reconnect")
+            let fd = socketFD
+            socketFD = -1  // Mark closed before cancel handler can fire
+            if fd >= 0 {
+                Darwin.close(fd)
+            }
             readSource?.cancel()
             readSource = nil
+            healthTimer?.invalidate()
+            healthTimer = nil
+            DispatchQueue.main.async {
+                self.stateManager.setConnected(false)
+            }
             scheduleReconnect()
             return
         }
