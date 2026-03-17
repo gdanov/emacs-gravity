@@ -138,28 +138,84 @@ public class MenuBarStateManager {
         case "session.update":
             if let sessionId = msg.sessionId, let patches = msg.patches {
                 var hasStatusChange = false
+                var addToolCount = 0
+                var sessionFound = true
+
                 for patch in patches {
-                    if patch.op == "set_claude_status", let newStatus = patch.claudeStatus {
-                        let oldStatus = previousStatuses[sessionId]
-                        previousStatuses[sessionId] = newStatus
-                        if oldStatus == "responding" && newStatus == "idle" {
-                            justFinished = true
-                            justFinishedAt = Date()
-                        } else if newStatus == "responding" {
-                            justFinished = false
-                            justFinishedAt = nil
+                    switch patch.op {
+                    case "set_claude_status":
+                        if let newStatus = patch.claudeStatus {
+                            let oldStatus = previousStatuses[sessionId]
+                            previousStatuses[sessionId] = newStatus
+                            if oldStatus == "responding" && newStatus == "idle" {
+                                justFinished = true
+                                justFinishedAt = Date()
+                            } else if newStatus == "responding" {
+                                justFinished = false
+                                justFinishedAt = nil
+                            }
+                            hasResponding = previousStatuses.values.contains("responding")
+                            hasStatusChange = true
+                            // Apply to projects model
+                            if !mutateSession(sessionId, { $0.claudeStatus = newStatus }) {
+                                sessionFound = false
+                            }
                         }
-                        hasResponding = previousStatuses.values.contains("responding")
-                        hasStatusChange = true
-                    } else if patch.op == "set_status" {
-                        hasStatusChange = true
+                    case "set_status":
+                        if let newStatus = patch.status {
+                            hasStatusChange = true
+                            if !mutateSession(sessionId, { $0.status = newStatus }) {
+                                sessionFound = false
+                            }
+                        } else {
+                            hasStatusChange = true
+                        }
+                    case "add_tool":
+                        addToolCount += 1
+                    case "set_meta":
+                        if let slug = patch.slug {
+                            if !mutateSession(sessionId, { $0.slug = slug }) {
+                                sessionFound = false
+                            }
+                        }
+                    default:
+                        break
                     }
                 }
-                if hasStatusChange {
-                    updateIconState()
+
+                // Increment tool count in projects model
+                if addToolCount > 0 {
+                    if !mutateSession(sessionId, { $0.toolCount += addToolCount }) {
+                        sessionFound = false
+                    }
+                }
+
+                // Update lastEventTime for any patch activity
+                if !patches.isEmpty {
+                    let now = Date().timeIntervalSince1970
+                    if !mutateSession(sessionId, { $0.lastEventTime = now }) {
+                        sessionFound = false
+                    }
+                }
+
+                // If session not found in projects, request a full overview (new session race)
+                if !sessionFound {
                     pendingRequests.append(TerminalRequest(type: "request.overview"))
                 }
+
+                if hasStatusChange {
+                    updateIconState()
+                    // Also request overview as consistency fallback for status changes
+                    pendingRequests.append(TerminalRequest(type: "request.overview"))
+                } else if addToolCount > 0 {
+                    // Tool count changes update the display but don't need overview
+                    updateIconState()
+                }
             }
+
+        case "session.snapshot":
+            // A new session appeared — request overview to get it into projects
+            pendingRequests.append(TerminalRequest(type: "request.overview"))
 
         case "session.removed":
             if let sessionId = msg.sessionId {
@@ -174,6 +230,23 @@ public class MenuBarStateManager {
             break
         }
         onStateChange?()
+    }
+
+    // MARK: - Session mutation helper
+
+    /// Find a session by ID across all projects and mutate it in place.
+    /// Returns true if the session was found and mutated.
+    @discardableResult
+    public func mutateSession(_ sessionId: String, _ body: (inout SessionInfo) -> Void) -> Bool {
+        for pi in projects.indices {
+            for si in projects[pi].sessions.indices {
+                if projects[pi].sessions[si].id == sessionId {
+                    body(&projects[pi].sessions[si])
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     // MARK: - Timeout support

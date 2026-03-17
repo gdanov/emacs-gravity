@@ -567,3 +567,123 @@ struct BugFixTests {
         #expect(sm.inboxItems[0].id == 2)
     }
 }
+
+// MARK: - Suite 7: Client-side patch application to projects model
+
+@Suite("Patch Application to Projects")
+struct PatchApplicationTests {
+
+    /// Helper to seed a state manager with one project containing one session
+    private func seededManager(
+        sessionId: String = "s1",
+        project: String = "proj",
+        status: String = "active",
+        claudeStatus: String = "idle",
+        toolCount: Int = 5,
+        slug: String? = nil
+    ) -> MenuBarStateManager {
+        let sm = MenuBarStateManager()
+        sm.setConnected(true)
+        sm.handleMessage(ServerMessage(
+            type: "overview.snapshot",
+            projects: [
+                ProjectSummaryJSON(project: project, sessions: [
+                    SessionSummaryJSON(
+                        sessionId: sessionId,
+                        slug: slug,
+                        status: status,
+                        claudeStatus: claudeStatus,
+                        toolCount: toolCount,
+                        lastEventTime: Date().timeIntervalSince1970
+                    )
+                ])
+            ]
+        ))
+        sm.pendingRequests.removeAll()
+        return sm
+    }
+
+    @Test("35: add_tool increments toolCount in projects")
+    func addToolIncrementsToolCount() {
+        let sm = seededManager(toolCount: 5)
+        sm.handleMessage(ServerMessage(
+            type: "session.update",
+            sessionId: "s1",
+            patches: [PatchJSON(op: "add_tool")]
+        ))
+        #expect(sm.projects[0].sessions[0].toolCount == 6)
+    }
+
+    @Test("36: set_claude_status updates claudeStatus in projects")
+    func setCludeStatusUpdatesProjects() {
+        let sm = seededManager(claudeStatus: "idle")
+        sm.previousStatuses["s1"] = "idle"
+        sm.handleMessage(ServerMessage(
+            type: "session.update",
+            sessionId: "s1",
+            patches: [PatchJSON(op: "set_claude_status", claudeStatus: "responding")]
+        ))
+        #expect(sm.projects[0].sessions[0].claudeStatus == "responding")
+    }
+
+    @Test("37: session.update for unknown session queues request.overview")
+    func unknownSessionQueuesOverview() {
+        let sm = seededManager()
+        sm.handleMessage(ServerMessage(
+            type: "session.update",
+            sessionId: "unknown-session",
+            patches: [PatchJSON(op: "add_tool")]
+        ))
+        #expect(sm.pendingRequests.contains(TerminalRequest(type: "request.overview")))
+    }
+
+    @Test("38: any patch updates lastEventTime")
+    func patchUpdatesLastEventTime() {
+        let sm = seededManager(toolCount: 0)
+        let before = Date().timeIntervalSince1970
+        sm.handleMessage(ServerMessage(
+            type: "session.update",
+            sessionId: "s1",
+            patches: [PatchJSON(op: "add_tool")]
+        ))
+        let after = Date().timeIntervalSince1970
+        let updated = sm.projects[0].sessions[0].lastEventTime
+        #expect(updated >= before)
+        #expect(updated <= after)
+    }
+
+    @Test("39: session.snapshot triggers overview request")
+    func sessionSnapshotTriggersOverview() {
+        let sm = MenuBarStateManager()
+        sm.setConnected(true)
+        sm.handleMessage(ServerMessage(type: "session.snapshot", sessionId: "s1"))
+        #expect(sm.pendingRequests.contains(TerminalRequest(type: "request.overview")))
+    }
+
+    @Test("40: set_meta with slug updates session display name")
+    func setMetaUpdatesSlug() {
+        let sm = seededManager(slug: nil)
+        sm.handleMessage(ServerMessage(
+            type: "session.update",
+            sessionId: "s1",
+            patches: [PatchJSON(op: "set_meta", slug: "my-slug")]
+        ))
+        #expect(sm.projects[0].sessions[0].slug == "my-slug")
+        #expect(sm.projects[0].sessions[0].displayName == "my-slug")
+    }
+
+    @Test("41: multiple add_tool patches increment count correctly")
+    func multipleAddToolPatches() {
+        let sm = seededManager(toolCount: 3)
+        sm.handleMessage(ServerMessage(
+            type: "session.update",
+            sessionId: "s1",
+            patches: [
+                PatchJSON(op: "add_tool"),
+                PatchJSON(op: "add_tool"),
+                PatchJSON(op: "add_tool")
+            ]
+        ))
+        #expect(sm.projects[0].sessions[0].toolCount == 6)
+    }
+}

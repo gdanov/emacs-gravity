@@ -35,7 +35,7 @@ public enum MenuBarIconState: Equatable {
 public struct ProjectInfo: Identifiable {
     public let id: String
     public let name: String
-    public let sessions: [SessionInfo]
+    public var sessions: [SessionInfo]
 
     public init(id: String, name: String, sessions: [SessionInfo]) {
         self.id = id
@@ -46,11 +46,11 @@ public struct ProjectInfo: Identifiable {
 
 public struct SessionInfo: Identifiable {
     public let id: String
-    public let slug: String?
+    public var slug: String?
     public var status: String        // "active" | "ended"
     public var claudeStatus: String  // "idle" | "responding"
-    public let toolCount: Int
-    public let lastEventTime: Double
+    public var toolCount: Int
+    public var lastEventTime: Double
 
     public init(id: String, slug: String?, status: String, claudeStatus: String, toolCount: Int, lastEventTime: Double) {
         self.id = id
@@ -186,20 +186,22 @@ public struct InboxItemJSON: Decodable {
     }
 }
 
-/// Minimal patch decoding — we only care about status changes for the menu bar
+/// Patch decoding — status changes, tool counts, and metadata for the menu bar
 public struct PatchJSON: Decodable {
     public let op: String
     public let status: String?
     public let claudeStatus: String?
+    public let slug: String?
 
     enum CodingKeys: String, CodingKey {
-        case op, status, claudeStatus
+        case op, status, claudeStatus, slug
     }
 
-    public init(op: String, status: String? = nil, claudeStatus: String? = nil) {
+    public init(op: String, status: String? = nil, claudeStatus: String? = nil, slug: String? = nil) {
         self.op = op
         self.status = status
         self.claudeStatus = claudeStatus
+        self.slug = slug
     }
 }
 

@@ -104,17 +104,18 @@ public class GravityMonitor: ObservableObject {
         DispatchQueue.main.async {
             self.stateManager.setConnected(true)
             self.lastResponseTime = Date()
-            // Start periodic overview refresh (30s heartbeat) with timeout detection
+            // Start periodic overview refresh (10s heartbeat) with timeout detection
             self.healthTimer?.invalidate()
-            self.healthTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self.healthTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
                 guard let self = self else { return }
-                // If no response received in 60s, treat as dead connection
-                if Date().timeIntervalSince(self.lastResponseTime) > 60.0 {
-                    NSLog("gravity-menubar: heartbeat timeout (no response in 60s), reconnecting")
+                // If no response received in 30s, treat as dead connection
+                if Date().timeIntervalSince(self.lastResponseTime) > 30.0 {
+                    NSLog("gravity-menubar: heartbeat timeout (no response in 30s), reconnecting")
                     self.disconnect()
                     self.scheduleReconnect()
                     return
                 }
+                self.stateManager.clearJustFinishedIfStale()
                 self.sendRequest(TerminalRequest(type: "request.overview"))
             }
         }
