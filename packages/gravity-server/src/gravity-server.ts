@@ -10,7 +10,7 @@ import type { Server, Socket } from "net";
 import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
-import type { HookEventName, HookData, Patch, ServerMessage } from "@gravity/shared";
+import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
 import { SessionStore } from "./state/session-store.js";
 import { InboxManager } from "./state/inbox.js";
 import { TerminalServer } from "./protocol/terminal-server.js";
@@ -335,31 +335,50 @@ function handleTerminalMessage(
     case "action.plan-review": {
       const { itemId, decision, feedback } = msg;
       let message: string | undefined;
+
+      // Normalize feedback to structured format
+      let normalizedFeedback: PlanFeedback | undefined;
       if (feedback) {
+        if (typeof feedback === 'string') {
+          // Legacy format: feedback is a pre-formatted string (from Emacs deny)
+          normalizedFeedback = {
+            inlineComments: [],
+            claudeMarkers: [],
+            diff: null,
+            generalComment: feedback,
+          };
+        } else {
+          // New format: structured feedback object
+          normalizedFeedback = feedback as PlanFeedback;
+        }
+      }
+
+      // Build message from normalized feedback
+      if (normalizedFeedback) {
         // Build structured feedback message (matches Emacs plan review format)
         const parts: string[] = ["# Plan Feedback\n"];
-        if (feedback.inlineComments.length > 0) {
+        if (normalizedFeedback.inlineComments.length > 0) {
           parts.push("## Inline comments");
-          for (const c of feedback.inlineComments) {
+          for (const c of normalizedFeedback.inlineComments) {
             parts.push(`- Line ${c.line} (near "${c.nearText}"): ${c.comment}`);
           }
           parts.push("");
         }
-        if (feedback.claudeMarkers.length > 0) {
+        if (normalizedFeedback.claudeMarkers.length > 0) {
           parts.push("## @claude markers");
-          for (const m of feedback.claudeMarkers) {
+          for (const m of normalizedFeedback.claudeMarkers) {
             parts.push(`- Line ${m.line} (near "${m.nearText}"): ${m.text}`);
           }
           parts.push("");
         }
-        if (feedback.diff) {
+        if (normalizedFeedback.diff) {
           parts.push("## Changes requested");
-          parts.push(feedback.diff);
+          parts.push(normalizedFeedback.diff);
           parts.push("");
         }
-        if (feedback.generalComment) {
+        if (normalizedFeedback.generalComment) {
           parts.push("## General comment");
-          parts.push(feedback.generalComment);
+          parts.push(normalizedFeedback.generalComment);
         }
         message = parts.join("\n");
       }

@@ -700,12 +700,16 @@ With \\[universal-argument] \\[universal-argument], open in new frame."
                 (model-name (plist-get session :model-name))
                 (branch-str (claude-gravity--branch-or-cwd session))
                 (source-str (claude-gravity--source-indicator session))
+                (project (plist-get session :project))
                 ;; Build entry parts
                 (parts (delq nil
                              (list dot " "
                                    (propertize status-str 'face status-face) "  "
                                    (when branch-str (concat branch-str " "))
                                    (when source-str (concat source-str " "))
+                                   (when project
+                                     (propertize (concat project "/")
+                                                 'face 'claude-gravity-detail-label))
                                    (propertize (format "%-20s" label) 'face 'claude-gravity-slug)
                                    (propertize (format "  ◆ %d tools" n-tools)
                                                'face 'claude-gravity-detail-label))))
