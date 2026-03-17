@@ -9,6 +9,8 @@ struct GravityMenuBarApp: App {
     init() {
         // Hide from Dock — menu bar only
         NSApplication.shared.setActivationPolicy(.accessory)
+        // Defense-in-depth: ignore SIGPIPE process-wide
+        signal(SIGPIPE, SIG_IGN)
     }
 
     var body: some Scene {

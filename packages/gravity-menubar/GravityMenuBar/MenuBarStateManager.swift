@@ -34,8 +34,8 @@ public class MenuBarStateManager {
         let newState: MenuBarIconState
         if !connected { newState = .disconnected }
         else if justFinished { newState = .justFinished }
-        else if hasResponding { newState = .neutral }
         else if !inboxItems.isEmpty { newState = .attention }
+        else if hasResponding { newState = .responding }
         else { newState = .neutral }
         if iconState != newState {
             iconState = newState
@@ -85,10 +85,16 @@ public class MenuBarStateManager {
                 )
             }
             // Seed previousStatuses from snapshot (no transition on initial load)
+            var activeSessionIds = Set<String>()
             for p in jsonProjects {
                 for s in p.sessions where s.status == "active" {
                     previousStatuses[s.sessionId] = s.claudeStatus
+                    activeSessionIds.insert(s.sessionId)
                 }
+            }
+            // Clean stale entries for sessions no longer in snapshot
+            for key in previousStatuses.keys where !activeSessionIds.contains(key) {
+                previousStatuses.removeValue(forKey: key)
             }
             // Bug fix #1: update hasResponding from snapshot
             hasResponding = previousStatuses.values.contains("responding")
@@ -96,6 +102,8 @@ public class MenuBarStateManager {
 
         case "inbox.added":
             guard let item = msg.item else { return }
+            // Skip informational "idle" items — not actionable
+            guard item.type != "idle" else { return }
             inboxItems.removeAll { $0.id == item.id }
             inboxItems.append(InboxInfo(
                 id: item.id,
@@ -114,7 +122,8 @@ public class MenuBarStateManager {
 
         case "inbox.snapshot":
             guard let items = msg.items else { return }
-            inboxItems = items.map { item in
+            // Filter out informational "idle" items — not actionable
+            inboxItems = items.filter { $0.type != "idle" }.map { item in
                 InboxInfo(
                     id: item.id,
                     type: item.type,

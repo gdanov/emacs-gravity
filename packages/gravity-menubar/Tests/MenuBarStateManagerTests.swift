@@ -56,8 +56,8 @@ struct IconStatePriorityTests {
         #expect(sm.iconState == .justFinished)
     }
 
-    @Test("5: hasResponding suppresses attention → neutral")
-    func hasRespondingSuppressesAttention() {
+    @Test("5: attention wins over responding")
+    func attentionWinsOverResponding() {
         let sm = MenuBarStateManager()
         sm.setConnected(true)
         // Set a session as responding
@@ -68,8 +68,8 @@ struct IconStatePriorityTests {
             type: "inbox.added",
             item: InboxItemJSON(id: 1, type: "permission", sessionId: "s1", label: "Allow Bash")
         ))
-        // hasResponding suppresses attention
-        #expect(sm.iconState == .neutral)
+        // attention has higher priority than responding
+        #expect(sm.iconState == .attention)
     }
 
     @Test("6: inbox items when idle → attention")
@@ -433,9 +433,9 @@ struct BugFixTests {
                 ])
             ]
         ))
-        // hasResponding should be true → suppresses attention → neutral
+        // hasResponding should be true, but attention has higher priority
         #expect(sm.hasResponding == true)
-        #expect(sm.iconState == .neutral)
+        #expect(sm.iconState == .attention)
     }
 
     @Test("28: Bug #2 — justFinished is per-transition, not cleared by other sessions")
@@ -476,11 +476,11 @@ struct BugFixTests {
             type: "inbox.added",
             item: InboxItemJSON(id: 1, type: "permission", sessionId: "s1", label: "Allow Bash")
         ))
-        // hasResponding suppresses attention → neutral
-        #expect(sm.iconState == .neutral)
+        // attention has higher priority than responding
+        #expect(sm.iconState == .attention)
         // Remove the responding session
         sm.handleMessage(ServerMessage(type: "session.removed", sessionId: "s1"))
-        // hasResponding should be false now → inbox item shows attention
+        // hasResponding should be false now → inbox item still shows attention
         #expect(sm.hasResponding == false)
         #expect(sm.iconState == .attention)
     }
@@ -505,5 +505,65 @@ struct BugFixTests {
         #expect(sm.justFinished == false)
         #expect(sm.justFinishedAt == nil)
         #expect(sm.iconState == .neutral)
+    }
+
+    @Test("31: responding icon state shown when session responding and no inbox")
+    func respondingIconState() {
+        let sm = MenuBarStateManager()
+        sm.setConnected(true)
+        sm.previousStatuses["s1"] = "responding"
+        sm.hasResponding = true
+        sm.updateIconState()
+        #expect(sm.iconState == .responding)
+    }
+
+    @Test("32: stale previousStatuses cleaned on overview snapshot")
+    func stalePreviousStatusesCleaned() {
+        let sm = MenuBarStateManager()
+        sm.setConnected(true)
+        // Pre-populate with stale entries
+        sm.previousStatuses["stale-1"] = "responding"
+        sm.previousStatuses["stale-2"] = "idle"
+        sm.hasResponding = true
+        // Receive overview with only one active session (not stale-1 or stale-2)
+        sm.handleMessage(ServerMessage(
+            type: "overview.snapshot",
+            projects: [
+                ProjectSummaryJSON(project: "proj", sessions: [
+                    SessionSummaryJSON(sessionId: "s1", status: "active", claudeStatus: "idle")
+                ])
+            ]
+        ))
+        #expect(sm.previousStatuses["stale-1"] == nil)
+        #expect(sm.previousStatuses["stale-2"] == nil)
+        #expect(sm.previousStatuses["s1"] == "idle")
+        #expect(sm.hasResponding == false)
+    }
+
+    @Test("33: idle inbox items filtered out")
+    func idleInboxItemsFiltered() {
+        let sm = MenuBarStateManager()
+        sm.setConnected(true)
+        sm.handleMessage(ServerMessage(
+            type: "inbox.added",
+            item: InboxItemJSON(id: 1, type: "idle", sessionId: "s1", label: "Session idle")
+        ))
+        #expect(sm.inboxItems.count == 0)
+        #expect(sm.iconState == .neutral)
+    }
+
+    @Test("34: idle items filtered from inbox.snapshot")
+    func idleItemsFilteredFromSnapshot() {
+        let sm = MenuBarStateManager()
+        sm.setConnected(true)
+        sm.handleMessage(ServerMessage(
+            type: "inbox.snapshot",
+            items: [
+                InboxItemJSON(id: 1, type: "idle", sessionId: "s1", label: "Idle"),
+                InboxItemJSON(id: 2, type: "permission", sessionId: "s2", label: "Allow Bash")
+            ]
+        ))
+        #expect(sm.inboxItems.count == 1)
+        #expect(sm.inboxItems[0].id == 2)
     }
 }

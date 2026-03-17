@@ -25,17 +25,24 @@ export class TerminalServer {
       this.connections = this.connections.filter((c) => c !== conn);
     });
 
+    socket.on("error", (err) => {
+      console.error(`Terminal connection error: ${err.message}`);
+      socket.destroy();
+    });
+
     return conn;
   }
 
   /** Broadcast a message to all connected terminals. */
   broadcast(message: ServerMessage): void {
     const json = JSON.stringify(message) + "\n";
-    for (const conn of this.connections) {
+    // Iterate over a copy to allow mutation during iteration
+    for (const conn of [...this.connections]) {
       try {
         conn.socket.write(json);
-      } catch {
-        // Connection dead — will be cleaned up on close event
+      } catch (err) {
+        console.error(`Terminal broadcast write error: ${(err as Error).message}`);
+        conn.socket.destroy();
       }
     }
   }
@@ -43,12 +50,13 @@ export class TerminalServer {
   /** Send a message to terminals subscribed to a specific session. */
   sendToSubscribers(sessionId: string, message: ServerMessage): void {
     const json = JSON.stringify(message) + "\n";
-    for (const conn of this.connections) {
+    for (const conn of [...this.connections]) {
       if (conn.subscribedSessions.has(sessionId)) {
         try {
           conn.socket.write(json);
-        } catch {
-          // Connection dead
+        } catch (err) {
+          console.error(`Terminal subscriber write error: ${(err as Error).message}`);
+          conn.socket.destroy();
         }
       }
     }
@@ -58,8 +66,9 @@ export class TerminalServer {
   sendTo(conn: TerminalConnection, message: ServerMessage): void {
     try {
       conn.socket.write(JSON.stringify(message) + "\n");
-    } catch {
-      // Connection dead
+    } catch (err) {
+      console.error(`Terminal sendTo write error: ${(err as Error).message}`);
+      conn.socket.destroy();
     }
   }
 

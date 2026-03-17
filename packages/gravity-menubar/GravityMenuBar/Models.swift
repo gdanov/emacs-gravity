@@ -4,6 +4,7 @@ import SwiftUI
 
 public enum MenuBarIconState: Equatable {
     case neutral       // connected, all idle or no sessions
+    case responding    // at least one session is responding
     case justFinished  // a session just went responding→idle
     case attention     // inbox items present
     case disconnected  // not connected to server
@@ -11,6 +12,7 @@ public enum MenuBarIconState: Equatable {
     public var systemImage: String {
         switch self {
         case .neutral:      return "bolt.fill"
+        case .responding:   return "bolt.fill"
         case .justFinished: return "bolt.fill"
         case .attention:    return "exclamationmark.bubble.fill"
         case .disconnected: return "bolt.slash.fill"
@@ -20,6 +22,7 @@ public enum MenuBarIconState: Equatable {
     public var color: Color {
         switch self {
         case .neutral:      return .secondary
+        case .responding:   return .yellow
         case .justFinished: return .green
         case .attention:    return .orange
         case .disconnected: return .secondary

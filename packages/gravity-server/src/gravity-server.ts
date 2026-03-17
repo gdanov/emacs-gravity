@@ -149,9 +149,12 @@ function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
     store.cancelPurge(sessionId);
   }
 
-  // Broadcast overview on status-changing events only
+  // Broadcast overview on status-changing events or when patches contain status ops
   const overviewEvents = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
-  if (overviewEvents.has(eventName)) {
+  const hasStatusPatch = patches.some(p =>
+    p.op === "set_claude_status" || p.op === "set_status"
+  );
+  if (overviewEvents.has(eventName) || hasStatusPatch) {
     terminals.broadcast({
       type: "overview.snapshot",
       projects: store.getProjectSummaries(),

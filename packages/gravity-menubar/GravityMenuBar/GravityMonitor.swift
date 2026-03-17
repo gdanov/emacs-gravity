@@ -19,6 +19,7 @@ public class GravityMonitor: ObservableObject {
     private let socketPath: String
 
     private var healthTimer: Timer?
+    private var lastResponseTime = Date()
 
     public init() {
         if let envPath = ProcessInfo.processInfo.environment["GRAVITY_TERMINAL_SOCK"] {
@@ -60,6 +61,10 @@ public class GravityMonitor: ObservableObject {
             return
         }
 
+        // Prevent SIGPIPE on writes to broken sockets
+        var nosigpipe: Int32 = 1
+        setsockopt(socketFD, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
+
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
 
@@ -98,10 +103,19 @@ public class GravityMonitor: ObservableObject {
 
         DispatchQueue.main.async {
             self.stateManager.setConnected(true)
-            // Start periodic overview refresh (30s heartbeat)
+            self.lastResponseTime = Date()
+            // Start periodic overview refresh (30s heartbeat) with timeout detection
             self.healthTimer?.invalidate()
             self.healthTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-                self?.sendRequest(TerminalRequest(type: "request.overview"))
+                guard let self = self else { return }
+                // If no response received in 60s, treat as dead connection
+                if Date().timeIntervalSince(self.lastResponseTime) > 60.0 {
+                    NSLog("gravity-menubar: heartbeat timeout (no response in 60s), reconnecting")
+                    self.disconnect()
+                    self.scheduleReconnect()
+                    return
+                }
+                self.sendRequest(TerminalRequest(type: "request.overview"))
             }
         }
 
@@ -192,6 +206,7 @@ public class GravityMonitor: ObservableObject {
             do {
                 let msg = try JSONDecoder().decode(ServerMessage.self, from: lineData)
                 DispatchQueue.main.async {
+                    self.lastResponseTime = Date()
                     self.stateManager.handleMessage(msg)
                     // Drain pending requests
                     for request in self.stateManager.pendingRequests {
@@ -212,8 +227,13 @@ public class GravityMonitor: ObservableObject {
         do {
             var data = try JSONEncoder().encode(request)
             data.append(UInt8(ascii: "\n"))
-            data.withUnsafeBytes { ptr in
-                _ = Darwin.write(socketFD, ptr.baseAddress!, ptr.count)
+            let written = data.withUnsafeBytes { ptr -> Int in
+                Darwin.write(socketFD, ptr.baseAddress!, ptr.count)
+            }
+            if written < 0 {
+                NSLog("gravity-menubar: write failed (errno=%d), reconnecting", errno)
+                disconnect()
+                scheduleReconnect()
             }
         } catch {
             NSLog("gravity-menubar: encode error: \(error)")
