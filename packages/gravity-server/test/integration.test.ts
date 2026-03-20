@@ -204,12 +204,6 @@ describe("Integration: Server end-to-end", () => {
               }
               message = parts.join("\n");
             }
-            // DENY_AS_APPROVE controlled by env var
-            const DENY_AS_APPROVE = process.env.GRAVITY_DENY_AS_APPROVE === "1";
-            if (DENY_AS_APPROVE && toolName === "ExitPlanMode" && finalDecision === "allow") {
-              finalDecision = "deny";
-              message = message || "User approved the plan. Proceed with implementation.";
-            }
             inbox.respond(msg.itemId, {
               hookSpecificOutput: {
                 hookEventName: "PermissionRequest",

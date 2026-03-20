@@ -379,8 +379,6 @@ incorporate the feedback (the allow channel cannot carry feedback)."
           (claude-gravity--enable-session-follow-mode session-id)
           (claude-gravity--log 'debug "Feedback detected — denied for revision"))
       ;; No feedback — clean approve with session-scoped permissions.
-      ;; NOTE: We send {"behavior":"allow"} here. The gravity-server handles
-      ;; the deny-as-approve workaround for Claude Code bug #15755.
       (let* ((perms claude-gravity--plan-review-session-permissions)
              (decision (if (and perms (> (length perms) 0))
                            `((behavior . "allow")

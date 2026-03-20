@@ -291,22 +291,6 @@ Server writes response →(hook socket)→ bridge shim reads → stdout → Clau
 
 Multiple terminals can view the same inbox item. First terminal to respond wins.
 
-### Known Bug: ExitPlanMode Allow Ignored (Deny-as-Approve Workaround)
-
-Claude Code silently ignores `allow` responses from PermissionRequest hooks for `ExitPlanMode`. This is a regression of [#15755](https://github.com/anthropics/claude-code/issues/15755), still broken as of v2.1.50.
-
-**Workaround:** gravity-server intercepts `allow` responses for ExitPlanMode and converts them to `deny` with the message "User approved the plan. Proceed with implementation." Claude reads the message content, sees approval, and proceeds.
-
-**Data flow:**
-1. Emacs sends `action.plan-review` with `decision: "allow"` to server
-2. Server converts to `{"decision":{"behavior":"deny","message":"User approved the plan. Proceed with implementation."}}`
-3. Server writes response to bridge's hook socket
-4. Bridge reads and writes to stdout for Claude Code
-
-**Deny with feedback** (user annotated the plan) is already a deny — passes through unchanged.
-
-**Removal:** When Claude Code fixes #15755, delete the workaround in gravity-server's bidirectional handler.
-
 ### Tool Attribution
 
 Enrichment (now in gravity-server) handles tool-to-agent attribution:

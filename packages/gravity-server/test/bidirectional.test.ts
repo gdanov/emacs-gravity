@@ -1,7 +1,6 @@
 // bidirectional.test.ts — Tests for bidirectional flows
 //
-// Tests PermissionRequest, AskUserQuestion, plan review, and the
-// deny-as-approve workaround for ExitPlanMode (#15755).
+// Tests PermissionRequest, AskUserQuestion, and plan review.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Socket } from "net";
@@ -317,15 +316,8 @@ describe("Bidirectional flow: AskUserQuestion", () => {
   });
 });
 
-describe("Deny-as-approve workaround for ExitPlanMode (#15755)", () => {
-  /**
-   * Claude Code silently ignores "allow" responses from PermissionRequest hooks
-   * for ExitPlanMode. The workaround converts allow → deny with a message.
-   * Controlled by GRAVITY_DENY_AS_APPROVE=1 env var (disabled by default).
-   * These tests simulate the server.ts action.plan-review handler logic.
-   */
-
-  it("ExitPlanMode allow passes through when DENY_AS_APPROVE is off (default)", () => {
+describe("ExitPlanMode plan review responses", () => {
+  it("ExitPlanMode allow passes through", () => {
     const inbox = new InboxManager();
     const sock = mockSocket();
     const item = inbox.add(
@@ -333,22 +325,10 @@ describe("Deny-as-approve workaround for ExitPlanMode (#15755)", () => {
       { tool_name: "ExitPlanMode" }, sock,
     );
 
-    // Simulate server.ts logic with DENY_AS_APPROVE=false (default)
-    const DENY_AS_APPROVE = false;
-    const pending = inbox.getPending(item.id);
-    const toolName = (pending?.inboxItem.data as Record<string, unknown>)?.tool_name;
-    let decision: string = "allow";
-    let message: string | undefined;
-
-    if (DENY_AS_APPROVE && toolName === "ExitPlanMode" && decision === "allow") {
-      decision = "deny";
-      message = message || "User approved the plan. Proceed with implementation.";
-    }
-
     inbox.respond(item.id, {
       hookSpecificOutput: {
         hookEventName: "PermissionRequest",
-        decision: { behavior: decision, message },
+        decision: { behavior: "allow" },
       },
     });
 
@@ -356,41 +336,7 @@ describe("Deny-as-approve workaround for ExitPlanMode (#15755)", () => {
     expect(response.hookSpecificOutput.decision.behavior).toBe("allow");
   });
 
-  it("converts ExitPlanMode allow to deny-as-approve when flag enabled", () => {
-    const inbox = new InboxManager();
-    const sock = mockSocket();
-    const item = inbox.add(
-      "plan-review", "s1", "proj", "Plan Review", "Review plan",
-      { tool_name: "ExitPlanMode" }, sock,
-    );
-
-    // Simulate server.ts logic with DENY_AS_APPROVE=true
-    const DENY_AS_APPROVE = true;
-    const pending = inbox.getPending(item.id);
-    const toolName = (pending?.inboxItem.data as Record<string, unknown>)?.tool_name;
-    let decision: string = "allow";
-    let message: string | undefined;
-
-    if (DENY_AS_APPROVE && toolName === "ExitPlanMode" && decision === "allow") {
-      decision = "deny";
-      message = message || "User approved the plan. Proceed with implementation.";
-    }
-
-    inbox.respond(item.id, {
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision: { behavior: decision, message },
-      },
-    });
-
-    const response = JSON.parse(sock.written[0].replace("\n", ""));
-    expect(response.hookSpecificOutput.decision.behavior).toBe("deny");
-    expect(response.hookSpecificOutput.decision.message).toBe(
-      "User approved the plan. Proceed with implementation.",
-    );
-  });
-
-  it("passes through deny with feedback unchanged", () => {
+  it("deny with feedback passes through", () => {
     const inbox = new InboxManager();
     const sock = mockSocket();
     inbox.add(
@@ -399,49 +345,18 @@ describe("Deny-as-approve workaround for ExitPlanMode (#15755)", () => {
     );
     const item = inbox.all()[0];
 
-    // Deny with feedback should pass through unchanged regardless of flag
-    const decision = "deny";
     const message = "# Plan Feedback\n\n## General comment\nPlease also fix tests.";
 
     inbox.respond(item.id, {
       hookSpecificOutput: {
         hookEventName: "PermissionRequest",
-        decision: { behavior: decision, message },
+        decision: { behavior: "deny", message },
       },
     });
 
     const response = JSON.parse(sock.written[0].replace("\n", ""));
     expect(response.hookSpecificOutput.decision.behavior).toBe("deny");
     expect(response.hookSpecificOutput.decision.message).toContain("Plan Feedback");
-  });
-
-  it("non-ExitPlanMode allow passes through unchanged", () => {
-    const inbox = new InboxManager();
-    const sock = mockSocket();
-    inbox.add(
-      "permission", "s1", "proj", "Bash", "Running command",
-      { tool_name: "Bash" }, sock,
-    );
-    const item = inbox.all()[0];
-
-    // Non-ExitPlanMode allow should NOT be converted even with flag on
-    const DENY_AS_APPROVE = true;
-    const toolName = (inbox.getPending(item.id)?.inboxItem.data as Record<string, unknown>)
-      ?.tool_name;
-    let decision = "allow";
-    if (DENY_AS_APPROVE && toolName === "ExitPlanMode" && decision === "allow") {
-      decision = "deny";
-    }
-
-    inbox.respond(item.id, {
-      hookSpecificOutput: {
-        hookEventName: "PermissionRequest",
-        decision: { behavior: decision },
-      },
-    });
-
-    const response = JSON.parse(sock.written[0].replace("\n", ""));
-    expect(response.hookSpecificOutput.decision.behavior).toBe("allow");
   });
 });
 

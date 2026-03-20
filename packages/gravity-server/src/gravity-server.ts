@@ -383,24 +383,11 @@ function handleTerminalMessage(
         message = parts.join("\n");
       }
 
-      // DENY-AS-APPROVE workaround: Claude Code ignores ExitPlanMode "allow"
-      // from PermissionRequest hooks (#15755). Enable with GRAVITY_DENY_AS_APPROVE=1
-      // if your Claude Code version still has this bug.
-      const DENY_AS_APPROVE = process.env.GRAVITY_DENY_AS_APPROVE === "1";
-      const pending = inbox.getPending(itemId);
-      const toolName = pending?.inboxItem.data?.tool_name;
-      let finalDecision = decision;
-      if (DENY_AS_APPROVE && toolName === "ExitPlanMode" && decision === "allow") {
-        finalDecision = "deny";
-        message = message || "User approved the plan. Proceed with implementation.";
-        log("Plan review: converting ExitPlanMode allow → deny-as-approve", "info");
-      }
-
       // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
       inbox.respond(itemId, {
         hookSpecificOutput: {
           hookEventName: "PermissionRequest",
-          decision: { behavior: finalDecision, message },
+          decision: { behavior: decision, message },
         },
       });
       terminals.broadcast({ type: "inbox.removed", itemId });

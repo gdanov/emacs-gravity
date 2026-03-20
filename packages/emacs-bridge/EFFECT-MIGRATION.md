@@ -87,7 +87,7 @@ Test scenarios:
 - SessionStart → enriches + sends fire-and-forget + outputs `{}`
 - Stop → enriches with trailing text + sends + outputs `{}`
 - PermissionRequest (safe bash) → auto-approves + sends notification + outputs allow
-- PermissionRequest (unsafe) → sends bidirectional + waits for response + applies deny-as-approve workaround
+- PermissionRequest (unsafe) → sends bidirectional + waits for response
 - AskUserQuestionIntercept → sends as PreToolUse + waits + outputs response
 - Socket not found → early exit with `{}`
 - Ignored session → passes through to TUI

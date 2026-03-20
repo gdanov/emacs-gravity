@@ -522,8 +522,6 @@ Plan review is triggered by `ExitPlanMode` PermissionRequest.
 - Inline comments exist (added via `C-c ;`)
 - `@claude:` markers found in text
 
-**Deny-as-approve workaround:** Claude Code ignores `allow` responses for ExitPlanMode (#15755). The bridge converts `{allow}` → `{deny, message: "User approved the plan. Proceed with implementation."}`. Emacs sends the correct `allow`; the bridge intercepts in `index.ts`.
-
 ### 5.4 Turn Auto-Approve
 
 `claude-gravity--turn-auto-approve` is an alist of `(session-id . turn-number)` pairs.
