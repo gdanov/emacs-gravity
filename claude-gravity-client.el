@@ -93,6 +93,10 @@ Set automatically from package directory.")
       (and (> pid 0)
            (= 0 (call-process "kill" nil nil nil "-0" (number-to-string pid)))))))
 
+(defun claude-gravity--ensure-server ()
+  "Ensure gravity-server is running and connected."
+  (claude-gravity-server-start))
+
 (defun claude-gravity-server-start ()
   "Start gravity-server and connect to its terminal socket.
 If server is already running (socket exists), just connect."
