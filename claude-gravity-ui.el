@@ -643,6 +643,7 @@ Optional CONTEXT controls window routing (see `claude-gravity--display-buffer').
         (claude-gravity--display-buffer existing context)
       (with-current-buffer (get-buffer-create buf-name)
         (claude-gravity-session-mode)
+        (setq default-directory (file-name-as-directory (plist-get session :cwd)))
         (setq claude-gravity--buffer-session-id session-id)
         (plist-put session :buffer (current-buffer))
         (claude-gravity--render-session-buffer session)
