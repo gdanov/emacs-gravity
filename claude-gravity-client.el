@@ -778,10 +778,12 @@ MSG contains sessionId and patches array."
 
       ("add_turn"
        (let* ((turn-json (alist-get 'turn patch))
-              (turn-node (claude-gravity--json-turn-to-alist turn-json)))
-         (claude-gravity--tlist-append (plist-get session :turns) turn-node)
-         (plist-put session :current-turn
-                    (alist-get 'turn-number turn-node))))
+              (turn-node (claude-gravity--json-turn-to-alist turn-json))
+              (turn-num (alist-get 'turn-number turn-node))
+              (existing (claude-gravity--get-turn-node session turn-num)))
+         (unless existing ;; dedup: skip if turn number already exists
+           (claude-gravity--tlist-append (plist-get session :turns) turn-node)
+           (plist-put session :current-turn turn-num))))
 
       ("freeze_turn"
        (let* ((turn-num (alist-get 'turnNumber patch))

@@ -2,7 +2,7 @@ EMACS ?= emacs
 
 .PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-server sync-cache clean menubar kill-server restart-server
 
-PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/2.0.0
+PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/3.0.0
 
 test: test-elisp test-bridge test-server test-menubar
 

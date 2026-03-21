@@ -185,16 +185,23 @@ export function handleEvent(
       const displayText = promptText || extractSlashCommand(rawPrompt);
 
       if (displayText) {
-        patches.push(
-          ...addPrompt(session, {
-            type: "user",
-            text: displayText,
-            submitted: Date.now(),
-            elapsed: null,
-            toolUseId: null,
-            answer: null,
-          }),
-        );
+        // Dedup: skip if identical prompt arrived within 500ms (duplicate plugin fires)
+        const lastTurn = session.turns[session.turns.length - 1];
+        const isDuplicate = lastTurn?.prompt?.text === displayText
+          && lastTurn.prompt.submitted != null
+          && (Date.now() - lastTurn.prompt.submitted) < 500;
+        if (!isDuplicate) {
+          patches.push(
+            ...addPrompt(session, {
+              type: "user",
+              text: displayText,
+              submitted: Date.now(),
+              elapsed: null,
+              toolUseId: null,
+              answer: null,
+            }),
+          );
+        }
       }
       patches.push(...setClaudeStatus(session, "responding"));
       break;
