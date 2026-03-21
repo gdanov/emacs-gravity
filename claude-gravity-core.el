@@ -58,6 +58,15 @@ Diffs longer than this are truncated with an ellipsis indicator."
   :group 'claude-gravity)
 
 
+(defcustom claude-gravity-enable-ide nil
+  "When non-nil, start a Monet IDE server for each managed Claude session.
+This gives Claude Code workspace awareness: open files, diagnostics,
+selections, and diff review.  Requires the `monet' package to be
+installed; silently ignored when monet is unavailable."
+  :type 'boolean
+  :group 'claude-gravity)
+
+
 
 (defvar claude-gravity-log-level 'warn
   "Minimum log level.  One of: debug, info, warn, error.

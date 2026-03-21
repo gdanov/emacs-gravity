@@ -18,6 +18,7 @@
   "Non-nil after the init SessionStart from the resume picker has been seen.")
 (declare-function claude-gravity--bury-resume-picker "claude-gravity-tmux")
 (declare-function claude-gravity--find-tmux-session-by-temp-id "claude-gravity-tmux")
+(declare-function claude-gravity--monet-rekey "claude-gravity-tmux")
 (declare-function claude-gravity--clear-notification-indicator "claude-gravity-client")
 (declare-function claude-gravity--tmux-ensure-heartbeat "claude-gravity-tmux")
 (declare-function claude-gravity--tmux-alive-p "claude-gravity-tmux")
@@ -166,6 +167,8 @@ the model mutation API to update session state."
                      nil))))
        (when tmux-name
          (remhash temp-id claude-gravity--tmux-pending)
+         ;; Rekey Monet IDE server tracking from temp-id to real tmux-name
+         (claude-gravity--monet-rekey temp-id tmux-name)
          ;; Resume picker: the init SessionStart (source=startup) consumes
          ;; the pending entry, but the real SessionStart (source=resume)
          ;; needs it too.  Re-register so the second re-key works.

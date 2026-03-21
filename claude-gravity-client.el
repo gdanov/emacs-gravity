@@ -722,16 +722,15 @@ MSG contains sessionId and patches array."
   (let* ((session-id (alist-get 'sessionId msg))
          (patches (alist-get 'patches msg))
          (session (gethash session-id claude-gravity--sessions)))
-    (unless session
-      ;; Session not known locally — request snapshot
-      (claude-gravity--request-session session-id)
-      (cl-return-from claude-gravity--handle-session-update nil))
-    ;; Apply each patch
-    (dolist (patch patches)
-      (claude-gravity--apply-patch session patch))
-    ;; Schedule refresh
-    (claude-gravity--schedule-refresh)
-    (claude-gravity--schedule-session-refresh session-id)))
+    (if (not session)
+        ;; Session not known locally — request snapshot
+        (claude-gravity--request-session session-id)
+      ;; Apply each patch
+      (dolist (patch patches)
+        (claude-gravity--apply-patch session patch))
+      ;; Schedule refresh
+      (claude-gravity--schedule-refresh)
+      (claude-gravity--schedule-session-refresh session-id))))
 
 (defun claude-gravity--apply-patch (session patch)
   "Apply a single semantic PATCH to SESSION."

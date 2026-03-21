@@ -51,6 +51,50 @@ without CLAUDE_GRAVITY_TEMP_ID (auto-registered tmux sessions not launched by gr
   "Timer for periodic tmux session liveness checks.")
 
 
+;;; Monet IDE integration (soft dependency)
+
+(declare-function monet-start-server-in-directory "monet" (key directory))
+(declare-function monet--session-port "monet" (session))
+(declare-function monet-stop-server "monet" (key))
+
+(defvar claude-gravity--monet-sessions (make-hash-table :test 'equal)
+  "Map of tmux-name (or temp-id for worktrees) → monet-key for active Monet servers.")
+
+(defun claude-gravity--monet-start (tmux-name cwd)
+  "Start a Monet IDE server for tmux session TMUX-NAME in CWD.
+Returns a list of env var strings to inject into the Claude process
+environment, or nil if monet is unavailable or disabled."
+  (when (and claude-gravity-enable-ide
+             (fboundp 'monet-start-server-in-directory))
+    (condition-case err
+        (let* ((key (format "gravity-%s" tmux-name))
+               (session (monet-start-server-in-directory key cwd))
+               (port (monet--session-port session)))
+          (puthash tmux-name key claude-gravity--monet-sessions)
+          (claude-gravity--log 'info "Monet IDE server started on port %d for %s" port tmux-name)
+          (list (format "ENABLE_IDE_INTEGRATION=t")
+                (format "CLAUDE_CODE_SSE_PORT=%d" port)))
+      (error
+       (claude-gravity--log 'warn "Failed to start Monet IDE server: %s"
+                            (error-message-string err))
+       nil))))
+
+(defun claude-gravity--monet-stop (tmux-name)
+  "Stop the Monet IDE server associated with TMUX-NAME, if any."
+  (when-let ((key (gethash tmux-name claude-gravity--monet-sessions)))
+    (condition-case nil
+        (when (fboundp 'monet-stop-server)
+          (monet-stop-server key)
+          (claude-gravity--log 'info "Monet IDE server stopped for %s" tmux-name))
+      (error nil))
+    (remhash tmux-name claude-gravity--monet-sessions)))
+
+(defun claude-gravity--monet-rekey (old-key new-key)
+  "Remap monet-sessions entry from OLD-KEY to NEW-KEY."
+  (when-let ((monet-key (gethash old-key claude-gravity--monet-sessions)))
+    (remhash old-key claude-gravity--monet-sessions)
+    (puthash new-key monet-key claude-gravity--monet-sessions)))
+
 
 (defun claude-gravity--claude-command ()
   "Return the claude command path."
@@ -173,7 +217,9 @@ Returns (ENV-VARS . CLI-ARGS) where ENV-VARS are strings like
             (cond
              ((stringp claude-gravity-managed-statusline)
               claude-gravity-managed-statusline)
-             (t (expand-file-name "emacs-bridge/statusline.js" plugin-root))))
+             (t (let ((p (expand-file-name "packages/emacs-bridge/statusline.js" plugin-root)))
+                  (if (file-exists-p p) p
+                    (expand-file-name "emacs-bridge/statusline.js" plugin-root))))))
            (mode (if (eq claude-gravity-managed-statusline 'suppress)
                      "suppress" "minimal"))
            (statusline-cmd (if (stringp claude-gravity-managed-statusline)
@@ -184,7 +230,7 @@ Returns (ENV-VARS . CLI-ARGS) where ENV-VARS are strings like
                                            (command . ,statusline-cmd)))))))
       (cons
        ;; env vars
-       (list (format "CLAUDE_GRAVITY_SOCK=%s" claude-gravity-server-sock-path)
+       (list (format "CLAUDE_GRAVITY_SOCK=%s" claude-gravity-server-hook-sock)
              (format "CLAUDE_GRAVITY_STATUSLINE_MODE=%s" mode))
        ;; cli args
        (list "--settings" settings-json)))))
@@ -205,7 +251,10 @@ Reads marketplace.json and expands each plugin source path."
                                (list "--plugin-dir" dir))))))
                      plugins))
       ;; Fallback: just emacs-bridge
-      (list "--plugin-dir" (expand-file-name "emacs-bridge" plugin-root)))))
+      (let ((dir (expand-file-name "packages/emacs-bridge" plugin-root)))
+        (unless (file-directory-p dir)
+          (setq dir (expand-file-name "emacs-bridge" plugin-root)))
+        (list "--plugin-dir" dir)))))
 
 
 (defun claude-gravity-start-session (cwd &optional model permission-mode
@@ -245,9 +294,11 @@ Returns the temp session-id (re-keyed when SessionStart hook arrives)."
                            (locate-library "claude-gravity")
                            (error "Cannot locate claude-gravity.el for --plugin-dir"))))
          (sl-parts (claude-gravity--statusline-parts plugin-root))
+         (monet-env (claude-gravity--monet-start tmux-name cwd))
          (cmd-parts `("env"
                       ,(format "CLAUDE_GRAVITY_TEMP_ID=%s" temp-id)
                       ,@(car sl-parts)
+                      ,@monet-env
                       "claude" ,@(claude-gravity--plugin-dirs plugin-root))))
     (when model
       (setq cmd-parts (append cmd-parts (list "--model" model))))
@@ -319,9 +370,11 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
                            (locate-library "claude-gravity")
                            (error "Cannot locate claude-gravity.el for --plugin-dir"))))
          (sl-parts (claude-gravity--statusline-parts plugin-root))
+         (monet-env (claude-gravity--monet-start tmux-name cwd))
          (cmd-parts `("env"
                       ,(format "CLAUDE_GRAVITY_TEMP_ID=%s" temp-id)
                       ,@(car sl-parts)
+                      ,@monet-env
                       "claude" "--resume" ,session-id
                       ,@(claude-gravity--plugin-dirs plugin-root))))
     (when model
@@ -741,7 +794,7 @@ within `claude-gravity--tmux-stop-timeout' seconds, force-kills it."
 
 (defun claude-gravity--tmux-finalize-stop (sid tmux-name)
   "Clean up state after tmux session TMUX-NAME for SID has stopped."
-  (ignore tmux-name)
+  (claude-gravity--monet-stop tmux-name)
   (remhash sid claude-gravity--tmux-sessions)
   (let ((session (claude-gravity--get-session sid)))
     (when session
@@ -774,6 +827,8 @@ Uses a single `tmux list-sessions' call instead of N `has-session' calls."
                           (push sid dead)))
                       claude-gravity--tmux-sessions)
              (dolist (sid dead)
+               (let ((tmux-name (gethash sid claude-gravity--tmux-sessions)))
+                 (when tmux-name (claude-gravity--monet-stop tmux-name)))
                (remhash sid claude-gravity--tmux-sessions)
                (let ((session (claude-gravity--get-session sid)))
                  (when (and session (eq (plist-get session :status) 'active))
@@ -800,7 +855,12 @@ Uses a single `tmux list-sessions' call instead of N `has-session' calls."
                (call-process "tmux" nil nil nil "kill-session" "-t" tmux-name)))
            claude-gravity--tmux-sessions)
   (clrhash claude-gravity--tmux-sessions)
-  (clrhash claude-gravity--tmux-pending))
+  (clrhash claude-gravity--tmux-pending)
+  ;; Stop all Monet IDE servers
+  (maphash (lambda (key _val)
+             (ignore-errors (claude-gravity--monet-stop key)))
+           claude-gravity--monet-sessions)
+  (clrhash claude-gravity--monet-sessions))
 
 
 (add-hook 'kill-emacs-hook #'claude-gravity--tmux-cleanup-all)
@@ -1107,12 +1167,16 @@ Optional MODEL, PERMISSION-MODE, MAX-BUDGET, MAX-TURNS configure the session."
                            (locate-library "claude-gravity")
                            (error "Cannot locate claude-gravity.el for --plugin-dir"))))
          (sl-parts (claude-gravity--statusline-parts plugin-root))
+         ;; For worktree, tmux-name is unknown; use temp-id as tracking key.
+         ;; Rekeyed to real tmux-name in SessionStart handler.
+         (monet-env (claude-gravity--monet-start temp-id cwd))
          (cmd-args (append (claude-gravity--plugin-dirs plugin-root)
                            (list "--tmux" "-w" branch)))
          (process-environment
           (append (list (format "CLAUDE_GRAVITY_TEMP_ID=%s" temp-id))
                   (when (car sl-parts)
                     (car sl-parts))
+                  monet-env
                   process-environment)))
     (when model
       (setq cmd-args (append cmd-args (list "--model" model))))
