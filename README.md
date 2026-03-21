@@ -6,8 +6,6 @@ emacs-gravity gives you a magit-style working memory interface for Claude Code. 
 
 Claude Code's TUI is hidden by default. You see the conversation as data, not as a chat log.
 
-<!-- screenshot: hero.png — overview buffer with a couple of sessions expanded -->
-
 ## Why emacs-gravity?
 
 **You already live in Emacs.** Claude Code is powerful, but its terminal UI is a firehose — scrolling text, interleaved tool calls, agent output mixed with thinking. emacs-gravity restructures all of that into something you can actually navigate.
@@ -16,12 +14,117 @@ Claude Code's TUI is hidden by default. You see the conversation as data, not as
 - **Structured session transcripts** — Every tool call, agent dispatch, thinking block, and assistant message organized into turns. Expand what matters, collapse the rest.
 - **Deep agent visibility** — Subagents render as nested trees. See their tool calls, thinking, and results. Inspect transcripts with a keystroke.
 - **Multi-session message center** — Track multiple Claude sessions simultaneously, grouped by project. Switch between them like buffers.
-- **Inline diffs** — File edits shown as unified diffs directly in the session buffer. No context switching.
-- **Capabilities browser** — Skills, agents, commands, and MCP servers from all plugins rendered in a navigatable tree.
-- **Plan review with feedback** — When Claude proposes a plan, review it in a dedicated buffer. Add inline comments (wave-underline overlays), edit the text, write `@claude:` markers. Approve sends clean; any feedback auto-converts to a structured deny with your annotations, diffs, and comments bundled.
-- **Permission management** — Generate allow-patterns from tool signatures, copy to clipboard, or write directly to `settings.local.json`.
+- **Plan review with feedback** — Review Claude's plans in a dedicated buffer. Add inline comments, edit the text, write `@claude:` markers. Smart approve: clean plans pass through, annotated plans auto-deny with structured feedback.
 - **Runs anywhere Emacs runs** — Terminal, TTY, SSH, tmux. No Electron, no browser, no GUI required.
-- **Turn-based YOLO mode** - go YOLO just for one turn when you know what to expect. Useful in planning mode.
+- **Turn-based YOLO mode** — Go YOLO for just one turn when you know what to expect. Useful in planning mode.
+
+## Architecture
+
+emacs-gravity is a **server-driven, multi-client system**. A long-running TypeScript backend owns all session state and broadcasts semantic patches to any number of connected terminal clients over a typed protocol.
+
+```
+Claude Code (11 hook events)
+    |
+emacs-bridge (Node.js one-shot shim)
+    | hook socket
+gravity-server (TypeScript, long-running backend)
+    |-- enrichment, state management, inbox
+    | semantic patches over terminal socket
+Terminal clients
+    |-- Emacs client (16 modules, ~12.5k lines) -- magit-section UI
+    '-- macOS menu bar (gravity-menubar, Swift) -- status dots + dropdown
+```
+
+**How it works:** Claude Code fires hook events (PreToolUse, PostToolUse, Stop, SubagentStart, etc.) which the bridge shim forwards to gravity-server. The server enriches events (transcript parsing, agent attribution), manages session state (turn tree, tool/agent indexes, inbox), and emits **semantic patches** — typed operations like `add_tool`, `complete_agent`, `set_plan` — to all connected terminals.
+
+Terminals maintain a read-replica of the session state. Any client that speaks the protocol can render the full gravity UI — Emacs, a native app, or a future web dashboard.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
+
+### Monorepo Structure
+
+```
+packages/
+  shared/          -- Shared types (Session, Patch, protocol messages)
+  emacs-bridge/    -- Claude Code plugin (one-shot hook forwarder)
+  gravity-server/  -- Stateful backend (state, enrichment, terminal protocol)
+  gravity-menubar/ -- macOS menu bar app (Swift, standalone)
+```
+
+## Terminal Clients
+
+gravity-server supports multiple simultaneous terminals. Currently two production clients ship with the project.
+
+### Emacs Client
+
+The full interactive UI. 16 Emacs Lisp modules (~12.5k lines) built on magit-section, providing:
+
+- **Session overview** — All active sessions grouped by project with status indicators (idle/responding/ended)
+- **Session detail** — Turn-based conversation view with collapsible response steps, inline diffs, agent trees
+- **Plan review** — Dedicated buffer with inline comments, `@claude:` markers, diff view, smart approve/deny with structured feedback
+- **Permission management** — Review permission requests, generate allow-patterns, write to `settings.local.json`
+- **Capabilities browser** — All plugins, skills, agents, commands, and MCP servers in a navigatable tree
+- **Tmux integration** — Launch and manage Claude Code sessions in tmux from Emacs; external tmux sessions integrate via hooks
+- **Inbox** — Centralized queue of pending approvals, plan reviews, and questions across all sessions
+
+### macOS Menu Bar
+
+`gravity-menubar` is a lightweight Swift app that connects to gravity-server alongside Emacs. It provides at-a-glance session status without switching to your terminal.
+
+- **Status dots** — One colored circle per active session: green (idle), yellow (responding), orange (needs attention)
+- **Session dropdown** — Sessions grouped by project with status labels ("idle 3m", "responding", "ended") and pending inbox items
+- **Health monitoring** — 10-second heartbeat with 30-second timeout detection, auto-reconnect on disconnect
+- **Icon state machine** — Menu bar icon reflects aggregate state: disconnected, attention (inbox items waiting), responding, neutral
+
+The menu bar is read-only — it observes session state but doesn't send actions back to the server. Think of it as a dashboard you glance at while working in another app.
+
+Build and run: `cd packages/gravity-menubar && swift build && swift run`
+
+Requires macOS 13+ and Swift 5.9+.
+
+## Key Features
+
+### Inbox
+See all pending approvals, plan reviews and other actions in the inbox. React when you want on what you want.
+
+![Inbox](<Screenshot 2026-02-18 at 15.36.30.png>)
+
+### Overview Buffer
+All active sessions at a glance, grouped by project. Status indicators show idle/responding/ended. Session counts, tool counts, elapsed time.
+
+![Overview](<Screenshot 2026-02-21 at 23.40.45.png>)
+
+### Session Detail
+Turn-based conversation view. Each user prompt starts a turn; tools are grouped into response steps with collapsible headings. Assistant thinking (purple) and text (orange) rendered with margin indicators.
+
+![Session Detail](<Screenshot 2026-02-20 at 13.35.56.png>)
+
+### Plan Review
+Dedicated buffer for reviewing Claude's plans. Add inline comments with `c` (orange wave-underline overlays). Edit the plan text directly. View diffs with `C-c C-d`. Smart approve: clean plans pass through, annotated plans auto-deny with structured feedback.
+
+![Plan Review](<Screenshot 2026-02-22 at 0.30.47.png>)
+
+### Agent Tracking
+Subagents render as nested trees inside the turn that spawned them. See each agent's tool calls, thinking, and completion text. Running agents highlighted with gold background. Completed agents show duration and summary.
+
+### Inline and Expanded Diffs
+File edits displayed as unified diffs directly in the session buffer, alongside the tool that made them. Read, Edit, and Write operations tracked per file with aggregated diffs available via SPC.
+
+![Diffs](<Screenshot 2026-02-22 at 0.22.44.png>) ![Expanded Diff](<Screenshot 2026-02-22 at 0.22.50.png>)
+
+### Permission Management
+When Claude requests permissions, review in a dedicated buffer. Generate allow-patterns from tool signatures with `A` (copy) or `a` (write to settings). Pattern suggestions based on tool name and arguments.
+
+### File & Task Tracking
+Files section shows all read/edit/write operations with per-file aggregation. Tasks section tracks TaskCreate/TaskUpdate lifecycle with status indicators ([x] done, [/] in progress, [ ] pending).
+
+### Capabilities Browser
+All plugins, skills, agents, commands, and MCP servers rendered in a collapsible tree. See what's available across global, project, and plugin scopes. Navigate to source files with RET.
+
+![Capabilities](<Screenshot 2026-02-17 at 10.29.53.png>)
+
+### Tmux Integration
+Launch and manage Claude Code sessions in tmux directly from Emacs. Compose prompts in a dedicated buffer, send via `C-c C-c`. Heartbeat monitoring detects dead sessions. External sessions running inside tmux are fully integrated via hooks.
 
 ## How it compares
 
@@ -31,6 +134,7 @@ Claude Code's TUI is hidden by default. You see the conversation as data, not as
 | **Plan review**      | View + comment          | —                       | View + comment + diff + structured feedback|
 | **Agent visibility** | Flat list               | Minimal                 | Full nested tree with transcript access    |
 | **Multi-session**    | No                      | No                      | Yes — per-project grouping                 |
+| **Multi-client**     | No                      | No                      | Yes — Emacs + menu bar (same server)       |
 | **Capabilities**     | Hidden                  | Hidden                  | Browsable tree (plugins, skills, MCP)      |
 | **Permission mgmt**  | —                       | —                       | Pattern generation + settings integration  |
 | **Inline diffs**     | No                      | In editor               | In session buffer alongside tool context   |
@@ -38,87 +142,10 @@ Claude Code's TUI is hidden by default. You see the conversation as data, not as
 | **Runs in**          | Chrome / Electron       | Electron                | Terminal / TTY / SSH                        |
 | **Open source**      | No                      | No                      | Yes                                        |
 
-**Philosophy:** emacs-gravity is text-based, keyboard-driven, and fully extensible. It treats the AI conversation as structured data, not a chat window. You own your tools — every face, keybinding, and rendering function is yours to customize.
-
-## Key Features
-
-### Inbox 
-See all pending approvals, plan reviews and other actions in the inbox. React when you want on what you want. 
-
-![alt text](<Screenshot 2026-02-18 at 15.36.30.png>)
-
-### Overview Buffer
-All active sessions at a glance, grouped by project. Status indicators show idle/responding/ended. Session counts, tool counts, elapsed time.
-
-![alt text](<Screenshot 2026-02-21 at 23.40.45.png>)
-
-### Session Detail
-Turn-based conversation view. Each user prompt starts a turn; tools are grouped into response steps with collapsible headings. Assistant thinking (purple) and text (orange) rendered with margin indicators.
-
-![alt text](<Screenshot 2026-02-20 at 13.35.56.png>)
-
-### Plan Review
-Dedicated buffer for reviewing Claude's plans. Add inline comments with `c` (orange wave-underline overlays). Edit the plan text directly. View diffs with `C-c C-d`. Smart approve: clean plans pass through, annotated plans auto-deny with structured feedback.
-
-![alt text](<Screenshot 2026-02-22 at 0.30.47.png>)
-
-### Agent Tracking
-Subagents render as nested trees inside the turn that spawned them. See each agent's tool calls, thinking, and completion text. Running agents highlighted with gold background. Completed agents show duration and summary.
-
-### Inline and expanded Diffs
-File edits displayed as unified diffs directly in the session buffer, alongside the tool that made them. Read, Edit, and Write operations tracked per file with aggregated diffs available via SPC.
-
-
-![alt text](<Screenshot 2026-02-22 at 0.22.44.png>) ![alt text](<Screenshot 2026-02-22 at 0.22.50.png>)
-
-### Permission Management
-When Claude requests permissions, review in a dedicated buffer. Generate allow-patterns from tool signatures with `A` (copy) or `a` (write to settings). Pattern suggestions based on tool name and arguments.
-
-<!-- screenshot: permissions.png -->
-
-
-### File & Task Tracking
-Files section shows all read/edit/write operations with per-file aggregation. Tasks section tracks TaskCreate/TaskUpdate lifecycle with status indicators ([x] done, [/] in progress, [ ] pending).
-
-### Capabilities Browser
-All plugins, skills, agents, commands, and MCP servers rendered in a collapsible tree. See what's available across global, project, and plugin scopes. Navigate to source files with RET.
-
-![alt text](<Screenshot 2026-02-17 at 10.29.53.png>)
-
-### Tmux Integration
-Launch and manage Claude Code sessions in tmux directly from Emacs. Compose prompts in a dedicated buffer, send via `C-c C-c`. Heartbeat monitoring detects dead sessions.
-
-Sessions started outside of emacs are integrated as well via hooks (but no prompting). External sessions running inside tmux are fully integrated.
-
-### macOS Menu Bar
-
-`gravity-menubar` is a lightweight Swift menu bar app that connects to gravity-server alongside Emacs. It shows one colored dot per active session — green for idle, yellow for responding, orange for waiting on user action. Click to see a dropdown with sessions grouped by project and pending inbox items.
-
-Build and run: `cd packages/gravity-menubar && swift build && swift run`
-
-## Architecture
-
-```
-Claude Code (11 hook events)
-    ↓
-emacs-bridge (Node.js one-shot shim)
-    ↓ hook socket
-gravity-server (TypeScript, long-running backend)
-    ├── enrichment, state management, inbox
-    ↓ semantic patches over terminal socket
-Terminal clients
-    ├── Emacs client (claude-gravity-client.el — 15 modules, ~11k lines) → magit-section UI
-    └── macOS menu bar (gravity-menubar, Swift) → status dots + dropdown
-```
-
-Server-driven: Claude Code fires hooks → bridge forwards to gravity-server → server manages state and emits semantic patches → terminal clients apply patches and render. Emacs provides the full interactive UI (session detail, plan review, permissions). The macOS menu bar provides at-a-glance status. Bidirectional flows (PermissionRequest, plan review) route through the server's inbox.
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
-
 ## Getting Started
 
 ### Prerequisites
-- Emacs 29.1+ with `magit-section` (≥ 3.0) and `transient` (≥ 0.3)
+- Emacs 27.1+ with `magit-section` (>= 3.0) and `transient` (>= 0.3)
 - Node.js 18+ and npm
 - Claude Code CLI installed
 
@@ -131,7 +158,7 @@ npm install
 
 ### 2. Register the Claude Code plugin
 
-The bridge is a Claude Code plugin that hooks into lifecycle events. You need to register it via a marketplace file.
+The bridge is a Claude Code plugin that hooks into lifecycle events. Register it via a marketplace file.
 
 Create or edit `~/.claude/plugins/marketplace.json`:
 
@@ -176,6 +203,33 @@ TAB                          — expand/collapse sections
 RET                          — visit session or file
 ?                            — transient menu (all commands)
 ```
+
+## Emacs Modules
+
+The Emacs package is split into 16 modular files with a thin loader:
+
+| Module | Purpose |
+|--------|---------|
+| `claude-gravity.el` | Thin loader — requires all modules |
+| `claude-gravity-core.el` | Utilities, logging, custom variables, tlist |
+| `claude-gravity-faces.el` | 37 faces and fringe bitmaps |
+| `claude-gravity-session.el` | Session state CRUD |
+| `claude-gravity-discovery.el` | Plugin/skill/agent/MCP capability discovery |
+| `claude-gravity-state.el` | Model API, mutation functions (read-replica) |
+| `claude-gravity-events.el` | Event dispatcher (11 hook types) |
+| `claude-gravity-text.el` | Text rendering: dividers, markdown, wrapping |
+| `claude-gravity-diff.el` | Inline diffs, tool/plan display |
+| `claude-gravity-render.el` | UI section rendering (turns, tools, agents, tasks) |
+| `claude-gravity-ui.el` | Overview/session buffers, keymaps, transient menu |
+| `claude-gravity-plan-review.el` | Plan review buffer, comment overlays, feedback flow |
+| `claude-gravity-client.el` | Terminal socket client to gravity-server |
+| `claude-gravity-actions.el` | Permission/question action buffers, inbox handling |
+| `claude-gravity-tmux.el` | Tmux session management, compose buffer |
+| `claude-gravity-debug.el` | Terminal protocol debug viewer |
+
+**Load order:** `core -> {faces, session, discovery} -> state -> events -> {text, diff} -> render -> ui -> plan-review -> client -> {actions, tmux}`
+
+Each module has no circular dependencies, making isolated testing and customization straightforward. Every face, keybinding, and rendering function is yours to override.
 
 ## Documentation
 
