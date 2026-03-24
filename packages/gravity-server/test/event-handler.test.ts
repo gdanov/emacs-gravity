@@ -1249,6 +1249,14 @@ describe("Event Handler", () => {
       fire(deps, "SubagentStart", "s1", { agent_id: "a1", agent_type: "X" } as HookData);
       expect(deps.store.get("s1")!.status).toBe("active");
     });
+
+    it("does not self-heal on Notification", () => {
+      startSession(deps);
+      fire(deps, "SessionEnd", "s1");
+      expect(deps.store.get("s1")!.status).toBe("ended");
+      fire(deps, "Notification", "s1");
+      expect(deps.store.get("s1")!.status).toBe("ended");
+    });
   });
 
   // ────────────────────────────────────────────────────────────────────

@@ -132,7 +132,8 @@ export function handleEvent(
   const existing = store.get(sessionId);
   if (existing) {
     // Self-heal: if session is ended but we're receiving events, it's alive
-    if (existing.status === "ended" && eventName !== "SessionEnd") {
+    // Exclude Notification — informational pings that Claude Code sends regardless of session state
+    if (existing.status === "ended" && eventName !== "SessionEnd" && eventName !== "Notification") {
       existing.status = "active";
       patches.push({ op: "set_status", status: "active" });
       log(`Session ${sessionId} self-healed to active on ${eventName}`, "info");
