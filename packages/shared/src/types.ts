@@ -301,7 +301,8 @@ export type TerminalMessage =
   | { type: "action.turn-auto-approve"; sessionId: string }
   | { type: "request.session"; sessionId: string }
   | { type: "request.overview" }
-  | { type: "request.resync" };
+  | { type: "request.resync" }
+  | { type: "hint.session-dead"; sessionId: string };
 
 export interface ProjectSummary {
   project: string;

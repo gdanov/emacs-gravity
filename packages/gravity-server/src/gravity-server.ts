@@ -16,6 +16,7 @@ import { InboxManager } from "./state/inbox.js";
 import { TerminalServer } from "./protocol/terminal-server.js";
 import { parseTerminalMessage } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
+import { sessionEnd } from "./state/session.js";
 import { log } from "./util/log.js";
 
 // ── Configuration ────────────────────────────────────────────────────
@@ -396,6 +397,35 @@ function handleTerminalMessage(
 
     case "action.turn-auto-approve": {
       // TODO: implement turn-scoped auto-approve
+      break;
+    }
+
+    case "hint.session-dead": {
+      const { sessionId } = msg;
+      const session = store.get(sessionId);
+      if (session && session.status === "active") {
+        log(`Terminal hint: session ${sessionId} is dead — marking ended`, "info");
+        const patches = sessionEnd(session);
+        if (patches.length > 0) {
+          terminals.broadcast({ type: "session.update", sessionId, patches });
+        }
+        // Schedule purge (same as SessionEnd hook flow)
+        store.schedulePurge(sessionId, 2 * 60 * 1000, () => {
+          store.delete(sessionId);
+          inbox.removeForSession(sessionId);
+          terminals.broadcast({ type: "session.removed", sessionId });
+          terminals.unsubscribeAll(sessionId);
+          terminals.broadcast({
+            type: "overview.snapshot",
+            projects: store.getProjectSummaries(),
+          });
+          log(`Purged ended session ${sessionId}`, "info");
+        });
+        terminals.broadcast({
+          type: "overview.snapshot",
+          projects: store.getProjectSummaries(),
+        });
+      }
       break;
     }
   }

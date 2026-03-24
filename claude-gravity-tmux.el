@@ -809,7 +809,8 @@ within `claude-gravity--tmux-stop-timeout' seconds, force-kills it."
 
 (defun claude-gravity--tmux-heartbeat ()
   "Check all tmux sessions for liveness asynchronously.
-Uses a single `tmux list-sessions' call instead of N `has-session' calls."
+Uses a single `tmux list-sessions' call instead of N `has-session' calls.
+Sends hint.session-dead to gravity-server instead of mutating local state."
   (when (> (hash-table-count claude-gravity--tmux-sessions) 0)
     (let ((buf (generate-new-buffer " *tmux-heartbeat*")))
       (set-process-sentinel
@@ -817,24 +818,24 @@ Uses a single `tmux list-sessions' call instead of N `has-session' calls."
                       "-F" "#{session_name}")
        (lambda (proc _event)
          (when (memq (process-status proc) '(exit signal))
-           (let ((alive-names
-                  (when (= (process-exit-status proc) 0)
+           ;; Only act on successful tmux output; non-zero exit (tmux not
+           ;; running, server hiccup) means we have no data — skip entirely.
+           (when (= (process-exit-status proc) 0)
+             (let ((alive-names
                     (with-current-buffer (process-buffer proc)
-                      (split-string (buffer-string) "\n" t))))
-                 (dead nil))
-             (maphash (lambda (sid tmux-name)
-                        (unless (member tmux-name alive-names)
-                          (push sid dead)))
-                      claude-gravity--tmux-sessions)
-             (dolist (sid dead)
-               (let ((tmux-name (gethash sid claude-gravity--tmux-sessions)))
-                 (when tmux-name (claude-gravity--monet-stop tmux-name)))
-               (remhash sid claude-gravity--tmux-sessions)
-               (let ((session (claude-gravity--get-session sid)))
-                 (when (and session (eq (plist-get session :status) 'active))
-                   (claude-gravity-model-session-end session)
-                   (claude-gravity--schedule-refresh)
-                   (claude-gravity--schedule-session-refresh sid)))))
+                      (split-string (buffer-string) "\n" t)))
+                   (dead nil))
+               (maphash (lambda (sid tmux-name)
+                          (unless (member tmux-name alive-names)
+                            (push sid dead)))
+                        claude-gravity--tmux-sessions)
+               (dolist (sid dead)
+                 (let ((tmux-name (gethash sid claude-gravity--tmux-sessions)))
+                   (when tmux-name (claude-gravity--monet-stop tmux-name)))
+                 (remhash sid claude-gravity--tmux-sessions)
+                 ;; Tell the server — it owns session state
+                 (claude-gravity--send-to-server
+                  `((type . "hint.session-dead") (sessionId . ,sid))))))
            (kill-buffer (process-buffer proc))))))))
 
 

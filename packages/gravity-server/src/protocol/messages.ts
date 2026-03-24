@@ -10,6 +10,7 @@ const VALID_TERMINAL_MESSAGE_TYPES = new Set([
   "request.session",
   "request.overview",
   "request.resync",
+  "hint.session-dead",
 ]);
 
 /** Parse a raw JSON line into a TerminalMessage. Returns null on invalid input. */

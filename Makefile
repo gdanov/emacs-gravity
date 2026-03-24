@@ -34,8 +34,12 @@ sync-cache: build-server
 	@echo "Syncing to plugin cache..."
 	rsync -a --delete packages/emacs-bridge/src/ $(PLUGIN_CACHE)/src/
 	rsync -a packages/emacs-bridge/hooks/ $(PLUGIN_CACHE)/hooks/
+	rsync -a --delete packages/shared/ $(PLUGIN_CACHE)/shared/
 	cp packages/emacs-bridge/package.json $(PLUGIN_CACHE)/package.json
 	cp packages/gravity-server/dist/gravity-server.mjs $(PLUGIN_CACHE)/dist/
+	@# Rewrite @gravity/shared workspace ref to local path for standalone install
+	sed -i '' 's|"@gravity/shared": "\*"|"@gravity/shared": "file:./shared"|' $(PLUGIN_CACHE)/package.json
+	cd $(PLUGIN_CACHE) && npm install
 	@echo "Cache synced."
 
 menubar:

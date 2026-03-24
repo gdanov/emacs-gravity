@@ -89,7 +89,7 @@ Returns nil if neither is available."
                        branch)))
         (propertize (format "(%s)" display) 'face 'claude-gravity-branch)))
      ((and cwd (not (string-empty-p cwd)))
-      (propertize (format "(%s)" (abbreviate-file-name cwd))
+      (propertize (format "(%s)" (file-name-nondirectory (directory-file-name cwd)))
                   'face 'claude-gravity-branch))
      (t nil))))
 
@@ -946,6 +946,8 @@ Only shows permission, question, and plan-review items (not idle)."
 
 (define-key claude-gravity-mode-map (kbd "w") 'claude-gravity-copy-section)
 
+(define-key claude-gravity-mode-map (kbd ",") 'claude-gravity-rename-session)
+
 ;; Inbox navigation prefix map
 (defvar claude-gravity-inbox-map (make-sparse-keymap)
   "Keymap for inbox navigation commands under the `i' prefix.")
@@ -1493,40 +1495,32 @@ Uses `ps' on macOS where `signal-process' returns t for zombie PIDs."
 
 
 (defun claude-gravity-detect-dead-sessions ()
-  "Detect and mark dead sessions as ended.
-Checks PID liveness when available, falls back to last-event-time staleness."
+  "Detect dead sessions and send hints to the server.
+Checks PID liveness when available, falls back to last-event-time staleness.
+The server owns session state — we send hint.session-dead instead of
+mutating locally."
   (interactive)
-  (let ((count 0)
-        (dead-ids nil))
+  (let ((count 0))
     (maphash
      (lambda (id session)
        (when (eq (plist-get session :status) 'active)
          (let ((pid (plist-get session :pid))
                (last-event (plist-get session :last-event-time)))
-           (cond
-            ;; PID known: check if process is alive
-            ((and pid (numberp pid) (> pid 0))
-             (unless (claude-gravity--process-alive-p pid)
-               (plist-put session :status 'ended)
-               (push id dead-ids)
-               (cl-incf count)))
-            ;; No PID, has last-event: use staleness (>5 min since last event)
-            ((and last-event
-                  (> (float-time (time-subtract (current-time) last-event)) 300))
-             (plist-put session :status 'ended)
-             (push id dead-ids)
-             (cl-incf count))
-            ;; No PID, no last-event: legacy session with no way to verify
-            ((null last-event)
-             (plist-put session :status 'ended)
-             (push id dead-ids)
-             (cl-incf count))))))
+           (when (cond
+                  ;; PID known: check if process is alive
+                  ((and pid (numberp pid) (> pid 0))
+                   (not (claude-gravity--process-alive-p pid)))
+                  ;; No PID, has last-event: use staleness (>5 min since last event)
+                  ((and last-event
+                        (> (float-time (time-subtract (current-time) last-event)) 300))
+                   t)
+                  ;; No PID, no last-event: legacy session with no way to verify
+                  ((null last-event) t))
+             (claude-gravity--send-to-server
+              `((type . "hint.session-dead") (sessionId . ,id)))
+             (cl-incf count)))))
      claude-gravity--sessions)
-    ;; Clean up inbox items for dead sessions
-    (dolist (id dead-ids)
-      (claude-gravity--inbox-remove-for-session id))
-    (claude-gravity--log 'debug "Marked %d dead session(s) as ended" count)
-    (claude-gravity--render-overview)))
+    (claude-gravity--log 'debug "Sent %d dead-session hint(s) to server" count)))
 
 
 (defun claude-gravity-toggle-ignored-session ()
