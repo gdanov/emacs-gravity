@@ -7,7 +7,7 @@
 
 import { createServer } from "net";
 import type { Server, Socket } from "net";
-import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 
 import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
@@ -438,6 +438,26 @@ let terminalServer: Server;
 
 function start(): void {
   log("gravity-server starting...", "info");
+
+  // Guard: refuse to start if another instance is already running
+  if (existsSync(PID_FILE)) {
+    try {
+      const existingPid = parseInt(readFileSync(PID_FILE, "utf-8").trim(), 10);
+      if (existingPid > 0 && existingPid !== process.pid) {
+        try {
+          process.kill(existingPid, 0); // test if alive (throws if dead)
+          log(`Another gravity-server is running (pid=${existingPid}). Exiting.`, "warn");
+          process.exit(0);
+        } catch {
+          // Process dead — stale PID file, proceed with cleanup
+          log(`Stale PID file (pid=${existingPid} dead). Taking over.`, "info");
+        }
+      }
+    } catch {
+      // PID file unreadable/corrupt — ignore, proceed
+    }
+  }
+
   hookServer = startHookServer();
   terminalServer = startTerminalServer();
   mkdirSync(dirname(PID_FILE), { recursive: true });
