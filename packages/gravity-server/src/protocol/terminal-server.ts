@@ -5,6 +5,7 @@
 
 import type { ServerMessage, TerminalMessage } from "@gravity/shared";
 import type { Socket } from "net";
+import { log } from "../util/log.js";
 
 export interface TerminalConnection {
   socket: Socket;
@@ -26,7 +27,7 @@ export class TerminalServer {
     });
 
     socket.on("error", (err) => {
-      console.error(`Terminal connection error: ${err.message}`);
+      log(`Terminal connection error: ${err.message}`, "error");
       socket.destroy();
     });
 
@@ -42,7 +43,7 @@ export class TerminalServer {
       try {
         conn.socket.write(json);
       } catch (err) {
-        console.error(`Terminal broadcast write error: ${(err as Error).message}`);
+        log(`Terminal broadcast write error: ${(err as Error).message}`, "error");
         conn.socket.destroy();
       }
     }
@@ -57,7 +58,7 @@ export class TerminalServer {
         try {
           conn.socket.write(json);
         } catch (err) {
-          console.error(`Terminal subscriber write error: ${(err as Error).message}`);
+          log(`Terminal subscriber write error: ${(err as Error).message}`, "error");
           conn.socket.destroy();
         }
       }
@@ -70,7 +71,7 @@ export class TerminalServer {
     try {
       conn.socket.write(JSON.stringify(message) + "\n");
     } catch (err) {
-      console.error(`Terminal sendTo write error: ${(err as Error).message}`);
+      log(`Terminal sendTo write error: ${(err as Error).message}`, "error");
       conn.socket.destroy();
     }
   }

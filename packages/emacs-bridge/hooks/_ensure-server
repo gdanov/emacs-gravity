@@ -69,8 +69,14 @@ pkill -f "gravity-server\\.(mjs|ts)" 2>/dev/null || true
 # Clean up stale sockets
 rm -f "$GRAVITY_SOCK" "$HOME/.local/state/gravity-terminal.sock"
 
-# Spawn server in background
-nohup node "$SERVER_BIN" >> /tmp/gravity-server.log 2>&1 &
+# Rotate oversized log before starting fresh server
+LOG_FILE="/tmp/gravity-server.log"
+if [ -f "$LOG_FILE" ] && [ "$(wc -c < "$LOG_FILE")" -gt 2097152 ]; then
+  mv -f "$LOG_FILE" "${LOG_FILE}.1"
+fi
+
+# Spawn server in background (logging handled by server's log() function)
+nohup node "$SERVER_BIN" >/dev/null 2>&1 &
 # Write spawner PID immediately (server overwrites with its own shortly)
 echo $! > "$GRAVITY_PID_FILE"
 
