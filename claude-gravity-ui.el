@@ -184,61 +184,47 @@ Groups non-idle items by session and shows badge counts."
         (insert "\n")))))
 
 
-;;; Capabilities Section (Skills, Agents, Commands)
+;;; Configuration Section (Scope-first: Project > User > Plugins)
 
 (defun claude-gravity--insert-capability-entry (cap)
   "Insert a single capability CAP as a magit-section.
 CAP is an alist with keys: name, description, scope, file-path, type."
   (let* ((type (alist-get 'type cap))
          (name (alist-get 'name cap))
-         (scope (alist-get 'scope cap))
          (desc (alist-get 'description cap))
          (indent (claude-gravity--indent))
          (prefix (pcase type
                    ('skill "S ")
                    ('agent "A ")
                    ('command "/ ")
+                   ('rule "R ")
+                   ('hook "H ")
+                   ('instruction "C ")
+                   ('setting "G ")
                    ('mcp-server "M ")
                    (_ "  ")))
          (name-face (pcase type
-                      ('skill 'claude-gravity-tool-name)
-                      ('agent 'claude-gravity-tool-name)
-                      ('command 'claude-gravity-tool-signature)
-                      ('mcp-server 'claude-gravity-tool-signature)
-                      (_ 'default)))
-         ;; Determine scope label for agents
-         (scope-label (if (eq type 'agent)
-                          (let ((agent-type (claude-gravity--agent-scope cap)))
-                            (pcase agent-type
-                              ('built-in "(built-in)")
-                              ('plugin (format "(%s)" scope))
-                              (_ (format "(%s)" scope))))
-                        (format "(%s)" scope))))
+                      ((or 'skill 'agent 'rule 'instruction) 'claude-gravity-tool-name)
+                      (_ 'claude-gravity-tool-signature))))
     (magit-insert-section (capability-entry cap t)
       (magit-insert-heading
-        (format "%s%s%s  %s"
+        (format "%s%s%s"
                 indent
                 (propertize prefix 'face 'claude-gravity-detail-label)
-                (propertize name 'face name-face)
-                (propertize scope-label 'face 'claude-gravity-detail-label)))
-      ;; Expanded content: full frontmatter fields (untruncated)
+                (propertize name 'face name-face)))
+      ;; Expanded content
       (let ((body-indent (concat indent "    "))
             (file-path (alist-get 'file-path cap))
             (frontmatter (alist-get 'frontmatter cap))
             (shown-fields '(name description)))
-        ;; Show full description without truncation
         (when (and desc (not (string-empty-p desc)))
           (insert body-indent
-                  (propertize "Description: " 'face 'claude-gravity-detail-label)
-                  (propertize desc 'face 'default)
+                  (propertize desc 'face 'claude-gravity-detail-label)
                   "\n"))
-        ;; Show file path if it exists
         (when file-path
           (insert body-indent
-                  (propertize "File: " 'face 'claude-gravity-detail-label)
-                  (propertize file-path 'face 'default)
+                  (propertize file-path 'face 'claude-gravity-detail-label)
                   "\n"))
-        ;; Show other frontmatter fields (excluding already shown fields)
         (when frontmatter
           (dolist (field frontmatter)
             (let ((key (car field))
@@ -251,19 +237,125 @@ CAP is an alist with keys: name, description, scope, file-path, type."
                         "\n")))))))))
 
 
-(defun claude-gravity--insert-capability-category (title caps)
-  "Insert collapsible category TITLE with list of CAPS.
-Used for standalone skills/agents/commands sections."
-  (when caps
-    (let ((indent (claude-gravity--indent)))
-      (magit-insert-section (category title t)
-        (magit-insert-heading
-          (format "%s%s (%d)"
+(defun claude-gravity--insert-scope-category (title items dir-path cap-type)
+  "Insert a category TITLE within a scope, always visible.
+ITEMS is a list of capability alists (may be nil).
+DIR-PATH is the directory for this category (shown in gray, used for RET/+).
+CAP-TYPE is a symbol like \\='rule, \\='skill, etc."
+  (let ((indent (claude-gravity--indent))
+        (count (length items))
+        ;; Store metadata for RET/+ handlers
+        (section-data (list (cons 'dir-path dir-path)
+                            (cons 'cap-type cap-type))))
+    (magit-insert-section (config-category section-data (> count 0))
+      (magit-insert-heading
+        (if (> count 0)
+            (format "%s%s (%d)  %s"
+                    indent
+                    (propertize title 'face 'claude-gravity-section-heading)
+                    count
+                    (propertize (abbreviate-file-name dir-path)
+                                'face 'claude-gravity-detail-label))
+          (format "%s%s  %s"
                   indent
-                  (propertize title 'face 'claude-gravity-section-heading)
-                  (length caps)))
-        (dolist (cap caps)
-          (claude-gravity--insert-capability-entry cap))))))
+                  (propertize title 'face 'claude-gravity-detail-label)
+                  (propertize (abbreviate-file-name dir-path)
+                              'face 'claude-gravity-detail-label))))
+      (dolist (cap items)
+        (claude-gravity--insert-capability-entry cap)))))
+
+
+(defun claude-gravity--insert-scope-leaf (label file-paths)
+  "Insert a leaf config item (single files, not directories).
+LABEL is the display name.  FILE-PATHS is a list of (path . exists-p) pairs."
+  (let ((indent (claude-gravity--indent)))
+    (dolist (fp file-paths)
+      (let* ((path (car fp))
+             (exists (cdr fp))
+             (section-data (list (cons 'file-path path)
+                                 (cons 'exists exists))))
+        (magit-insert-section (config-leaf section-data)
+          (magit-insert-heading
+            (format "%s%s  %s"
+                    indent
+                    (propertize label 'face
+                                (if exists 'claude-gravity-tool-name 'claude-gravity-detail-label))
+                    (propertize (abbreviate-file-name path)
+                                'face 'claude-gravity-detail-label)))
+          ;; Reset label for subsequent entries so only first shows it
+          (setq label (make-string (length label) ?\s)))))))
+
+
+(defun claude-gravity--insert-scope-section (scope-label scope-data)
+  "Insert one scope section (Project or User).
+SCOPE-LABEL is \"Project\" or \"User\".
+SCOPE-DATA is an alist with keys: rules, skills, agents, commands,
+instructions, settings, mcp-servers, hooks, base-dir."
+  (let* ((base-dir (alist-get 'base-dir scope-data))
+         (indent (claude-gravity--indent))
+         (abbrev-dir (abbreviate-file-name base-dir))
+         (priority-note (if (string= scope-label "Project") "overrides" "defaults")))
+    (magit-insert-section (config-scope scope-label)
+      (magit-insert-heading
+        (format "%s%s  %s  %s"
+                indent
+                (propertize scope-label 'face 'claude-gravity-section-heading)
+                (propertize (concat "(" abbrev-dir "/)")
+                            'face 'claude-gravity-detail-label)
+                (propertize priority-note
+                            'face 'claude-gravity-detail-label)))
+      ;; Directory-backed categories — always shown
+      (claude-gravity--insert-scope-category
+       "Rules" (alist-get 'rules scope-data)
+       (expand-file-name "rules" base-dir) 'rule)
+      (claude-gravity--insert-scope-category
+       "Skills" (alist-get 'skills scope-data)
+       (expand-file-name "skills" base-dir) 'skill)
+      (claude-gravity--insert-scope-category
+       "Agents" (alist-get 'agents scope-data)
+       (expand-file-name "agents" base-dir) 'agent)
+      (claude-gravity--insert-scope-category
+       "Commands" (alist-get 'commands scope-data)
+       (expand-file-name "commands" base-dir) 'command)
+      ;; Leaf items — instructions
+      (let* ((project-p (string= scope-label "Project"))
+             (instruction-paths
+              (if project-p
+                  ;; Project scope: CLAUDE.md at root and .claude/CLAUDE.md
+                  (let ((root-md (expand-file-name "CLAUDE.md"
+                                                   (file-name-directory
+                                                    (directory-file-name base-dir))))
+                        (claude-md (expand-file-name "CLAUDE.md" base-dir)))
+                    (list (cons root-md (file-exists-p root-md))
+                          (cons claude-md (file-exists-p claude-md))))
+                ;; User scope: ~/.claude/CLAUDE.md
+                (let ((md (expand-file-name "CLAUDE.md" base-dir)))
+                  (list (cons md (file-exists-p md)))))))
+        (claude-gravity--insert-scope-leaf "Instructions" instruction-paths))
+      ;; Leaf items — settings
+      (let* ((settings-json (expand-file-name "settings.json" base-dir))
+             (settings-local (expand-file-name "settings.local.json" base-dir)))
+        (claude-gravity--insert-scope-leaf
+         "Settings"
+         (list (cons settings-json (file-exists-p settings-json))
+               (cons settings-local (file-exists-p settings-local)))))
+      ;; Leaf items — MCP
+      (let ((mcp-file (expand-file-name ".mcp.json" base-dir)))
+        (claude-gravity--insert-scope-leaf
+         "MCP Servers"
+         (list (cons mcp-file (file-exists-p mcp-file)))))
+      ;; Hooks — count only (come from settings/plugin.json)
+      (let ((hooks (alist-get 'hooks scope-data)))
+        (when hooks
+          (let ((indent (claude-gravity--indent)))
+            (magit-insert-section (config-hooks hooks t)
+              (magit-insert-heading
+                (format "%s%s (%d)"
+                        indent
+                        (propertize "Hooks" 'face 'claude-gravity-section-heading)
+                        (length hooks)))
+              (dolist (h hooks)
+                (claude-gravity--insert-capability-entry h)))))))))
 
 
 (defun claude-gravity--insert-plugin-capabilities (plugin)
@@ -273,117 +365,104 @@ Used for standalone skills/agents/commands sections."
          (skills (alist-get 'skills plugin))
          (agents (alist-get 'agents plugin))
          (commands (alist-get 'commands plugin))
+         (rules (alist-get 'rules plugin))
+         (hooks (alist-get 'hooks plugin))
          (mcp (alist-get 'mcp-servers plugin))
          (total (alist-get 'total plugin))
          (indent (claude-gravity--indent)))
     (when (> total 0)
       (magit-insert-section (plugin-entry name t)
-        ;; Plugin header with counts
         (magit-insert-heading
           (format "%s%s  %s — %d items"
                   indent
                   (propertize name 'face 'claude-gravity-section-heading)
                   (propertize (format "(%s)" scope) 'face 'claude-gravity-detail-label)
                   total))
-        ;; Skills subsection
         (when skills
           (let ((subindent (concat indent "  ")))
             (magit-insert-section (skills "skills" t)
               (magit-insert-heading
-                (format "%sSkills (%d)"
-                        subindent
-                        (length skills)))
+                (format "%sSkills (%d)" subindent (length skills)))
               (dolist (s skills)
                 (claude-gravity--insert-capability-entry s)))))
-        ;; Agents subsection
         (when agents
           (let ((subindent (concat indent "  ")))
             (magit-insert-section (agents "agents" t)
               (magit-insert-heading
-                (format "%sAgents (%d)"
-                        subindent
-                        (length agents)))
+                (format "%sAgents (%d)" subindent (length agents)))
               (dolist (a agents)
                 (claude-gravity--insert-capability-entry a)))))
-        ;; Commands subsection
         (when commands
           (let ((subindent (concat indent "  ")))
             (magit-insert-section (commands "commands" t)
               (magit-insert-heading
-                (format "%sCommands (%d)"
-                        subindent
-                        (length commands)))
+                (format "%sCommands (%d)" subindent (length commands)))
               (dolist (c commands)
                 (claude-gravity--insert-capability-entry c)))))
-        ;; MCP servers subsection
+        (when rules
+          (let ((subindent (concat indent "  ")))
+            (magit-insert-section (rules "rules" t)
+              (magit-insert-heading
+                (format "%sRules (%d)" subindent (length rules)))
+              (dolist (r rules)
+                (claude-gravity--insert-capability-entry r)))))
+        (when hooks
+          (let ((subindent (concat indent "  ")))
+            (magit-insert-section (hooks "hooks" t)
+              (magit-insert-heading
+                (format "%sHooks (%d)" subindent (length hooks)))
+              (dolist (h hooks)
+                (claude-gravity--insert-capability-entry h)))))
         (when mcp
           (let ((subindent (concat indent "  ")))
             (magit-insert-section (mcp-section "mcp" t)
               (magit-insert-heading
-                (format "%sMCP Tools (%d)"
-                        subindent
-                        (length mcp)))
+                (format "%sMCP Tools (%d)" subindent (length mcp)))
               (dolist (m mcp)
                 (claude-gravity--insert-capability-entry m)))))))))
 
 
-(defun claude-gravity--insert-hierarchical-capabilities (project-dir)
-  "Insert hierarchical capabilities section for PROJECT-DIR.
-Shows plugins grouped in Plugins section, standalone categories as siblings."
-  (let ((grouped (or (claude-gravity--discover-project-capabilities project-dir)
-                     '((plugins . nil)
-                       (standalone-skills . nil)
-                       (standalone-agents . nil)
-                       (standalone-commands . nil)
-                       (standalone-mcp-servers . nil)))))
-    (let ((plugins (alist-get 'plugins grouped))
-          (standalone-skills (alist-get 'standalone-skills grouped))
-          (standalone-agents (alist-get 'standalone-agents grouped))
-          (standalone-commands (alist-get 'standalone-commands grouped))
-          (standalone-mcp (alist-get 'standalone-mcp-servers grouped)))
-      (when (or plugins standalone-skills standalone-agents standalone-commands standalone-mcp)
-        (let ((indent (claude-gravity--indent))
-              (total (claude-gravity--capabilities-total-count grouped)))
-          (magit-insert-section (capabilities project-dir t)
-            (magit-insert-heading
-              (format "%s%s"
-                      indent
-                      (propertize (format "Capabilities (%d total)" total)
-                                  'face 'claude-gravity-section-heading)))
-            ;; Plugins section (same visual style as standalone categories)
-            (when plugins
-              (let ((indent (claude-gravity--indent)))
-                (magit-insert-section (category "Plugins" t)
-                  (magit-insert-heading
-                    (format "%s%s (%d)"
-                            indent
-                            (propertize "Plugins" 'face 'claude-gravity-section-heading)
-                            (length plugins)))
-                  (dolist (plugin plugins)
-                    (claude-gravity--insert-plugin-capabilities plugin)))))
-            ;; Standalone sections
-            (when standalone-skills
-              (claude-gravity--insert-capability-category
-               "Standalone Skills"
-               standalone-skills))
-            (when standalone-agents
-              (claude-gravity--insert-capability-category
-               "Standalone Agents"
-               standalone-agents))
-            (when standalone-commands
-              (claude-gravity--insert-capability-category
-               "Standalone Commands"
-               standalone-commands))
-            (when standalone-mcp
-              (claude-gravity--insert-capability-category
-               "MCP Servers"
-               standalone-mcp))))))))
+(defun claude-gravity--insert-configuration-section (project-dir)
+  "Insert scope-first Configuration section for PROJECT-DIR.
+Shows Project scope, User scope, then Plugins."
+  (let ((scoped (claude-gravity--discover-project-capabilities-by-scope project-dir)))
+    (let ((project-data (alist-get 'project scoped))
+          (user-data (alist-get 'user scoped))
+          (plugins (alist-get 'plugins scoped))
+          (indent (claude-gravity--indent)))
+      (magit-insert-section (configuration project-dir)
+        (magit-insert-heading
+          (format "%s%s"
+                  indent
+                  (propertize "Configuration"
+                              'face 'claude-gravity-section-heading)))
+        ;; Project scope (highest priority)
+        (claude-gravity--insert-scope-section "Project" project-data)
+        ;; User scope (global defaults)
+        (claude-gravity--insert-scope-section "User" user-data)
+        ;; Plugins (read-only)
+        (when plugins
+          (let ((indent (claude-gravity--indent)))
+            (magit-insert-section (config-plugins "Plugins" t)
+              (magit-insert-heading
+                (format "%s%s (%d)  %s"
+                        indent
+                        (propertize "Plugins" 'face 'claude-gravity-section-heading)
+                        (length plugins)
+                        (propertize "read-only" 'face 'claude-gravity-detail-label)))
+              (dolist (plugin plugins)
+                (claude-gravity--insert-plugin-capabilities plugin)))))))))
 
+
+;; Backward compat aliases
+(defun claude-gravity--insert-hierarchical-capabilities (project-dir)
+  "Insert Configuration section for PROJECT-DIR.
+Replaced by scope-first layout."
+  (claude-gravity--insert-configuration-section project-dir))
 
 (defun claude-gravity--insert-project-capabilities (project-dir)
-  "Deprecated: use claude-gravity--insert-hierarchical-capabilities instead.
-Maintained for backward compatibility."
-  (claude-gravity--insert-hierarchical-capabilities project-dir))
+  "Deprecated alias for `claude-gravity--insert-configuration-section'."
+  (claude-gravity--insert-configuration-section project-dir))
 
 
 (defun claude-gravity--render-overview ()
@@ -920,6 +999,8 @@ Only shows permission, question, and plan-review items (not idle)."
       (when section
         (claude-gravity-visit-or-toggle)))))
 
+(define-key claude-gravity-mode-map (kbd "+") 'claude-gravity-config-new)
+
 (define-key claude-gravity-mode-map (kbd "D") 'claude-gravity-cleanup-sessions)
 
 (define-key claude-gravity-mode-map (kbd "R") 'claude-gravity-reset-status)
@@ -1162,7 +1243,8 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
 
 (defun claude-gravity-visit-or-toggle ()
   "If on a session entry, open it.  On an inbox item, act on it.
-On an agent, parse transcript.  Otherwise toggle."
+On an agent, parse transcript.  On a config item, visit file.
+Otherwise toggle."
   (interactive)
   (let ((section (magit-current-section)))
     (cond
@@ -1181,21 +1263,117 @@ On an agent, parse transcript.  Otherwise toggle."
            (let ((val (oref section value)))
              (and val (listp val) (alist-get 'agent_id val))))
       (claude-gravity-view-agent-transcript))
+     ;; Config: capability-entry → open file
+     ((and section (eq (oref section type) 'capability-entry))
+      (let ((file-path (alist-get 'file-path (oref section value))))
+        (if (and file-path (file-exists-p file-path))
+            (find-file file-path)
+          (magit-section-toggle section))))
+     ;; Config: empty category → dired on directory
+     ((and section (eq (oref section type) 'config-category))
+      (let ((dir-path (alist-get 'dir-path (oref section value))))
+        (when dir-path
+          (unless (file-directory-p dir-path)
+            (make-directory dir-path t))
+          (dired dir-path))))
+     ;; Config: leaf file → open or create
+     ((and section (eq (oref section type) 'config-leaf))
+      (let* ((data (oref section value))
+             (file-path (alist-get 'file-path data)))
+        (when file-path
+          (unless (file-exists-p file-path)
+            ;; Create parent directory
+            (make-directory (file-name-directory file-path) t)
+            ;; Write template based on extension
+            (with-temp-file file-path
+              (insert (claude-gravity--config-leaf-template file-path))))
+          (find-file file-path))))
      (t (magit-section-toggle section)))))
 
 
+(defun claude-gravity--config-leaf-template (file-path)
+  "Return a template string for a new config leaf FILE-PATH."
+  (let ((name (file-name-nondirectory file-path)))
+    (cond
+     ((string= name "CLAUDE.md") "# Project Instructions\n\n")
+     ((string-suffix-p ".mcp.json" name) "{\n  \"mcpServers\": {}\n}\n")
+     ((string= name "settings.json") "{\n}\n")
+     ((string= name "settings.local.json") "{\n}\n")
+     (t ""))))
+
+
+(defun claude-gravity--config-skeleton (cap-type name)
+  "Return skeleton content for a new config item of CAP-TYPE named NAME."
+  (pcase cap-type
+    ('rule (format "---\ndescription: \n---\n\n# %s\n\n" name))
+    ('skill (format "---\nname: %s\ndescription: \n---\n\n" name))
+    ('agent (format "---\nname: %s\ndescription: \nmodel: sonnet\n---\n\n" name))
+    ('command (format "---\ndescription: \n---\n\n$ARGUMENTS\n\n" ))
+    (_ "")))
+
+
+(defun claude-gravity--config-target-path (cap-type dir-path name)
+  "Compute file path for a new config item.
+CAP-TYPE is \\='rule, \\='skill, \\='agent, or \\='command.
+DIR-PATH is the category directory.  NAME is the item name."
+  (pcase cap-type
+    ('skill (expand-file-name "SKILL.md"
+                              (expand-file-name name dir-path)))
+    (_ (let ((base (if (string-suffix-p ".md" name)
+                       (substring name 0 -3)
+                     name)))
+         (expand-file-name (concat base ".md") dir-path)))))
+
+
+(defun claude-gravity-config-new ()
+  "Create a new config item in the category at point.
+Works on config-category sections (Rules, Skills, Agents, Commands)."
+  (interactive)
+  (let ((section (magit-current-section)))
+    ;; Walk up to find a config-category section
+    (while (and section (not (eq (oref section type) 'config-category)))
+      (setq section (oref section parent)))
+    (unless section
+      (user-error "Not in a configuration category"))
+    (let* ((data (oref section value))
+           (dir-path (alist-get 'dir-path data))
+           (cap-type (alist-get 'cap-type data))
+           (type-label (symbol-name cap-type))
+           (name (read-string (format "New %s name: " type-label))))
+      (when (string-empty-p name)
+        (user-error "Name cannot be empty"))
+      (let ((target (claude-gravity--config-target-path cap-type dir-path name)))
+        (when (file-exists-p target)
+          (user-error "File already exists: %s" target))
+        (make-directory (file-name-directory target) t)
+        (with-temp-file target
+          (insert (claude-gravity--config-skeleton cap-type name)))
+        ;; Invalidate cache so refresh picks up new file
+        (claude-gravity--invalidate-capabilities-cache)
+        (find-file target)))))
+
+
 (defun claude-gravity-edit-entry ()
-  "Open definition file for skill/agent/command at point."
+  "Open definition file for skill/agent/command/config item at point."
   (interactive)
   (let ((section (magit-current-section)))
     (when section
-      (if (eq (oref section type) 'capability-entry)
-          (let* ((cap (oref section value))
-                 (file-path (alist-get 'file-path cap)))
-            (if (and file-path (file-exists-p file-path))
-                (find-file file-path)
-              (message "No file path for this entry")))
-        (message "No editable entry at point")))))
+      (pcase (oref section type)
+        ('capability-entry
+         (let ((file-path (alist-get 'file-path (oref section value))))
+           (if (and file-path (file-exists-p file-path))
+               (find-file file-path)
+             (message "No file path for this entry"))))
+        ('config-leaf
+         (let ((file-path (alist-get 'file-path (oref section value))))
+           (when file-path (find-file file-path))))
+        ('config-category
+         (let ((dir-path (alist-get 'dir-path (oref section value))))
+           (when dir-path
+             (unless (file-directory-p dir-path)
+               (make-directory dir-path t))
+             (dired dir-path))))
+        (_ (message "No editable entry at point"))))))
 
 
 (defun claude-gravity-refresh ()
@@ -1397,6 +1575,7 @@ prompts to confirm the directory before starting."
    ["Navigation"
     ("TAB" "Toggle section" magit-section-toggle)
     ("e" "Edit entry" claude-gravity-edit-entry)
+    ("+" "New config item" claude-gravity-config-new)
     ("k" "Dismiss inbox" claude-gravity-inbox-dismiss)]
    ["Debug"
     ("M" "Debug messages" claude-gravity-debug-show)]])
