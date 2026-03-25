@@ -38,6 +38,7 @@ export class TerminalServer {
     const json = JSON.stringify(message) + "\n";
     // Iterate over a copy to allow mutation during iteration
     for (const conn of [...this.connections]) {
+      if (conn.socket.destroyed || !conn.socket.writable) continue;
       try {
         conn.socket.write(json);
       } catch (err) {
@@ -52,6 +53,7 @@ export class TerminalServer {
     const json = JSON.stringify(message) + "\n";
     for (const conn of [...this.connections]) {
       if (conn.subscribedSessions.has(sessionId)) {
+        if (conn.socket.destroyed || !conn.socket.writable) continue;
         try {
           conn.socket.write(json);
         } catch (err) {
@@ -64,6 +66,7 @@ export class TerminalServer {
 
   /** Send a message to a specific connection. */
   sendTo(conn: TerminalConnection, message: ServerMessage): void {
+    if (conn.socket.destroyed || !conn.socket.writable) return;
     try {
       conn.socket.write(JSON.stringify(message) + "\n");
     } catch (err) {

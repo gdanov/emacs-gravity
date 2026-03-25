@@ -14,7 +14,7 @@ import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from
 import { SessionStore } from "./state/session-store.js";
 import { InboxManager } from "./state/inbox.js";
 import { TerminalServer } from "./protocol/terminal-server.js";
-import { parseTerminalMessage } from "./protocol/messages.js";
+import { parseTerminalMessage, isHookMessage } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
 import { sessionEnd } from "./state/session.js";
 import { log } from "./util/log.js";
@@ -223,6 +223,18 @@ function startTerminalServer(): Server {
 
         if (line.length === 0) continue;
 
+        // Detect misrouted hook messages (bridge shim connected to terminal socket)
+        try {
+          const parsed = JSON.parse(line);
+          if (typeof parsed === "object" && parsed !== null && isHookMessage(parsed)) {
+            log(`Hook event received on terminal socket — bridge may have wrong socket path (event=${parsed.event}, session=${parsed.session_id})`, "error");
+            socket.destroy();
+            return;
+          }
+        } catch {
+          // JSON parse will also fail in parseTerminalMessage below — let it handle
+        }
+
         const msg = parseTerminalMessage(line);
         if (!msg) {
           log(`Terminal: invalid message: ${line.substring(0, 100)}`, "warn");
@@ -358,18 +370,18 @@ function handleTerminalMessage(
       if (normalizedFeedback) {
         // Build structured feedback message (matches Emacs plan review format)
         const parts: string[] = ["# Plan Feedback\n"];
-        if (normalizedFeedback.inlineComments.length > 0) {
+        if (normalizedFeedback.inlineComments?.length > 0) {
           parts.push("## Inline comments");
-          for (const c of normalizedFeedback.inlineComments) {
+          normalizedFeedback.inlineComments.forEach((c) => {
             parts.push(`- Line ${c.line} (near "${c.nearText}"): ${c.comment}`);
-          }
+          });
           parts.push("");
         }
-        if (normalizedFeedback.claudeMarkers.length > 0) {
+        if (normalizedFeedback.claudeMarkers?.length > 0) {
           parts.push("## @claude markers");
-          for (const m of normalizedFeedback.claudeMarkers) {
+          normalizedFeedback.claudeMarkers.forEach((m) => {
             parts.push(`- Line ${m.line} (near "${m.nearText}"): ${m.text}`);
-          }
+          });
           parts.push("");
         }
         if (normalizedFeedback.diff) {

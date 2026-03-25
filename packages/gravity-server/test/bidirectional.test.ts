@@ -492,3 +492,143 @@ describe("Plan review feedback bundling", () => {
     expect(message).toBe("# Plan Feedback\n");
   });
 });
+
+describe("Plan review deny with missing feedback fields", () => {
+  // Replicate the server.ts action.plan-review handler logic to verify
+  // that optional chaining prevents crashes on missing fields.
+  function buildPlanReviewMessage(feedback: unknown): string | undefined {
+    let normalizedFeedback: Record<string, unknown> | undefined;
+    if (feedback) {
+      if (typeof feedback === "string") {
+        normalizedFeedback = {
+          inlineComments: [],
+          claudeMarkers: [],
+          diff: null,
+          generalComment: feedback,
+        };
+      } else {
+        normalizedFeedback = feedback as Record<string, unknown>;
+      }
+    }
+
+    let message: string | undefined;
+    if (normalizedFeedback) {
+      const parts: string[] = ["# Plan Feedback\n"];
+      const inlineComments = normalizedFeedback.inlineComments as
+        | Array<{ line: number; nearText: string; comment: string }>
+        | undefined;
+      const claudeMarkers = normalizedFeedback.claudeMarkers as
+        | Array<{ line: number; nearText: string; text: string }>
+        | undefined;
+      if (inlineComments?.length && inlineComments.length > 0) {
+        parts.push("## Inline comments");
+        inlineComments.forEach((c) => {
+          parts.push(`- Line ${c.line} (near "${c.nearText}"): ${c.comment}`);
+        });
+        parts.push("");
+      }
+      if (claudeMarkers?.length && claudeMarkers.length > 0) {
+        parts.push("## @claude markers");
+        claudeMarkers.forEach((m) => {
+          parts.push(`- Line ${m.line} (near "${m.nearText}"): ${m.text}`);
+        });
+        parts.push("");
+      }
+      if (normalizedFeedback.diff) {
+        parts.push("## Changes requested");
+        parts.push(normalizedFeedback.diff as string);
+        parts.push("");
+      }
+      if (normalizedFeedback.generalComment) {
+        parts.push("## General comment");
+        parts.push(normalizedFeedback.generalComment as string);
+      }
+      message = parts.join("\n");
+    }
+    return message;
+  }
+
+  it("deny with feedback: undefined does not crash and sends deny response", () => {
+    const inbox = new InboxManager();
+    const sock = mockSocket();
+    inbox.add(
+      "plan-review", "s1", "proj", "Plan Review", "Review plan",
+      { tool_name: "ExitPlanMode" }, sock,
+    );
+    const item = inbox.all()[0];
+
+    const message = buildPlanReviewMessage(undefined);
+
+    // Should not crash — message is undefined
+    expect(message).toBeUndefined();
+
+    // Simulate the respond call (decision: deny, no message)
+    inbox.respond(item.id, {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "deny", message },
+      },
+    });
+
+    const response = JSON.parse(sock.written[0].replace("\n", ""));
+    expect(response.hookSpecificOutput.decision.behavior).toBe("deny");
+    expect(response.hookSpecificOutput.decision.message).toBeUndefined();
+  });
+
+  it("deny with partial feedback { generalComment } does not crash and includes comment", () => {
+    const inbox = new InboxManager();
+    const sock = mockSocket();
+    inbox.add(
+      "plan-review", "s1", "proj", "Plan Review", "Review plan",
+      { tool_name: "ExitPlanMode" }, sock,
+    );
+    const item = inbox.all()[0];
+
+    // Partial feedback — missing inlineComments, claudeMarkers, diff
+    const message = buildPlanReviewMessage({ generalComment: "fix this" });
+
+    // Should not crash, and should include the general comment
+    expect(message).toContain("# Plan Feedback");
+    expect(message).toContain("## General comment");
+    expect(message).toContain("fix this");
+    expect(message).not.toContain("## Inline comments");
+    expect(message).not.toContain("## @claude markers");
+
+    inbox.respond(item.id, {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "deny", message },
+      },
+    });
+
+    const response = JSON.parse(sock.written[0].replace("\n", ""));
+    expect(response.hookSpecificOutput.decision.behavior).toBe("deny");
+    expect(response.hookSpecificOutput.decision.message).toContain("fix this");
+  });
+
+  it("deny with empty feedback {} does not crash", () => {
+    const inbox = new InboxManager();
+    const sock = mockSocket();
+    inbox.add(
+      "plan-review", "s1", "proj", "Plan Review", "Review plan",
+      { tool_name: "ExitPlanMode" }, sock,
+    );
+    const item = inbox.all()[0];
+
+    // Empty object — all fields missing
+    const message = buildPlanReviewMessage({});
+
+    // Should not crash — produces minimal message
+    expect(message).toBe("# Plan Feedback\n");
+
+    inbox.respond(item.id, {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "deny", message },
+      },
+    });
+
+    const response = JSON.parse(sock.written[0].replace("\n", ""));
+    expect(response.hookSpecificOutput.decision.behavior).toBe("deny");
+  });
+});
