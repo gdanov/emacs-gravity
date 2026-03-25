@@ -295,7 +295,7 @@ export type ServerMessage =
 
 /** Messages from terminal to server. */
 export type TerminalMessage =
-  | { type: "action.permission"; itemId: number; decision: "allow" | "deny"; message?: string }
+  | { type: "action.permission"; itemId: number; decision: "allow" | "deny"; message?: string; updatedPermissions?: unknown[] }
   | { type: "action.question"; itemId: number; answers: string[] }
   | { type: "action.plan-review"; itemId: number; decision: "allow" | "deny"; feedback?: PlanFeedback }
   | { type: "action.turn-auto-approve"; sessionId: string }
@@ -356,6 +356,7 @@ export interface HookSocketResponse {
     decision?: {
       behavior: "allow" | "deny";
       message?: string;
+      updatedPermissions?: unknown[];
     };
     permissionDecision?: string;
     permissionDecisionReason?: string;

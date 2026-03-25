@@ -335,14 +335,14 @@ sockets if PID is dead."
 
 (defun claude-gravity--send-permission-response (item-id decision &optional message permissions)
   "Send permission response for inbox ITEM-ID with DECISION and optional MESSAGE.
-PERMISSIONS is an optional vector of permission rules (ignored in server mode,
-server handles session-scoped permissions via plan-review)."
-  (ignore permissions)
+PERMISSIONS is an optional vector of permission rules forwarded as
+updatedPermissions so Claude Code applies them for the session."
   (claude-gravity--send-to-server
    `((type . "action.permission")
      (itemId . ,item-id)
      (decision . ,decision)
-     ,@(when message `((message . ,message))))))
+     ,@(when message `((message . ,message)))
+     ,@(when permissions `((updatedPermissions . ,permissions))))))
 
 (defun claude-gravity--send-bidirectional-response (handle response)
   "Send RESPONSE for a bidirectional hook event.

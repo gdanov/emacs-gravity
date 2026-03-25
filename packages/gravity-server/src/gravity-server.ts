@@ -304,12 +304,12 @@ function handleTerminalMessage(
     }
 
     case "action.permission": {
-      const { itemId, decision, message } = msg;
+      const { itemId, decision, message, updatedPermissions } = msg;
       // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
       inbox.respond(itemId, {
         hookSpecificOutput: {
           hookEventName: "PermissionRequest",
-          decision: { behavior: decision, message },
+          decision: { behavior: decision, message, updatedPermissions },
         },
       });
       terminals.broadcast({ type: "inbox.removed", itemId });

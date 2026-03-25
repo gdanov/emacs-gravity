@@ -187,7 +187,7 @@ describe("Integration: Server end-to-end", () => {
             inbox.respond(msg.itemId, {
               hookSpecificOutput: {
                 hookEventName: "PermissionRequest",
-                decision: { behavior: msg.decision, message: msg.message },
+                decision: { behavior: msg.decision, message: msg.message, updatedPermissions: msg.updatedPermissions },
               },
             });
             terminals.broadcast({ type: "inbox.removed", itemId: msg.itemId });
@@ -564,6 +564,58 @@ describe("Integration: Server end-to-end", () => {
 
     const resp = await hookResponse;
     expect((resp as any).hookSpecificOutput.decision.behavior).toBe("allow");
+
+    termSocket.end();
+  });
+
+  it("permission allow with updatedPermissions forwards to bridge", async () => {
+    // Connect terminal
+    const termSocket = createConnection(TERMINAL_SOCK);
+    await new Promise<void>((resolve) => termSocket.on("connect", resolve));
+    sendTerminalMessage(termSocket, { type: "request.session", sessionId: "test-perm-up" });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Collect messages
+    const collectedMessages: ServerMessage[] = [];
+    let buf = "";
+    termSocket.on("data", (chunk) => {
+      buf += chunk.toString();
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.substring(0, idx).trim();
+        buf = buf.substring(idx + 1);
+        if (line.length > 0) collectedMessages.push(JSON.parse(line));
+      }
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    collectedMessages.length = 0;
+
+    // Send PermissionRequest for Bash (bidirectional)
+    const { response: hookResponse } = await sendBidirectionalHookEvent({
+      event: "PermissionRequest",
+      session_id: "test-perm-up",
+      cwd: "/test/project",
+      pid: 42,
+      source: "bridge",
+      data: { tool_name: "Bash", tool_input: { command: "npm test" } },
+      needs_response: true,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const inboxAdded = collectedMessages.find((m) => m.type === "inbox.added") as Extract<ServerMessage, { type: "inbox.added" }>;
+    expect(inboxAdded).toBeDefined();
+
+    // Terminal allows with updatedPermissions
+    sendTerminalMessage(termSocket, {
+      type: "action.permission",
+      itemId: inboxAdded.item.id,
+      decision: "allow",
+      updatedPermissions: [{ type: "Bash", tool: "Bash" }],
+    } as any);
+
+    const resp = await hookResponse;
+    expect((resp as any).hookSpecificOutput.decision.behavior).toBe("allow");
+    expect((resp as any).hookSpecificOutput.decision.updatedPermissions).toEqual([{ type: "Bash", tool: "Bash" }]);
 
     termSocket.end();
   });

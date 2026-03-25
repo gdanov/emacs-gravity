@@ -270,6 +270,43 @@ describe("Bidirectional flow: PermissionRequest", () => {
     expect(response.hookSpecificOutput.decision.behavior).toBe("allow");
   });
 
+  it("permission allow with updatedPermissions forwards them in decision", () => {
+    const inbox = new InboxManager();
+    const sock = mockSocket();
+    inbox.add("permission", "s1", "proj", "Bash", "Running npm", {}, sock);
+    const item = inbox.all()[0];
+
+    const perms = [{ type: "Bash", tool: "Bash" }];
+    inbox.respond(item.id, {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow", updatedPermissions: perms },
+      },
+    });
+
+    const response = JSON.parse(sock.written[0].replace("\n", ""));
+    expect(response.hookSpecificOutput.decision.behavior).toBe("allow");
+    expect(response.hookSpecificOutput.decision.updatedPermissions).toEqual(perms);
+  });
+
+  it("permission allow without updatedPermissions omits the field", () => {
+    const inbox = new InboxManager();
+    const sock = mockSocket();
+    inbox.add("permission", "s1", "proj", "Read", "Reading file", {}, sock);
+    const item = inbox.all()[0];
+
+    inbox.respond(item.id, {
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow" },
+      },
+    });
+
+    const response = JSON.parse(sock.written[0].replace("\n", ""));
+    expect(response.hookSpecificOutput.decision.behavior).toBe("allow");
+    expect(response.hookSpecificOutput.decision.updatedPermissions).toBeUndefined();
+  });
+
   it("permission deny with message produces correct output", () => {
     const inbox = new InboxManager();
     const sock = mockSocket();
