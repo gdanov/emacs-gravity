@@ -1007,7 +1007,7 @@ Only shows permission, question, and plan-review items (not idle)."
 
 (define-key claude-gravity-mode-map (kbd "X") 'claude-gravity-detect-dead-sessions)
 
-(define-key claude-gravity-mode-map (kbd "d") 'claude-gravity-delete-session)
+(define-key claude-gravity-mode-map (kbd "d") 'claude-gravity-delete-at-point)
 
 (define-key claude-gravity-mode-map (kbd "A") 'claude-gravity-add-allow-pattern)
 
@@ -1570,7 +1570,7 @@ prompts to confirm the directory before starting."
     ("D" "Remove ended" claude-gravity-cleanup-sessions)
     ("X" "Detect dead" claude-gravity-detect-dead-sessions)
     ("R" "Reset all idle" claude-gravity-reset-status)
-    ("d" "Delete session" claude-gravity-delete-session)
+    ("d" "Delete at point" claude-gravity-delete-at-point)
     ("I" "Toggle ignored" claude-gravity-toggle-ignored-session)]
    ["Navigation"
     ("TAB" "Toggle section" magit-section-toggle)
@@ -1741,6 +1741,50 @@ through to the TUI instead of queuing them in the Emacs inbox."
           (remhash sid claude-gravity--sessions)
           (claude-gravity--log 'debug "Deleted session %s" (claude-gravity--session-short-id sid))
           (claude-gravity--render-overview))))))
+
+
+(defun claude-gravity-delete-config-item ()
+  "Delete the config item (rule, skill, agent, command, leaf file) at point."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (unless section
+      (user-error "No section at point"))
+    (let* ((type (oref section type))
+           (value (oref section value))
+           (file-path (pcase type
+                        ('capability-entry (alist-get 'file-path value))
+                        ('config-leaf (alist-get 'file-path value))
+                        (_ nil))))
+      (unless file-path
+        (user-error "No deletable item at point"))
+      (unless (file-exists-p file-path)
+        (user-error "File does not exist: %s" file-path))
+      (when (y-or-n-p (format "Delete %s? " (abbreviate-file-name file-path)))
+        (delete-file file-path)
+        ;; For skills: remove parent dir if it only contained SKILL.md
+        (when (and (eq type 'capability-entry)
+                   (eq (alist-get 'type value) 'skill))
+          (let ((parent (file-name-directory file-path)))
+            (when (and (file-directory-p parent)
+                       (null (directory-files parent nil "^[^.]" t)))
+              (delete-directory parent))))
+        (claude-gravity--invalidate-capabilities-cache)
+        (claude-gravity--render-overview)
+        (message "Deleted %s" (abbreviate-file-name file-path))))))
+
+
+(defun claude-gravity-delete-at-point ()
+  "Context-aware delete: config item or session depending on what's at point."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (if (null section)
+        (message "Nothing at point")
+      (pcase (oref section type)
+        ((or 'capability-entry 'config-leaf)
+         (claude-gravity-delete-config-item))
+        ('session-entry
+         (claude-gravity-delete-session))
+        (_ (message "Nothing to delete at point"))))))
 
 
 (defun claude-gravity-follow-mode ()
