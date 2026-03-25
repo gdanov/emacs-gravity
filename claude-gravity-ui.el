@@ -465,6 +465,138 @@ Replaced by scope-first layout."
   (claude-gravity--insert-configuration-section project-dir))
 
 
+;;; ── Beads issue status (lazy-loaded) ──────────────────────────────────
+
+(defvar claude-gravity--beads-stats-cache (make-hash-table :test 'equal)
+  "Cache: project-dir → (TIMESTAMP . issues-list) or `pending'.")
+
+(defconst claude-gravity--beads-stats-ttl 60
+  "Seconds before cached beads data is considered stale.")
+
+(defun claude-gravity--fetch-beads-stats (project-dir)
+  "Fetch `bd list --json' asynchronously for PROJECT-DIR.
+Caches result and triggers an overview refresh on completion."
+  (let ((bd (executable-find "bd")))
+    (when (and bd
+               (not (string-empty-p project-dir))
+               (file-directory-p (expand-file-name ".beads" project-dir)))
+      (puthash project-dir 'pending claude-gravity--beads-stats-cache)
+      (let ((buf (generate-new-buffer " *beads-stats*"))
+            (default-directory project-dir))
+        (make-process
+         :name "beads-stats"
+         :buffer buf
+         :command (list bd "list" "--json")
+         :connection-type 'pipe
+         :noquery t
+         :sentinel
+         (lambda (proc _event)
+           (when (memq (process-status proc) '(exit signal))
+             (unwind-protect
+                 (if (/= 0 (process-exit-status proc))
+                     (remhash project-dir claude-gravity--beads-stats-cache)
+                   (let* ((raw (with-current-buffer (process-buffer proc)
+                                 (buffer-string)))
+                          ;; Strip stderr lines before JSON (bd prints "Info:" etc)
+                          (json-start (string-match "^[{[]" raw))
+                          (json-str (if json-start (substring raw json-start) raw))
+                          (parsed (ignore-errors
+                                    (json-parse-string json-str
+                                                       :object-type 'alist
+                                                       :array-type 'list))))
+                     (if parsed
+                         (progn
+                           (puthash project-dir
+                                    (cons (current-time) parsed)
+                                    claude-gravity--beads-stats-cache)
+                           (claude-gravity--schedule-refresh))
+                       (remhash project-dir claude-gravity--beads-stats-cache))))
+               (when (buffer-live-p (process-buffer proc))
+                 (kill-buffer (process-buffer proc)))))))))))
+
+(defun claude-gravity--beads-issue-status-indicator (status)
+  "Return a status indicator string for beads issue STATUS."
+  (pcase status
+    ("in_progress" (propertize "◐" 'face 'claude-gravity-status-responding))
+    ("open"        (propertize "○" 'face 'claude-gravity-detail-label))
+    ("blocked"     (propertize "●" 'face 'claude-gravity-tool-error))
+    (_             (propertize "?" 'face 'claude-gravity-detail-label))))
+
+(defun claude-gravity--beads-priority-label (priority)
+  "Return a short priority label for PRIORITY number."
+  (propertize (format "P%s" (or priority "?")) 'face 'claude-gravity-detail-label))
+
+(defun claude-gravity--insert-beads-status (project-dir)
+  "Insert expandable beads issue section for PROJECT-DIR.
+Lazy: triggers async fetch on first call, renders cached data thereafter.
+Heading shows summary counts; expanded body shows one line per non-closed issue."
+  (let ((cached (gethash project-dir claude-gravity--beads-stats-cache)))
+    (cond
+     ;; No cache — trigger fetch, render nothing yet
+     ((null cached)
+      (claude-gravity--fetch-beads-stats project-dir))
+     ;; Fetch in progress
+     ((eq cached 'pending) nil)
+     ;; Have data — check staleness, then render
+     (t
+      (let ((timestamp (car cached))
+            (all-issues (cdr cached)))
+        ;; Refetch in background if stale (but still show last-known data)
+        (when (> (float-time (time-subtract (current-time) timestamp))
+                 claude-gravity--beads-stats-ttl)
+          (claude-gravity--fetch-beads-stats project-dir))
+        ;; Filter to non-closed issues
+        (let* ((issues (cl-remove-if
+                        (lambda (i) (equal (alist-get 'status i) "closed"))
+                        all-issues))
+               (open (cl-count "open" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
+               (in-prog (cl-count "in_progress" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
+               (blocked (cl-count "blocked" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
+               (indent (claude-gravity--indent))
+               (parts nil))
+          (when issues
+            (when (> blocked 0)
+              (push (propertize (format "%d blocked" blocked)
+                                'face 'claude-gravity-tool-error)
+                    parts))
+            (when (> in-prog 0)
+              (push (propertize (format "%d active" in-prog)
+                                'face 'claude-gravity-status-responding)
+                    parts))
+            (when (> open 0)
+              (push (propertize (format "%d open" open)
+                                'face 'claude-gravity-detail-label)
+                    parts))
+            (magit-insert-section (beads-status project-dir t)
+              (magit-insert-heading
+                (format "%s%s  %s"
+                        indent
+                        (propertize "Issues" 'face 'claude-gravity-section-heading)
+                        (string-join parts "  ")))
+              ;; Expanded body: one line per issue, sorted by priority
+              (let ((sorted (sort (copy-sequence issues)
+                                  (lambda (a b)
+                                    (< (or (alist-get 'priority a) 4)
+                                       (or (alist-get 'priority b) 4))))))
+                (dolist (issue sorted)
+                  (let* ((id (alist-get 'id issue))
+                         (title (alist-get 'title issue))
+                         (status (alist-get 'status issue))
+                         (priority (alist-get 'priority issue))
+                         (itype (alist-get 'issue_type issue)))
+                    (magit-insert-section (beads-issue id)
+                      (magit-insert-heading
+                        (format "%s  %s %s %s %s  %s"
+                                indent
+                                (claude-gravity--beads-issue-status-indicator status)
+                                (claude-gravity--beads-priority-label priority)
+                                (propertize (format "[%s]" (or itype "task"))
+                                            'face 'claude-gravity-detail-label)
+                                (or title "")
+                                (propertize (or id "") 'face 'claude-gravity-detail-label)))))))
+              (insert "\n")))))))))
+
+
 (defun claude-gravity--render-overview ()
   "Render the overview buffer with all sessions grouped by project."
   (let ((buf (get-buffer claude-gravity-buffer-name)))
@@ -573,7 +705,8 @@ Replaced by scope-first layout."
                    ;; Project capabilities (skills, agents, commands) — after sessions
                    (let ((proj-cwd (plist-get (car sessions) :cwd)))
                      (when proj-cwd
-                       (claude-gravity--insert-project-capabilities proj-cwd)))))
+                       (claude-gravity--insert-project-capabilities proj-cwd)
+                       (claude-gravity--insert-beads-status proj-cwd)))))
                projects)))
           ;; Restore semantic position
           (if-let* ((ident section-ident)
