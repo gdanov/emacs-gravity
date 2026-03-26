@@ -12,6 +12,9 @@
 // - Buffer management (Emacs-specific)
 // These are terminal-side concerns.
 
+import { readFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import type { HookData, HookEventName, Patch, Session, TokenUsage } from "@gravity/shared";
 import { SessionStore } from "../state/session-store.js";
 import { InboxManager } from "../state/inbox.js";
@@ -85,6 +88,22 @@ function extractAskAnswer(toolResponse: unknown): string {
   return JSON.stringify(resp);
 }
 
+/** Look up the session's display name from Claude Code's sessions-index.json. */
+function lookupDisplayName(cwd: string, sessionId: string): string | null {
+  try {
+    // Encode cwd: /Users/foo/bar → -Users-foo-bar
+    const encoded = cwd.replace(/\//g, "-");
+    const indexPath = join(homedir(), ".claude", "projects", encoded, "sessions-index.json");
+    const raw = readFileSync(indexPath, "utf-8");
+    const data = JSON.parse(raw);
+    if (!data?.entries || !Array.isArray(data.entries)) return null;
+    const entry = data.entries.find((e: Record<string, unknown>) => e.sessionId === sessionId);
+    return (entry?.summary as string) || null;
+  } catch {
+    return null;
+  }
+}
+
 export interface EventHandlerDeps {
   store: SessionStore;
   inbox: InboxManager;
@@ -138,9 +157,12 @@ export function handleEvent(
       patches.push({ op: "set_status", status: "active" });
       log(`Session ${sessionId} self-healed to active on ${eventName}`, "info");
     }
+    // Lazy retry: look up displayName if not yet set
+    const displayName = !existing.displayName ? lookupDisplayName(cwd, sessionId) ?? undefined : undefined;
     patches.push(...updateMeta(existing, {
       pid: pid ?? undefined,
       slug: data.slug ?? undefined,
+      displayName,
       branch: data.branch ?? undefined,
       tmuxSession: data.tmux_session ?? undefined,
     }));
@@ -156,6 +178,7 @@ export function handleEvent(
       const metaPatches = updateMeta(s, {
         pid: pid ?? undefined,
         slug: data.slug ?? undefined,
+        displayName: lookupDisplayName(cwd, sessionId) ?? undefined,
         branch: data.branch ?? undefined,
         tmuxSession: data.tmux_session ?? undefined,
       });
@@ -225,6 +248,12 @@ export function handleEvent(
       if (tokenUsage) {
         patches.push(...setTokenUsage(session, tokenUsage));
         patches.push(...finalizeTurnTokens(session, tokenUsage));
+      }
+
+      // Re-read displayName on Stop to pick up mid-session renames via /name
+      const freshName = lookupDisplayName(cwd, sessionId);
+      if (freshName && freshName !== session.displayName) {
+        patches.push(...updateMeta(session, { displayName: freshName }));
       }
 
       // Add idle inbox item

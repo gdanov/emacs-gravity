@@ -515,7 +515,7 @@ SESSION-JSON is an alist from json-parse-string."
           :total-tool-count (or (alist-get 'totalToolCount session-json) 0)
           :header-line-cache nil
           :buffer nil
-          :display-name nil
+          :display-name (funcall jnil (alist-get 'displayName session-json))
           :ignored nil
           :allow-patterns nil)))
 
@@ -760,11 +760,13 @@ MSG contains sessionId and patches array."
 
       ("set_meta"
        (let ((slug (alist-get 'slug patch))
+             (display-name (alist-get 'displayName patch))
              (branch (alist-get 'branch patch))
              (pid (alist-get 'pid patch))
              (model-name (alist-get 'modelName patch))
              (tmux-session (alist-get 'tmuxSession patch)))
          (when slug (plist-put session :slug slug))
+         (when display-name (plist-put session :display-name display-name))
          (when branch (plist-put session :branch branch))
          (when (and pid (numberp pid) (> pid 0))
            (plist-put session :pid pid))

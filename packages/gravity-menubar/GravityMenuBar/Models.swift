@@ -47,14 +47,16 @@ public struct ProjectInfo: Identifiable {
 public struct SessionInfo: Identifiable {
     public let id: String
     public var slug: String?
+    public var serverDisplayName: String?
     public var status: String        // "active" | "ended"
     public var claudeStatus: String  // "idle" | "responding"
     public var toolCount: Int
     public var lastEventTime: Double
 
-    public init(id: String, slug: String?, status: String, claudeStatus: String, toolCount: Int, lastEventTime: Double) {
+    public init(id: String, slug: String?, serverDisplayName: String? = nil, status: String, claudeStatus: String, toolCount: Int, lastEventTime: Double) {
         self.id = id
         self.slug = slug
+        self.serverDisplayName = serverDisplayName
         self.status = status
         self.claudeStatus = claudeStatus
         self.toolCount = toolCount
@@ -62,7 +64,7 @@ public struct SessionInfo: Identifiable {
     }
 
     public var displayName: String {
-        slug ?? String(id.prefix(8))
+        serverDisplayName ?? slug ?? String(id.prefix(8))
     }
 
     public var statusColor: Color {
@@ -153,14 +155,16 @@ public struct ProjectSummaryJSON: Decodable {
 public struct SessionSummaryJSON: Decodable {
     public let sessionId: String
     public let slug: String?
+    public let displayName: String?
     public let status: String
     public let claudeStatus: String
     public let toolCount: Int
     public let lastEventTime: Double
 
-    public init(sessionId: String, slug: String? = nil, status: String, claudeStatus: String, toolCount: Int = 0, lastEventTime: Double = 0) {
+    public init(sessionId: String, slug: String? = nil, displayName: String? = nil, status: String, claudeStatus: String, toolCount: Int = 0, lastEventTime: Double = 0) {
         self.sessionId = sessionId
         self.slug = slug
+        self.displayName = displayName
         self.status = status
         self.claudeStatus = claudeStatus
         self.toolCount = toolCount
@@ -192,16 +196,18 @@ public struct PatchJSON: Decodable {
     public let status: String?
     public let claudeStatus: String?
     public let slug: String?
+    public let displayName: String?
 
     enum CodingKeys: String, CodingKey {
-        case op, status, claudeStatus, slug
+        case op, status, claudeStatus, slug, displayName
     }
 
-    public init(op: String, status: String? = nil, claudeStatus: String? = nil, slug: String? = nil) {
+    public init(op: String, status: String? = nil, claudeStatus: String? = nil, slug: String? = nil, displayName: String? = nil) {
         self.op = op
         self.status = status
         self.claudeStatus = claudeStatus
         self.slug = slug
+        self.displayName = displayName
     }
 }
 

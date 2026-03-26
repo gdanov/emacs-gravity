@@ -430,7 +430,7 @@ Shows Project scope, User scope, then Plugins."
           (user-data (alist-get 'user scoped))
           (plugins (alist-get 'plugins scoped))
           (indent (claude-gravity--indent)))
-      (magit-insert-section (configuration project-dir)
+      (magit-insert-section (configuration project-dir t)
         (magit-insert-heading
           (format "%s%s"
                   indent

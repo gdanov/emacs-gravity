@@ -40,6 +40,7 @@ export class SessionStore {
       sessions: sessions.map((s) => ({
         sessionId: s.sessionId,
         slug: s.slug,
+        displayName: s.displayName,
         status: s.status,
         claudeStatus: s.claudeStatus,
         toolCount: s.totalToolCount,

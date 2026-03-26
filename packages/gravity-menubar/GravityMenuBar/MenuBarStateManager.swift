@@ -72,6 +72,7 @@ public class MenuBarStateManager {
                         SessionInfo(
                             id: s.sessionId,
                             slug: s.slug,
+                            serverDisplayName: s.displayName,
                             status: s.status,
                             claudeStatus: s.claudeStatus,
                             toolCount: s.toolCount,
@@ -171,6 +172,9 @@ public class MenuBarStateManager {
                             if !mutateSession(sessionId, { $0.slug = slug }) {
                                 sessionFound = false
                             }
+                        }
+                        if let dn = patch.displayName {
+                            _ = mutateSession(sessionId, { $0.serverDisplayName = dn })
                         }
                     default:
                         break

@@ -104,6 +104,7 @@ export interface Session {
   status: "active" | "ended";
   claudeStatus: "idle" | "responding";
   slug: string | null;
+  displayName: string | null;
   branch: string | null;
   pid: number | null;
   modelName: string | null;
@@ -263,7 +264,7 @@ export type Patch =
   | { op: "set_plan"; plan: Plan | null }
   | { op: "set_streaming_text"; text: string | null }
   | { op: "set_permission_mode"; mode: string | null }
-  | { op: "set_meta"; slug?: string; branch?: string; pid?: number; modelName?: string; tmuxSession?: string }
+  | { op: "set_meta"; slug?: string; displayName?: string; branch?: string; pid?: number; modelName?: string; tmuxSession?: string }
   | { op: "add_turn"; turn: TurnNode }
   | { op: "freeze_turn"; turnNumber: number }
   | { op: "set_turn_stop"; turnNumber: number; stopText?: string; stopThinking?: string }
@@ -312,6 +313,7 @@ export interface ProjectSummary {
 export interface SessionSummary {
   sessionId: string;
   slug: string | null;
+  displayName: string | null;
   status: "active" | "ended";
   claudeStatus: "idle" | "responding";
   toolCount: number;
