@@ -241,7 +241,7 @@ PROC is the process, EVENT is the status change."
         ;; Declare capabilities and request overview on connect
         (claude-gravity--send-to-server
          '((type . "hello")
-           (capabilities . ("action.permission" "action.question" "action.plan-review"))))
+           (capabilities . ["action.permission" "action.question" "action.plan-review"])))
         (claude-gravity--send-to-server
          '((type . "request.overview")))
         ;; Re-subscribe to previously-opened session details
