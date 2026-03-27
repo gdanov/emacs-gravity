@@ -115,8 +115,7 @@ emacs-gravity/
 ├── claude-gravity-faces.el        ; Faces and fringe bitmaps
 ├── claude-gravity-session.el      ; Session state CRUD
 ├── claude-gravity-discovery.el    ; Plugin/skill/MCP capability discovery
-├── claude-gravity-state.el        ; Model API, mutation functions (read-replica)
-├── claude-gravity-events.el       ; Event dispatcher (11 hook types)
+├── claude-gravity-state.el        ; Session state helpers, inbox, tool/agent lookup
 ├── claude-gravity-text.el         ; Text rendering
 ├── claude-gravity-diff.el         ; Inline diffs, tool/plan display
 ├── claude-gravity-render.el       ; UI section rendering

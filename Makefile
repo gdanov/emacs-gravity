@@ -9,9 +9,7 @@ test: test-elisp test-bridge test-server test-menubar
 test-elisp:
 	$(EMACS) -nw --batch -L . -L test \
 		-l claude-gravity \
-		-l cg-test-replay \
 		-l claude-gravity-test \
-		-l claude-gravity-contract-test \
 		-l claude-gravity-patch-test \
 		-f ert-run-tests-batch-and-exit
 

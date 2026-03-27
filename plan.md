@@ -61,7 +61,7 @@ great claude code plug-in, I'm shamelessly copying it here.
 - Emacs-managed Claude process: start (`S`), resume (`r`), send prompt (`s`), stop sessions via transient menu
 - JSON-output adapter: full stream-json stdout parsing (system/init, stream_event, assistant, user, result)
 - Streaming text display: live ">>> Claude is responding..." section with text accumulation during generation
-- Model mutation API: 17 `claude-gravity-model-*` functions shared by hooks adapter and JSON-output adapter
+- State helpers: session lookup, inbox management, tool/agent index operations in `claude-gravity-state.el`
 - Tool dedup: `session-has-tool-p` checks root and agent tools by tool_use_id across both adapters
 - Bidirectional PermissionRequest: plan review buffer with approve/deny/feedback flow (matcher: ExitPlanMode, 96h timeout)
 - Plan review inline comments (`C-c ;`): orange wave-underline overlays with `« comment »` after-string

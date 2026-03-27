@@ -29,7 +29,7 @@ For detailed architecture, see @ARCHITECTURE.md. For the v3 design rationale, se
 
 ## Module Structure (Summary)
 
-The Emacs package is split into 15 modular files:
+The Emacs package is split into 14 modular files:
 
 | Module | Purpose |
 |--------|---------|
@@ -37,8 +37,7 @@ The Emacs package is split into 15 modular files:
 | `claude-gravity-faces.el` | 37 faces and fringe bitmaps |
 | `claude-gravity-session.el` | Session state CRUD |
 | `claude-gravity-discovery.el` | Plugin/skill/agent/MCP capability discovery |
-| `claude-gravity-state.el` | Model API, mutation functions (read-replica) |
-| `claude-gravity-events.el` | Event dispatcher (11 hook types) |
+| `claude-gravity-state.el` | Session state helpers, inbox, tool/agent lookup |
 | `claude-gravity-text.el` | Text rendering: dividers, markdown, wrapping |
 | `claude-gravity-diff.el` | Inline diffs, tool/plan display |
 | `claude-gravity-render.el` | UI section rendering |
@@ -49,7 +48,7 @@ The Emacs package is split into 15 modular files:
 | `claude-gravity-tmux.el` | Tmux session management |
 | `claude-gravity.el` | Thin loader |
 
-**Load order:** `core → {faces,session,discovery} → state → events → {text,diff} → render → ui → plan-review → client → {actions,tmux}`
+**Load order:** `core → {faces,session,discovery} → state → {text,diff} → render → ui → plan-review → client → {actions,tmux}`
 
 For line counts, key functions, and dependency details, see @ARCHITECTURE.md.
 

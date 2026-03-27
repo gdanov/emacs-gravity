@@ -17,7 +17,6 @@
 (declare-function claude-gravity--plan-revision-diff-async "claude-gravity-diff")
 (declare-function claude-gravity--plan-review-apply-margin-indicators "claude-gravity-diff")
 (declare-function claude-gravity--send-plan-review-response "claude-gravity-client")
-(declare-function claude-gravity-handle-event "claude-gravity-events")
 
 ;; Forward declarations — variables from other modules
 (defvar claude-gravity--tmux-sessions)

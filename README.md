@@ -31,7 +31,7 @@ gravity-server (TypeScript, long-running backend)
     |-- enrichment, state management, inbox
     | semantic patches over terminal socket
 Terminal clients
-    |-- Emacs client (16 modules, ~12.5k lines) -- magit-section UI
+    |-- Emacs client (15 modules, ~11.5k lines) -- magit-section UI
     '-- macOS menu bar (gravity-menubar, Swift) -- status dots + dropdown
 ```
 
@@ -57,7 +57,7 @@ gravity-server supports multiple simultaneous terminals. Currently two productio
 
 ### Emacs Client
 
-The full interactive UI. 16 Emacs Lisp modules (~12.5k lines) built on magit-section, providing:
+The full interactive UI. 15 Emacs Lisp modules (~11.5k lines) built on magit-section, providing:
 
 - **Session overview** — All active sessions grouped by project with status indicators (idle/responding/ended)
 - **Session detail** — Turn-based conversation view with collapsible response steps, inline diffs, agent trees
@@ -206,7 +206,7 @@ RET                          — visit session or file
 
 ## Emacs Modules
 
-The Emacs package is split into 16 modular files with a thin loader:
+The Emacs package is split into 15 modular files with a thin loader:
 
 | Module | Purpose |
 |--------|---------|
@@ -215,8 +215,7 @@ The Emacs package is split into 16 modular files with a thin loader:
 | `claude-gravity-faces.el` | 37 faces and fringe bitmaps |
 | `claude-gravity-session.el` | Session state CRUD |
 | `claude-gravity-discovery.el` | Plugin/skill/agent/MCP capability discovery |
-| `claude-gravity-state.el` | Model API, mutation functions (read-replica) |
-| `claude-gravity-events.el` | Event dispatcher (11 hook types) |
+| `claude-gravity-state.el` | Session state helpers, inbox, tool/agent lookup |
 | `claude-gravity-text.el` | Text rendering: dividers, markdown, wrapping |
 | `claude-gravity-diff.el` | Inline diffs, tool/plan display |
 | `claude-gravity-render.el` | UI section rendering (turns, tools, agents, tasks) |
@@ -227,7 +226,7 @@ The Emacs package is split into 16 modular files with a thin loader:
 | `claude-gravity-tmux.el` | Tmux session management, compose buffer |
 | `claude-gravity-debug.el` | Terminal protocol debug viewer |
 
-**Load order:** `core -> {faces, session, discovery} -> state -> events -> {text, diff} -> render -> ui -> plan-review -> client -> {actions, tmux}`
+**Load order:** `core -> {faces, session, discovery} -> state -> {text, diff} -> render -> ui -> plan-review -> client -> {actions, tmux}`
 
 Each module has no circular dependencies, making isolated testing and customization straightforward. Every face, keybinding, and rendering function is yours to override.
 

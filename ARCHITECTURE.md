@@ -188,7 +188,7 @@ Hook scripts in `packages/emacs-bridge/hooks/` are registered via `hooks.json`. 
 
 ## Emacs Module Structure
 
-The Emacs package is split into 15 modular files loaded via `claude-gravity.el` (thin loader):
+The Emacs package is split into 14 modular files loaded via `claude-gravity.el` (thin loader):
 
 | Module | Lines | Purpose | Key Functions |
 |--------|-------|---------|---|
@@ -196,8 +196,7 @@ The Emacs package is split into 15 modular files loaded via `claude-gravity.el` 
 | `claude-gravity-faces.el` | ~270 | 37 defface declarations + fringe bitmaps | `claude-gravity-face-*` |
 | `claude-gravity-session.el` | ~285 | Session hash table, CRUD operations | `claude-gravity--session-get`, `claude-gravity--session-set` |
 | `claude-gravity-discovery.el` | ~470 | Plugin/skill/agent/MCP capability discovery | `claude-gravity--discover-capabilities` |
-| `claude-gravity-state.el` | ~845 | Model API, mutation functions (read-replica) | `claude-gravity--add-tool`, `claude-gravity--update-task` |
-| `claude-gravity-events.el` | ~845 | Event dispatcher, hook handlers | `claude-gravity--handle-event` (all 11 hook types) |
+| `claude-gravity-state.el` | ~575 | Session state helpers, inbox, tool/agent lookup | `claude-gravity--session-get`, `claude-gravity--apply-patch` |
 | `claude-gravity-text.el` | ~480 | Text utilities: dividers, tables, markdown, wrapping | `claude-gravity--wrap-text`, `claude-gravity--render-plan` |
 | `claude-gravity-diff.el` | ~690 | Inline diffs, tool display, plan revision diff | `claude-gravity--render-tool-diff` |
 | `claude-gravity-render.el` | ~860 | Section renderers, turn grouping, agent/tool/task UI | `claude-gravity--insert-turn-section`, `claude-gravity--insert-tool` |
@@ -211,19 +210,18 @@ The Emacs package is split into 15 modular files loaded via `claude-gravity.el` 
 ### Load Order (Dependency DAG)
 
 ```
-core → {faces, session, discovery} → state → events → {text, diff} → render → ui
-                                                                        ↓
-                                                                    plan-review
-                                                                        ↓
-                                                                      client
-                                                                        ↓
-                                                                  {actions, tmux}
+core → {faces, session, discovery} → state → {text, diff} → render → ui
+                                                                  ↓
+                                                              plan-review
+                                                                  ↓
+                                                                client
+                                                                  ↓
+                                                            {actions, tmux}
 ```
 
 - `core` defines utilities, custom vars, tlist (no dependencies)
 - `faces`, `session`, `discovery` depend on `core` only
 - `state` depends on `core` and `session` (stores data in session hash table)
-- `events` depends on `core` and `state` (updates state based on events)
 - `text` and `diff` depend on `core` (pure text transformation)
 - `render` depends on all above (renders turns, tools, tasks, agents)
 - `ui` depends on `render` (main UI buffers and keymaps)
@@ -274,7 +272,7 @@ Session (plist)
 
 **Patch application** (`claude-gravity--apply-patch`): Each patch op maps to a `pcase` branch that mutates the local plist tree. The renderer reads the same plist structure as before — it doesn't know the data comes from patches.
 
-**Model API** in `claude-gravity-state.el` still exists — the tree mutation functions are called by `apply-patch` instead of by event handlers directly.
+**Patch application** logic lives in `claude-gravity-client.el` (`claude-gravity--apply-patch`), with helper functions in `claude-gravity-state.el` for session state lookups, inbox management, and tool/agent index operations.
 
 See @docs/session-data-model.md for the complete plist reference.
 
@@ -333,6 +331,7 @@ Agent transcripts are stored in "sidechain" format (separate files):
 - Inbox manager for bidirectional flows
 - `claude-gravity-socket.el` split into `claude-gravity-plan-review.el` + `claude-gravity-client.el`
 - See @docs/refactor-implementation.md for full design rationale
+- Dead code cleanup: removed `claude-gravity-events.el` (event dispatcher, 846 lines) and ~270 lines of unused `claude-gravity-model-*` functions from `claude-gravity-state.el` — all event handling now lives in gravity-server
 
 **Daemon Bridge (ON HOLD — 2026-02):** Agent SDK daemon (`daemon.ts`, `daemon-session.ts`)
 - **BLOCKED**: Agent SDK requires pay-per-use API key. See [#6536](https://github.com/anthropics/claude-code/issues/6536).
