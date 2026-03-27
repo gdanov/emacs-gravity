@@ -10,6 +10,7 @@ import { log } from "../util/log.js";
 export interface TerminalConnection {
   socket: Socket;
   subscribedSessions: Set<string>;
+  capabilities: Set<string>;
 }
 
 export class TerminalServer {
@@ -19,6 +20,7 @@ export class TerminalServer {
     const conn: TerminalConnection = {
       socket,
       subscribedSessions: new Set(),
+      capabilities: new Set(),
     };
     this.connections.push(conn);
 
@@ -81,6 +83,11 @@ export class TerminalServer {
     for (const conn of this.connections) {
       conn.subscribedSessions.delete(sessionId);
     }
+  }
+
+  /** Check if any connected terminal has the given capability. */
+  hasCapableTerminal(capability: string): boolean {
+    return this.connections.some((c) => c.capabilities.has(capability));
   }
 
   /** Number of connected terminals. */

@@ -225,6 +225,13 @@ export function handleEvent(
               answer: null,
             }),
           );
+          // Use first user prompt as display name if sessions-index.json didn't provide one
+          if (!session.displayName) {
+            const name = displayText.length <= 60
+              ? displayText
+              : displayText.slice(0, 57).replace(/\s+\S*$/, "") + "...";
+            patches.push(...updateMeta(session, { displayName: name }));
+          }
         }
       }
       patches.push(...setClaudeStatus(session, "responding"));

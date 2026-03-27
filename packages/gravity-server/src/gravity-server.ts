@@ -100,10 +100,23 @@ function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
 
   log(`Hook event: ${eventName} session=${sessionId}`, "info");
 
+  // Reject bidirectional events immediately if no capable terminal is connected.
+  // Without a terminal that can approve, the bridge would hang forever.
+  const bidirectionalEvents = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
+  if (needsResponse && bidirectionalEvents.has(eventName)) {
+    if (!terminals.hasCapableTerminal("action.permission")) {
+      log(`No capable terminal connected — rejecting ${eventName} immediately`, "warn");
+      try {
+        socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
+        socket.end();
+      } catch { /* socket may already be closed */ }
+      return;
+    }
+  }
+
   // Clean up stale bidirectional inbox items before processing.
   // Any non-bidirectional event means Claude Code has moved past any pending
   // permission/question (e.g. user approved in TUI, then PostToolUse fires).
-  const bidirectionalEvents = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
   if (!bidirectionalEvents.has(eventName)) {
     const staleRemoved = inbox.removeStaleForSession(sessionId);
     for (const item of staleRemoved) {
@@ -268,6 +281,15 @@ function handleTerminalMessage(
   if (!msg) return;
 
   switch (msg.type) {
+    case "hello": {
+      const caps = (msg as Record<string, unknown>).capabilities;
+      if (Array.isArray(caps)) {
+        conn.capabilities = new Set(caps.filter((c): c is string => typeof c === "string"));
+      }
+      log(`Terminal hello: capabilities=[${[...conn.capabilities].join(",")}]`, "info");
+      break;
+    }
+
     case "request.overview": {
       terminals.sendTo(conn, {
         type: "overview.snapshot",

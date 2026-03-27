@@ -84,6 +84,28 @@ export class InboxManager {
     return removed;
   }
 
+  /** Force-close all items for a session, including pending bridge connections.
+   *  Writes {} to each bridge socket so the shim can exit cleanly.
+   *  Use when a non-bidirectional event proves the session has moved past
+   *  any pending permission/question (e.g. user approved via TUI). */
+  forceCloseStaleForSession(sessionId: string): InboxItem[] {
+    const removed: InboxItem[] = [];
+    this.items = this.items.filter((item) => {
+      if (item.sessionId !== sessionId) return true;
+      const pending = this.pending.get(item.id);
+      if (pending) {
+        try {
+          pending.hookSocket.write(JSON.stringify({}) + "\n");
+          pending.hookSocket.end();
+        } catch { /* socket may already be closed */ }
+        this.pending.delete(item.id);
+      }
+      removed.push(item);
+      return false;
+    });
+    return removed;
+  }
+
   /** Find an inbox item by ID. */
   find(id: number): InboxItem | undefined {
     return this.items.find((i) => i.id === id);

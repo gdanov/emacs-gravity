@@ -169,7 +169,12 @@ const program = Effect.gen(function* () {
     );
 
     // Guard against empty response
-    if (!response || Object.keys(response).length === 0) {
+    const reason = (response as Record<string, unknown>)?.reason;
+    if (reason === "no_capable_terminal") {
+      yield* Effect.logInfo(
+        `${eventName}: no capable terminal connected — falling through to TUI [tool=${toolName}, session=${sessionId}]`
+      );
+    } else if (!response || Object.keys(response).length === 0) {
       yield* Effect.logError(
         `${eventName}: empty response from gravity-server [tool=${toolName}, session=${sessionId}] — writing {} to stdout`
       );

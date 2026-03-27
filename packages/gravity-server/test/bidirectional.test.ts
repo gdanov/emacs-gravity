@@ -173,6 +173,69 @@ describe("InboxManager", () => {
     });
   });
 
+  describe("forceCloseStaleForSession", () => {
+    it("force-closes pending items by writing {} and ending socket", () => {
+      const sock = mockSocket();
+      const item = inbox.add("permission", "s1", "proj", "Read", "s", {}, sock);
+      const removed = inbox.forceCloseStaleForSession("s1");
+      expect(removed).toHaveLength(1);
+      expect(removed[0].id).toBe(item.id);
+      expect(sock.written).toHaveLength(1);
+      expect(JSON.parse(sock.written[0].replace("\n", ""))).toEqual({});
+      expect(sock.ended).toBe(true);
+      expect(inbox.all()).toHaveLength(0);
+      expect(inbox.getPending(item.id)).toBeUndefined();
+    });
+
+    it("force-closes multiple pending items for same session", () => {
+      const sock1 = mockSocket();
+      const sock2 = mockSocket();
+      inbox.add("permission", "s1", "proj", "Read", "s", {}, sock1);
+      inbox.add("plan-review", "s1", "proj", "Plan", "s", {}, sock2);
+      const removed = inbox.forceCloseStaleForSession("s1");
+      expect(removed).toHaveLength(2);
+      expect(sock1.ended).toBe(true);
+      expect(sock2.ended).toBe(true);
+    });
+
+    it("also removes items without pending (like idle notifications)", () => {
+      inbox.add("idle", "s1", "proj", "idle", "s", {});
+      const sock = mockSocket();
+      inbox.add("permission", "s1", "proj", "Read", "s", {}, sock);
+      const removed = inbox.forceCloseStaleForSession("s1");
+      expect(removed).toHaveLength(2);
+      expect(inbox.all()).toHaveLength(0);
+    });
+
+    it("does not affect items for other sessions", () => {
+      const sock1 = mockSocket();
+      const sock2 = mockSocket();
+      inbox.add("permission", "s1", "proj", "A", "s", {}, sock1);
+      inbox.add("permission", "s2", "proj", "B", "s", {}, sock2);
+      const removed = inbox.forceCloseStaleForSession("s1");
+      expect(removed).toHaveLength(1);
+      expect(removed[0].label).toBe("A");
+      expect(inbox.all()).toHaveLength(1);
+      expect(inbox.all()[0].label).toBe("B");
+      expect(sock2.ended).toBe(false);
+    });
+
+    it("handles already-closed socket gracefully", () => {
+      const sock = mockSocket();
+      sock.write = () => { throw new Error("socket closed"); };
+      sock.end = () => { throw new Error("socket closed"); };
+      inbox.add("permission", "s1", "proj", "Read", "s", {}, sock);
+      const removed = inbox.forceCloseStaleForSession("s1");
+      expect(removed).toHaveLength(1);
+      expect(inbox.all()).toHaveLength(0);
+    });
+
+    it("returns empty array for unknown session", () => {
+      const removed = inbox.forceCloseStaleForSession("unknown");
+      expect(removed).toHaveLength(0);
+    });
+  });
+
   describe("find", () => {
     it("finds item by ID", () => {
       const item = inbox.add("permission", "s1", "proj", "A", "s", {});

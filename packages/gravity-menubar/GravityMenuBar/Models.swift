@@ -215,8 +215,10 @@ public struct PatchJSON: Decodable {
 
 public struct TerminalRequest: Encodable, Equatable {
     public let type: String
+    public let capabilities: [String]?
 
-    public init(type: String) {
+    public init(type: String, capabilities: [String]? = nil) {
         self.type = type
+        self.capabilities = capabilities
     }
 }

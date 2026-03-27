@@ -238,7 +238,10 @@ PROC is the process, EVENT is the status change."
                :noquery t))
         (claude-gravity--log 'info "Connected to gravity-server at %s"
                              claude-gravity-server-terminal-sock)
-        ;; Request overview on connect
+        ;; Declare capabilities and request overview on connect
+        (claude-gravity--send-to-server
+         '((type . "hello")
+           (capabilities . ("action.permission" "action.question" "action.plan-review"))))
         (claude-gravity--send-to-server
          '((type . "request.overview")))
         ;; Re-subscribe to previously-opened session details

@@ -120,6 +120,7 @@ public class GravityMonitor: ObservableObject {
         }
 
         startReading()
+        sendRequest(TerminalRequest(type: "hello", capabilities: []))
         sendRequest(TerminalRequest(type: "request.overview"))
         sendRequest(TerminalRequest(type: "request.resync"))
     }

@@ -296,6 +296,7 @@ export type ServerMessage =
 
 /** Messages from terminal to server. */
 export type TerminalMessage =
+  | { type: "hello"; capabilities: string[] }
   | { type: "action.permission"; itemId: number; decision: "allow" | "deny"; message?: string; updatedPermissions?: unknown[] }
   | { type: "action.question"; itemId: number; answers: string[] }
   | { type: "action.plan-review"; itemId: number; decision: "allow" | "deny"; feedback?: PlanFeedback }

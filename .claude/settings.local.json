@@ -35,6 +35,10 @@
       "Bash(timeout:*)",
       "Bash(chmod:*)",
       "Bash(test:*)",
+      "Bash(grep:*)",
+      "Bash(tail:*)",
+      "Bash(awk:*)",
+      "Bash(stat:*)",
       "Bash(wc:*)",
       "Bash(python3:*)",
       "Bash(head:*)",
@@ -87,11 +91,22 @@
       "Bash(make test-install:*)",
       "Bash(swift:*)",
       "Bash(/Applications/Emacs.app/Contents/MacOS/Emacs -nw --batch --eval '\\(package-initialize\\)' -L /Users/gdanov/work/playground/emacs-gravity -f batch-byte-compile /Users/gdanov/work/playground/emacs-gravity/claude-gravity-debug.el 2>&1)",
-      "WebFetch(domain:willschenk.com)"
+      "WebFetch(domain:willschenk.com)",
+      "Bash(/Users/gdanov/.local/bin/bd list:*)",
+      "Bash(/Users/gdanov/.local/bin/bd create:*)",
+      "Read(//Users/gdanov/.claude/plugins/cache/local-emacs-marketplace/**)",
+      "Read(//Users/gdanov/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/**)",
+      "WebFetch(domain:api.minimax.io)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:pypi.org)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",
       "/tmp"
     ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true
   }
 }

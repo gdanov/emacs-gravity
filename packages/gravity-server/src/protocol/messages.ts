@@ -3,6 +3,7 @@
 import type { TerminalMessage } from "@gravity/shared";
 
 const VALID_TERMINAL_MESSAGE_TYPES = new Set([
+  "hello",
   "action.permission",
   "action.question",
   "action.plan-review",
