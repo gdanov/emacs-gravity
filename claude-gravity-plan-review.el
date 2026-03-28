@@ -95,9 +95,11 @@ for those tools are auto-approved within the session.")
   :keymap claude-gravity-plan-review-mode-map)
 
 
-(defun claude-gravity--handle-plan-review (event-data session-id)
+(defun claude-gravity--handle-plan-review (event-data session-id &optional inbox-id)
   "Open a plan review buffer for EVENT-DATA.
-SESSION-ID identifies the Claude Code session."
+SESSION-ID identifies the Claude Code session.
+INBOX-ID, if non-nil, is stored buffer-locally so approve/deny can
+route the response back through the server."
   (let* ((tool-input (alist-get 'tool_input event-data))
          (plan-content (or (alist-get 'planContent tool-input)
                            ;; ExitPlanMode may have allowedPrompts but plan
@@ -142,6 +144,8 @@ SESSION-ID identifies the Claude Code session."
       (setq-local claude-gravity--plan-review-original
                   (buffer-substring-no-properties (point-min) (point-max)))
       (setq-local claude-gravity--plan-review-session-id session-id)
+      (when inbox-id
+        (setq-local claude-gravity--plan-review-inbox-id inbox-id))
       ;; Build session-scoped permissions from allowedPrompts tool names.
       ;; Each unique tool becomes a toolAlwaysAllow entry so subsequent
       ;; PermissionRequests for those tools are auto-approved.

@@ -896,21 +896,14 @@ Erases and redraws the body while preserving buffer-local state."
 
 (defun claude-gravity--inbox-act-plan-review (item)
   "Open a plan review buffer for inbox ITEM.
-Reuses existing `claude-gravity--handle-plan-review', modified to
-remove the inbox item when plan review is acted on."
+Reuses existing `claude-gravity--handle-plan-review', passing the
+inbox-id so the buffer can route responses back through the server."
   (let ((data (alist-get 'data item))
         (session-id (alist-get 'session-id item))
         (inbox-id (alist-get 'id item)))
     (condition-case err
-        (claude-gravity--handle-plan-review data session-id)
-      (error (claude-gravity--log 'error "Plan review error: %S data=%S" err data)))
-    ;; Store inbox-id on the plan review buffer so approve/deny can clean up
-    (let ((buf (get-buffer (format "*Claude Plan Review: %s*"
-                                    (or (alist-get 'label item)
-                                        session-id "unknown")))))
-      (when buf
-        (with-current-buffer buf
-          (setq-local claude-gravity--plan-review-inbox-id inbox-id))))))
+        (claude-gravity--handle-plan-review data session-id inbox-id)
+      (error (claude-gravity--log 'error "Plan review error: %S data=%S" err data)))))
 
 
 ;; --- Idle Session Action ---
