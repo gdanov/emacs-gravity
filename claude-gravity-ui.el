@@ -1159,6 +1159,7 @@ Only shows permission, question, and plan-review items (not idle)."
 (define-key claude-gravity-mode-map (kbd "k") 'claude-gravity-inbox-dismiss)
 
 (define-key claude-gravity-mode-map (kbd "w") 'claude-gravity-copy-section)
+(define-key claude-gravity-mode-map (kbd "y") 'claude-gravity-copy-issue-id)
 
 (define-key claude-gravity-mode-map (kbd ",") 'claude-gravity-rename-session)
 
@@ -1709,7 +1710,8 @@ prompts to confirm the directory before starting."
     ("TAB" "Toggle section" magit-section-toggle)
     ("e" "Edit entry" claude-gravity-edit-entry)
     ("+" "New config item" claude-gravity-config-new)
-    ("k" "Dismiss inbox" claude-gravity-inbox-dismiss)]
+    ("k" "Dismiss inbox" claude-gravity-inbox-dismiss)
+    ("y" "Copy issue ID" claude-gravity-copy-issue-id)]
    ["Debug"
     ("M" "Debug messages" claude-gravity-debug-show)]])
 
@@ -1742,6 +1744,7 @@ prompts to confirm the directory before starting."
     ("F" "Open plan file" claude-gravity-open-plan-file)
     ("c" "Comment" claude-gravity-comment-at-point)
     ("w" "Copy section" claude-gravity-copy-section)
+    ("y" "Copy issue ID" claude-gravity-copy-issue-id)
     ("T" "Parse transcript" claude-gravity-view-agent-transcript)
     ("V" "Open transcript" claude-gravity-open-agent-transcript)]
    ["Tmux (S prefix)"
@@ -1972,6 +1975,18 @@ Strips gutter indicators (▎) that are used for display margins."
               (kill-new text)
               (message "Copied %d chars" (length text)))
           (user-error "No section at point"))))))
+
+(defun claude-gravity-copy-issue-id ()
+  "Copy the beads issue ID at point to the kill ring.
+Only works when point is on a beads-issue section."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (if (and section (eq (oref section type) 'beads-issue))
+        (let ((id (oref section value)))
+          (when id
+            (kill-new id)
+            (message "Copied %s" id)))
+      (user-error "Not on an issue"))))
 
 (defun claude-gravity-tail ()
   "Collapse all sections and focus on the tail of the latest turn.
