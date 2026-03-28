@@ -61,7 +61,9 @@ function startHookServer(): Server {
 
         try {
           const msg = JSON.parse(line);
-          handleHookMessage(msg, socket);
+          handleHookMessage(msg, socket).catch((e) =>
+            log(`Hook message handler error: ${e}`, "error"),
+          );
         } catch (e) {
           log(`Hook socket parse error: ${e}`, "error");
         }
@@ -90,7 +92,29 @@ function startHookServer(): Server {
   return server;
 }
 
-function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
+// How long to wait for a capable terminal before rejecting bidirectional events.
+// Covers the typical 2-second Emacs reconnect window plus margin.
+const CAPABILITY_WAIT_MS = 10_000;
+const CAPABILITY_POLL_MS = 500;
+
+/** Poll until a terminal with `capability` connects, or timeout. */
+function waitForCapableTerminal(capability: string, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (terminals.hasCapableTerminal(capability)) { resolve(true); return; }
+    const start = Date.now();
+    const interval = setInterval(() => {
+      if (terminals.hasCapableTerminal(capability)) {
+        clearInterval(interval);
+        resolve(true);
+      } else if (Date.now() - start >= timeoutMs) {
+        clearInterval(interval);
+        resolve(false);
+      }
+    }, CAPABILITY_POLL_MS);
+  });
+}
+
+async function handleHookMessage(msg: Record<string, unknown>, socket: Socket): Promise<void> {
   const eventName = msg.event as HookEventName;
   const sessionId = (msg.session_id as string) || "unknown";
   const cwd = (msg.cwd as string) || "";
@@ -100,17 +124,23 @@ function handleHookMessage(msg: Record<string, unknown>, socket: Socket): void {
 
   log(`Hook event: ${eventName} session=${sessionId}`, "info");
 
-  // Reject bidirectional events immediately if no capable terminal is connected.
-  // Without a terminal that can approve, the bridge would hang forever.
+  // Reject bidirectional events if no capable terminal is connected.
+  // Wait briefly for a terminal to reconnect (handles EPIPE reconnect storms
+  // where Emacs is momentarily disconnected). See emacs-gravity-kdg.
   const bidirectionalEvents = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
   if (needsResponse && bidirectionalEvents.has(eventName)) {
     if (!terminals.hasCapableTerminal("action.permission")) {
-      log(`No capable terminal connected — rejecting ${eventName} immediately`, "warn");
-      try {
-        socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
-        socket.end();
-      } catch { /* socket may already be closed */ }
-      return;
+      log(`No capable terminal connected — waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
+      const arrived = await waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
+      if (!arrived) {
+        log(`No capable terminal after ${CAPABILITY_WAIT_MS}ms — rejecting ${eventName}`, "warn");
+        try {
+          socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
+          socket.end();
+        } catch { /* socket may already be closed */ }
+        return;
+      }
+      log(`Capable terminal connected during wait — proceeding with ${eventName}`, "info");
     }
   }
 

@@ -2,15 +2,27 @@
 //
 // Manages long-lived connections from terminals (Emacs, web, etc.)
 // Sends snapshots on connect, patches on state changes, inbox events.
+//
+// Write strategy: uses Node's built-in backpressure. When socket.write()
+// returns false (buffer full), messages are queued and flushed on 'drain'.
+// This prevents EPIPE storms where aggressive destroy() on transient write
+// failures triggers reconnect cycles. See emacs-gravity-kdg.
 
 import type { ServerMessage, TerminalMessage } from "@gravity/shared";
 import type { Socket } from "net";
 import { log } from "../util/log.js";
 
+// Max queued messages per connection before we consider it stuck and disconnect.
+const MAX_QUEUED_MESSAGES = 200;
+
 export interface TerminalConnection {
   socket: Socket;
   subscribedSessions: Set<string>;
   capabilities: Set<string>;
+  /** Messages waiting for the socket to drain. */
+  writeQueue: string[];
+  /** True when socket.write() returned false (buffer full). */
+  draining: boolean;
 }
 
 export class TerminalServer {
@@ -21,6 +33,8 @@ export class TerminalServer {
       socket,
       subscribedSessions: new Set(),
       capabilities: new Set(),
+      writeQueue: [],
+      draining: false,
     };
     this.connections.push(conn);
 
@@ -33,21 +47,19 @@ export class TerminalServer {
       socket.destroy();
     });
 
+    socket.on("drain", () => {
+      conn.draining = false;
+      this.flushQueue(conn);
+    });
+
     return conn;
   }
 
   /** Broadcast a message to all connected terminals. */
   broadcast(message: ServerMessage): void {
     const json = JSON.stringify(message) + "\n";
-    // Iterate over a copy to allow mutation during iteration
     for (const conn of [...this.connections]) {
-      if (conn.socket.destroyed || !conn.socket.writable) continue;
-      try {
-        conn.socket.write(json);
-      } catch (err) {
-        log(`Terminal broadcast write error: ${(err as Error).message}`, "error");
-        conn.socket.destroy();
-      }
+      this.writeToConnection(conn, json);
     }
   }
 
@@ -56,26 +68,14 @@ export class TerminalServer {
     const json = JSON.stringify(message) + "\n";
     for (const conn of [...this.connections]) {
       if (conn.subscribedSessions.has(sessionId)) {
-        if (conn.socket.destroyed || !conn.socket.writable) continue;
-        try {
-          conn.socket.write(json);
-        } catch (err) {
-          log(`Terminal subscriber write error: ${(err as Error).message}`, "error");
-          conn.socket.destroy();
-        }
+        this.writeToConnection(conn, json);
       }
     }
   }
 
   /** Send a message to a specific connection. */
   sendTo(conn: TerminalConnection, message: ServerMessage): void {
-    if (conn.socket.destroyed || !conn.socket.writable) return;
-    try {
-      conn.socket.write(JSON.stringify(message) + "\n");
-    } catch (err) {
-      log(`Terminal sendTo write error: ${(err as Error).message}`, "error");
-      conn.socket.destroy();
-    }
+    this.writeToConnection(conn, JSON.stringify(message) + "\n");
   }
 
   /** Remove a session from all connections' subscriptions. */
@@ -93,5 +93,63 @@ export class TerminalServer {
   /** Number of connected terminals. */
   get connectionCount(): number {
     return this.connections.length;
+  }
+
+  // ── Private helpers ──────────────────────────────────────────────
+
+  /** Write a pre-serialized JSON line to a connection, queuing if backpressured. */
+  private writeToConnection(conn: TerminalConnection, json: string): void {
+    if (conn.socket.destroyed || !conn.socket.writable) return;
+
+    // If already backpressured, queue instead of writing
+    if (conn.draining) {
+      conn.writeQueue.push(json);
+      this.enforceQueueLimit(conn);
+      return;
+    }
+
+    try {
+      const flushed = conn.socket.write(json);
+      if (!flushed) {
+        // Kernel buffer full — pause and wait for drain
+        conn.draining = true;
+      }
+    } catch (err) {
+      // Actual write error (not backpressure) — e.g. socket reset.
+      // The 'error' event handler will destroy the socket.
+      log(`Terminal write error: ${(err as Error).message}`, "error");
+    }
+  }
+
+  /** Flush queued messages after a drain event. */
+  private flushQueue(conn: TerminalConnection): void {
+    while (conn.writeQueue.length > 0) {
+      if (conn.socket.destroyed || !conn.socket.writable) {
+        conn.writeQueue.length = 0;
+        return;
+      }
+      const json = conn.writeQueue.shift()!;
+      try {
+        const flushed = conn.socket.write(json);
+        if (!flushed) {
+          // Still backpressured — stop flushing, wait for next drain
+          conn.draining = true;
+          return;
+        }
+      } catch (err) {
+        log(`Terminal flush error: ${(err as Error).message}`, "error");
+        conn.writeQueue.length = 0;
+        return;
+      }
+    }
+  }
+
+  /** If queue grows too large, the client is stuck — disconnect it. */
+  private enforceQueueLimit(conn: TerminalConnection): void {
+    if (conn.writeQueue.length > MAX_QUEUED_MESSAGES) {
+      log(`Terminal write queue exceeded ${MAX_QUEUED_MESSAGES} — disconnecting stuck client`, "warn");
+      conn.writeQueue.length = 0;
+      conn.socket.destroy();
+    }
   }
 }
