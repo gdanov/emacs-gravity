@@ -247,11 +247,7 @@ Returns list of alists with keys: name, description, scope, file-path, type."
 
 ;;; Hook Discovery
 
-(defun claude-gravity--as-list (val)
-  "Coerce VAL to a list if it's a vector, or return as-is if already a list."
-  (cond ((vectorp val) (append val nil))
-        ((listp val) val)
-        (t nil)))
+
 
 
 (defun claude-gravity--scan-hooks-from-data (data scope-label file-path)

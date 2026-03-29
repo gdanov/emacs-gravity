@@ -33,7 +33,7 @@
          (propertize (format "  %s" slug) 'face 'claude-gravity-slug)
          (let ((sid (plist-get session :session-id)))
            (when sid
-             (propertize (format " %s" (substring sid 0 (min 8 (length sid))))
+             (propertize (format " %s" (claude-gravity--short-id sid))
                          'face 'claude-gravity-detail-label)))
          (let ((tmux-name (gethash (plist-get session :session-id) claude-gravity--tmux-sessions)))
            (when tmux-name
@@ -108,8 +108,7 @@ Steps are pre-computed — no dedup or grouping needed."
           ;; Thinking stays outside the section (always visible)
           (when (and athink (not (string-empty-p athink)))
             (let* ((indent (or (* (claude-gravity--section-depth) claude-gravity--indent-step) 0))
-                   (margin (propertize (concat claude-gravity--margin-char " ")
-                                      'face 'claude-gravity-thinking))
+                   (margin (claude-gravity--margin-prefix 'claude-gravity-thinking))
                    (prefix (concat (make-string indent ?\s) margin)))
               (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
               (claude-gravity--insert-wrapped athink (+ indent 4) 'claude-gravity-thinking)))
@@ -120,8 +119,7 @@ Steps are pre-computed — no dedup or grouping needed."
                   (car split)
                 (format "%s%s%s"
                         (claude-gravity--indent)
-                        (propertize (concat claude-gravity--margin-char " ")
-                                    'face 'claude-gravity-detail-label)
+                        (claude-gravity--margin-prefix 'claude-gravity-detail-label)
                         (propertize tools-label 'face 'claude-gravity-detail-label))))
             ;; Body: remaining assistant text lines
             (when (cdr split)
@@ -207,9 +205,7 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
                 (if agent
                     (let* ((atype (alist-get 'type agent))
                            (aid (alist-get 'agent_id agent))
-                           (short-id (if (and aid (> (length aid) 7))
-                                         (substring aid 0 7)
-                                       (or aid "?")))
+                           (short-id (or (claude-gravity--short-id aid 7) "?"))
                            (adur (alist-get 'duration agent))
                            (astatus (alist-get 'status agent))
                            (dur-str (if (and (equal astatus "done") adur)
@@ -311,9 +307,7 @@ DEPTH tracks nesting level for background tint."
          (desc (claude-gravity--tool-description input))
          (atype (alist-get 'type agent))
          (aid (alist-get 'agent_id agent))
-         (short-id (if (and aid (> (length aid) 7))
-                       (substring aid 0 7)
-                     (or aid "?")))
+         (short-id (or (claude-gravity--short-id aid 7) "?"))
          (adur (alist-get 'duration agent))
          (dur-str (if (and agent-done-p adur)
                       (format "  %s" (claude-gravity--format-duration adur))

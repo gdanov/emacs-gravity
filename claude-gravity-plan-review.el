@@ -265,9 +265,7 @@ Returns a formatted markdown string or nil if no comments."
                        (ctx (alist-get 'context entry)))
                    (format "- Line %d (near \"%s\"): \"%s\""
                            line
-                           (if (> (length ctx) 60)
-                               (concat (substring ctx 0 57) "...")
-                             ctx)
+                           (claude-gravity--truncate ctx 60)
                            text)))
                sorted "\n")
               "\n"))))

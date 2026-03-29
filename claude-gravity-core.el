@@ -250,6 +250,25 @@ Strips the `claude-' prefix and date suffix for brevity."
         s))))
 
 
+(defun claude-gravity--short-id (id &optional max-len)
+  "Return first MAX-LEN (default 8) chars of ID string."
+  (when id
+    (let ((n (or max-len 8)))
+      (substring id 0 (min n (length id))))))
+
+
+(defun claude-gravity--margin-prefix (face)
+  "Return a propertized margin indicator string with FACE."
+  (propertize (concat claude-gravity--margin-char " ") 'face face))
+
+
+(defun claude-gravity--as-list (val)
+  "Coerce VAL to a list if it is a vector, or return as-is if already a list."
+  (cond ((vectorp val) (append val nil))
+        ((listp val) val)
+        (t nil)))
+
+
 (defun claude-gravity--json-read-file (path)
   "Read JSON file at PATH using the fast C parser.
 Returns alist for objects, list for arrays."

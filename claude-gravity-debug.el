@@ -578,9 +578,7 @@ Objects and arrays are expanded with syntax highlighting."
   "Insert scalar VALUE with appropriate face, inline (no newline)."
   (cond
    ((stringp value)
-    (let ((display (if (> (length value) 120)
-                       (concat (substring value 0 117) "...")
-                     value)))
+    (let ((display (claude-gravity--truncate value 120)))
       (insert (propertize (format "\"%s\"" (claude-gravity--debug-escape-json-string display))
                           'face 'font-lock-string-face))))
    ((numberp value)

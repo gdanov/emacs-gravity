@@ -84,9 +84,7 @@ Returns nil if neither is available."
         (cwd (plist-get session :cwd)))
     (cond
      (branch
-      (let ((display (if (> (length branch) 40)
-                         (concat (substring branch 0 37) "...")
-                       branch)))
+      (let ((display (claude-gravity--truncate branch 40)))
         (propertize (format "(%s)" display) 'face 'claude-gravity-branch)))
      ((and cwd (not (string-empty-p cwd)))
       (propertize (format "(%s)" (file-name-nondirectory (directory-file-name cwd)))
@@ -164,7 +162,7 @@ Groups non-idle items by session and shows badge counts."
                               (format "%s/%s"
                                       (plist-get session :project)
                                       (claude-gravity--session-label session))
-                            (substring sid 0 (min 4 (length sid)))))
+                            (claude-gravity--short-id sid 4)))
                    (badges nil))
                (when (> perms 0)
                  (push (propertize (format "!%d" perms) 'face 'claude-gravity-question) badges))
@@ -677,7 +675,7 @@ Heading shows summary counts; expanded body shows one line per non-closed issue.
                                (branch-str (or (claude-gravity--branch-or-cwd session) ""))
                                (source-str (or (claude-gravity--source-indicator session) ""))
                                (uuid-prefix (propertize
-                                            (format " %s" (substring sid 0 (min 8 (length sid))))
+                                            (format " %s" (claude-gravity--short-id sid))
                                             'face 'claude-gravity-detail-label))
                                (inbox-badge (claude-gravity--inbox-badges sid))
                                (ignored-badge
@@ -1300,7 +1298,7 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
          (segments nil))
     (push (concat " " dot " " status-word) segments)
     (push (concat "  " slug) segments)
-    (push (propertize (format " %s" (substring sid 0 (min 8 (length sid))))
+    (push (propertize (format " %s" (claude-gravity--short-id sid))
                       'face 'claude-gravity-detail-label)
           segments)
     (when branch-str
@@ -1532,7 +1530,7 @@ In overview buffer: resync all sessions."
       (progn
         (claude-gravity--force-resync-session claude-gravity--buffer-session-id)
         (message "Resync requested for %s"
-                 (substring claude-gravity--buffer-session-id 0 8)))
+                 (claude-gravity--short-id claude-gravity--buffer-session-id)))
     (claude-gravity--force-resync-all)
     (message "Full resync requested")))
 
@@ -2279,19 +2277,17 @@ Diff coloring is applied later by `claude-gravity--popup-fontify-diffs'."
      ;; structuredPatch — render hunks as plain text
      (patch
       (insert "### Diff\n\n")
-      (let ((hunks (if (vectorp patch) (append patch nil) patch)))
-        (dolist (hunk hunks)
-          (let ((old-start (alist-get 'oldStart hunk))
-                (old-lines (alist-get 'oldLines hunk))
-                (new-start (alist-get 'newStart hunk))
-                (new-lines (alist-get 'newLines hunk))
-                (lines-vec (alist-get 'lines hunk)))
-            (insert (format "@@ -%s,%s +%s,%s @@\n"
-                            (or old-start "?") (or old-lines "?")
-                            (or new-start "?") (or new-lines "?")))
-            (let ((raw-lines (if (vectorp lines-vec) (append lines-vec nil) lines-vec)))
-              (dolist (line raw-lines)
-                (insert line "\n"))))))
+      (dolist (hunk (claude-gravity--as-list patch))
+        (let ((old-start (alist-get 'oldStart hunk))
+              (old-lines (alist-get 'oldLines hunk))
+              (new-start (alist-get 'newStart hunk))
+              (new-lines (alist-get 'newLines hunk))
+              (lines-vec (alist-get 'lines hunk)))
+          (insert (format "@@ -%s,%s +%s,%s @@\n"
+                          (or old-start "?") (or old-lines "?")
+                          (or new-start "?") (or new-lines "?")))
+          (dolist (line (claude-gravity--as-list lines-vec))
+            (insert line "\n"))))
       (insert "\n"))
      ;; old/new strings — simple before/after
      ((and new-str (stringp new-str) (not (string-empty-p new-str)))

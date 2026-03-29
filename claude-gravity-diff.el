@@ -217,10 +217,9 @@ LABEL is the section header."
   (let ((prefix (claude-gravity--indent))
         (total-lines 0))
     (claude-gravity--insert-label (concat label "\n"))
-    (let ((hunks (if (vectorp patch) (append patch nil) patch)))
-      (dolist (hunk hunks)
-        (when (< total-lines claude-gravity-diff-max-lines)
-          (let ((old-start (alist-get 'oldStart hunk))
+    (dolist (hunk (claude-gravity--as-list patch))
+      (when (< total-lines claude-gravity-diff-max-lines)
+        (let ((old-start (alist-get 'oldStart hunk))
                 (old-lines (alist-get 'oldLines hunk))
                 (new-start (alist-get 'newStart hunk))
                 (new-lines (alist-get 'newLines hunk))
@@ -234,9 +233,7 @@ LABEL is the section header."
                     "\n")
             (setq total-lines (1+ total-lines))
             ;; Process lines — collect adjacent -/+ groups for word-level refinement
-            (let* ((raw-lines (if (vectorp lines-vec)
-                                  (append lines-vec nil)
-                                lines-vec))
+            (let* ((raw-lines (claude-gravity--as-list lines-vec))
                    (i 0)
                    (n (length raw-lines)))
               (while (and (< i n) (< total-lines claude-gravity-diff-max-lines))
@@ -296,7 +293,7 @@ LABEL is the section header."
                     (setq i (1+ i))))))))))
     (when (>= total-lines claude-gravity-diff-max-lines)
       (insert (propertize (format "%s  ... (truncated)\n" prefix)
-                          'face 'claude-gravity-detail-label))))))
+                          'face 'claude-gravity-detail-label)))))
 
 
 (defun claude-gravity--insert-refined-hunk-lines (removed-lines added-lines prefix)
@@ -476,8 +473,7 @@ Called before each tool item in the rendering loop."
     (when atext (setq atext (string-trim atext)))
     ;; Thinking: show "▎ Thinking..." header, then content indented below
     (when (and athink (not (string-empty-p athink)))
-      (let* ((margin (propertize (concat claude-gravity--margin-char " ")
-                                'face 'claude-gravity-thinking))
+      (let* ((margin (claude-gravity--margin-prefix 'claude-gravity-thinking))
              (prefix (concat (make-string indent ?\s) margin)))
         (insert prefix (propertize "Thinking..." 'face 'claude-gravity-thinking) "\n")
         ;; Content below with plain indent (no ▎)

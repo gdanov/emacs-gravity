@@ -70,9 +70,7 @@ because external processes like tmux do not expand tilde."
 
 (defun claude-gravity--session-short-id (session-id)
   "Return first 4 chars of SESSION-ID for display."
-  (if (and session-id (> (length session-id) 4))
-      (substring session-id 0 4)
-    (or session-id "?")))
+  (or (claude-gravity--short-id session-id 4) "?"))
 
 
 (defun claude-gravity--session-label (session)

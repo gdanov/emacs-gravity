@@ -458,7 +458,7 @@ SESSION-ID defaults to the current buffer's session."
   (interactive)
   (let* ((sid (claude-gravity--resolve-daemon-session session-id))
          (session (claude-gravity--get-session sid))
-         (label (if session (claude-gravity--session-label session) (substring sid 0 8)))
+         (label (if session (claude-gravity--session-label session) (claude-gravity--short-id sid)))
          (buf-name (format "*Claude Compose: %s*" label))
          (buf (get-buffer-create buf-name)))
     (with-current-buffer buf

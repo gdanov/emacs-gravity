@@ -364,7 +364,7 @@ CWD defaults to the session's stored cwd.  MODEL overrides the default."
                              default-directory))))
          (tmux-name (format "claude-resume-%s-%s"
                             project-base
-                            (substring session-id 0 (min 8 (length session-id)))))
+                            (claude-gravity--short-id session-id)))
          (plugin-root (file-name-directory
                        (or load-file-name
                            (locate-library "claude-gravity")
@@ -542,7 +542,7 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
   (let* ((resolved (claude-gravity--resolve-tmux-session session-id))
          (sid (car resolved))
          (session (claude-gravity--get-session sid))
-         (label (if session (claude-gravity--session-label session) (substring sid 0 8)))
+         (label (if session (claude-gravity--session-label session) (claude-gravity--short-id sid)))
          (buf-name (format "*Claude Compose: %s*" label))
          (buf (get-buffer-create buf-name)))
     (with-current-buffer buf
