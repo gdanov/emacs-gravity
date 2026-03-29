@@ -20,8 +20,8 @@ import type { SessionStoreService } from "../services/session-store.js";
 import { SessionStore } from "../services/session-store.js";
 import type { InboxService } from "../services/inbox.js";
 import { Inbox } from "../services/inbox.js";
-import { Fs } from "../services/fs.js";
-import type { FsService } from "../services/fs.js";
+import { Fs } from "@gravity/shared";
+import type { FsService } from "@gravity/shared";
 import {
   createSession,
   resetSession,

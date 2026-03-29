@@ -4,7 +4,7 @@
 
 import { Layer } from "effect";
 import { ProcessIOTest } from "../src/services/process-io.js";
-import { FsTest } from "../src/services/fs.js";
+import { FsTest } from "@gravity/shared";
 import { EmacsSocketTest } from "../src/services/emacs-socket.js";
 import { BridgeConfigTest } from "../src/services/config.js";
 import { LoggerLive } from "../src/services/logger.js";

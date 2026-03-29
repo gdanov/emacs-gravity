@@ -5,5 +5,3 @@ export class StdinParseError extends Data.TaggedError("StdinParseError")<{ raw: 
 export class SocketNotFoundError extends Data.TaggedError("SocketNotFoundError")<{ path: string }> {}
 export class SocketError extends Data.TaggedError("SocketError")<{ cause: unknown }> {}
 export class SocketTimeoutError extends Data.TaggedError("SocketTimeoutError")<{ timeoutMs: number }> {}
-export class FileReadError extends Data.TaggedError("FileReadError")<{ path: string; cause: unknown }> {}
-export class FileWriteError extends Data.TaggedError("FileWriteError")<{ path: string; cause: unknown }> {}

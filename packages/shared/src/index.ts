@@ -39,3 +39,7 @@ export type {
 } from "./types.js";
 
 export { isSafeBashCommand } from "./safe-bash.js";
+
+// Services
+export { FileReadError, FileWriteError, Fs, FsLive, FsTest } from "./services/index.js";
+export type { FsService } from "./services/index.js";

@@ -1,23 +1,35 @@
+// fs.ts — Shared file system service for Effect-based DI
+//
+// Union of methods from emacs-bridge and gravity-server.
+// Wraps synchronous Node.js file I/O in Effect for testability
+// and typed error handling.
+
 import { Effect, Layer, ServiceMap } from "effect";
 import {
   readFileSync,
   writeFileSync,
+  appendFileSync,
   existsSync,
   statSync,
   openSync,
   readSync,
   closeSync,
   mkdirSync,
+  unlinkSync,
+  renameSync,
 } from "fs";
 import { FileReadError, FileWriteError } from "./errors.js";
 
 export interface FsService {
   readonly readFile: (path: string) => Effect.Effect<string, FileReadError>;
   readonly writeFile: (path: string, data: string) => Effect.Effect<void, FileWriteError>;
+  readonly appendFile: (path: string, data: string) => Effect.Effect<void, FileWriteError>;
   readonly exists: (path: string) => Effect.Effect<boolean>;
   readonly stat: (path: string) => Effect.Effect<{ size: number }, FileReadError>;
   readonly readBytes: (path: string, offset: number, length: number) => Effect.Effect<Buffer, FileReadError>;
   readonly mkdirp: (path: string) => Effect.Effect<void, FileWriteError>;
+  readonly unlinkIfExists: (path: string) => Effect.Effect<void>;
+  readonly rename: (from: string, to: string) => Effect.Effect<void, FileWriteError>;
 }
 
 export const Fs = ServiceMap.Service<FsService>("Fs");
@@ -32,6 +44,12 @@ export const FsLive = Layer.succeed(Fs, {
   writeFile: (path: string, data: string) =>
     Effect.try({
       try: () => { writeFileSync(path, data, "utf-8"); },
+      catch: (cause) => new FileWriteError({ path, cause }),
+    }),
+
+  appendFile: (path: string, data: string) =>
+    Effect.try({
+      try: () => { appendFileSync(path, data, "utf-8"); },
       catch: (cause) => new FileWriteError({ path, cause }),
     }),
 
@@ -64,6 +82,17 @@ export const FsLive = Layer.succeed(Fs, {
       try: () => { mkdirSync(path, { recursive: true }); },
       catch: (cause) => new FileWriteError({ path, cause }),
     }),
+
+  unlinkIfExists: (path: string) =>
+    Effect.sync(() => {
+      try { unlinkSync(path); } catch { /* file may not exist */ }
+    }),
+
+  rename: (from: string, to: string) =>
+    Effect.try({
+      try: () => { renameSync(from, to); },
+      catch: (cause) => new FileWriteError({ path: from, cause }),
+    }),
 });
 
 export const FsTest = (fixtures: Record<string, string>) => {
@@ -76,6 +105,12 @@ export const FsTest = (fixtures: Record<string, string>) => {
 
     writeFile: (path: string, data: string) =>
       Effect.sync(() => { files.set(path, data); }),
+
+    appendFile: (path: string, data: string) =>
+      Effect.sync(() => {
+        const existing = files.get(path) ?? "";
+        files.set(path, existing + data);
+      }),
 
     exists: (path: string) =>
       Effect.succeed(files.has(path)),
@@ -92,5 +127,17 @@ export const FsTest = (fixtures: Record<string, string>) => {
 
     mkdirp: (_path: string) =>
       Effect.void,
+
+    unlinkIfExists: (path: string) =>
+      Effect.sync(() => { files.delete(path); }),
+
+    rename: (from: string, to: string) =>
+      Effect.sync(() => {
+        const content = files.get(from);
+        if (content !== undefined) {
+          files.set(to, content);
+          files.delete(from);
+        }
+      }),
   });
 };

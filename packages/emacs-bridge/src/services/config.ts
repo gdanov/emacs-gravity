@@ -1,7 +1,7 @@
 import { Effect, Layer, ServiceMap } from "effect";
 import { execSync } from "child_process";
 import { ProcessIO } from "./process-io.js";
-import { Fs } from "./fs.js";
+import { Fs } from "@gravity/shared";
 import { join } from "path";
 
 export interface BridgeConfigData {

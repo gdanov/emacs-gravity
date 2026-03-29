@@ -3,7 +3,7 @@ import { Effect, Layer } from "effect";
 import { handleEvent } from "../src/handlers/event-handler.js";
 import { SessionStore, makeSessionStore, type SessionStoreService } from "../src/services/session-store.js";
 import { Inbox, makeInbox, type InboxService } from "../src/services/inbox.js";
-import { FsTest } from "../src/services/fs.js";
+import { FsTest } from "@gravity/shared";
 import type { HookData, Patch, Session, TokenUsage } from "@gravity/shared";
 import type { Socket } from "net";
 import { EventEmitter } from "events";

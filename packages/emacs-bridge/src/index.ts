@@ -15,7 +15,7 @@ import {
 } from "./enrich.js";
 import { ProcessIO, ProcessIOLive } from "./services/process-io.js";
 import { BridgeConfig, BridgeConfigLive } from "./services/config.js";
-import { FsLive } from "./services/fs.js";
+import { FsLive } from "@gravity/shared";
 import { LoggerLive } from "./services/logger.js";
 import { EmacsSocket, EmacsSocketLive } from "./services/emacs-socket.js";
 import { HookSocketClient, HookSocketClientLive } from "./services/hook-socket.js";

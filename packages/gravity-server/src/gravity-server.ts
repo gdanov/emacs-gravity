@@ -18,12 +18,12 @@ import { sessionEnd } from "./state/session.js";
 
 // Effect services
 import { ServerConfig, ServerConfigLive } from "./services/config.js";
-import { Fs, FsLive } from "./services/fs.js";
+import { Fs, FsLive } from "@gravity/shared";
 import { SessionStore, SessionStoreLive, type SessionStoreService } from "./services/session-store.js";
 import { Inbox, InboxLive, type InboxService } from "./services/inbox.js";
 import { Terminal, TerminalLive, type TerminalService } from "./services/terminal.js";
 import type { TerminalConnection } from "./services/terminal.js";
-import type { FsService } from "./services/fs.js";
+import type { FsService } from "@gravity/shared";
 import type { ServerConfigData } from "./services/config.js";
 
 // ── Constants ────────────────────────────────────────────────────────
