@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { SessionStore } from "../src/state/session-store.js";
+import { makeSessionStore, type SessionStoreService } from "../src/services/session-store.js";
 import type { Session } from "@gravity/shared";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -34,11 +34,11 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe("SessionStore", () => {
-  let store: SessionStore;
+  let store: SessionStoreService;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    store = new SessionStore();
+    store = makeSessionStore();
   });
 
   afterEach(() => {

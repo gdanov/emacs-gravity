@@ -1,38 +1,50 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { handleEvent, type EventHandlerDeps } from "../src/handlers/event-handler.js";
-import { SessionStore } from "../src/state/session-store.js";
-import { InboxManager } from "../src/state/inbox.js";
+import { Effect, Layer } from "effect";
+import { handleEvent } from "../src/handlers/event-handler.js";
+import { SessionStore, makeSessionStore, type SessionStoreService } from "../src/services/session-store.js";
+import { Inbox, makeInbox, type InboxService } from "../src/services/inbox.js";
+import { FsTest } from "../src/services/fs.js";
 import type { HookData, Patch, Session, TokenUsage } from "@gravity/shared";
 import type { Socket } from "net";
 import { EventEmitter } from "events";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function makeDeps(): EventHandlerDeps {
-  return { store: new SessionStore(), inbox: new InboxManager() };
+interface TestDeps {
+  store: SessionStoreService;
+  inbox: InboxService;
+  layer: Layer.Layer<SessionStoreService | InboxService>;
+}
+
+function makeDeps(): TestDeps {
+  const store = makeSessionStore();
+  const inbox = makeInbox();
+  const layer = Layer.mergeAll(
+    Layer.succeed(SessionStore, store),
+    Layer.succeed(Inbox, inbox),
+  );
+  return { store, inbox, layer };
 }
 
 function fire(
-  deps: EventHandlerDeps,
+  deps: TestDeps,
   event: string,
   sessionId: string,
   data: HookData = {},
   pid: number | null = 123,
   hookSocket?: Socket,
 ): Patch[] {
-  return handleEvent(
-    event as any,
-    sessionId,
-    "/test/project",
-    data,
-    pid,
-    deps,
-    hookSocket,
+  const fullLayer = Layer.mergeAll(deps.layer, FsTest({}));
+  return Effect.runSync(
+    Effect.provide(
+      handleEvent(event as any, sessionId, "/test/project", data, pid, hookSocket),
+      fullLayer,
+    ),
   );
 }
 
 /** Shorthand: fire SessionStart and return deps for chaining */
-function startSession(deps: EventHandlerDeps, sessionId = "s1", data: HookData = {}, pid: number | null = 123): EventHandlerDeps {
+function startSession(deps: TestDeps, sessionId = "s1", data: HookData = {}, pid: number | null = 123): TestDeps {
   fire(deps, "SessionStart", sessionId, data, pid);
   return deps;
 }
@@ -62,7 +74,7 @@ function makeMockSocket(): Socket {
 // ── Tests ────────────────────────────────────────────────────────────
 
 describe("Event Handler", () => {
-  let deps: EventHandlerDeps;
+  let deps: TestDeps;
 
   beforeEach(() => {
     deps = makeDeps();

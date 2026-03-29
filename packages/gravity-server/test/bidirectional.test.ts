@@ -3,8 +3,23 @@
 // Tests PermissionRequest, AskUserQuestion, and plan review.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { Effect } from "effect";
 import type { Socket } from "net";
-import { InboxManager } from "../src/state/inbox.js";
+import { makeInbox, type InboxService } from "../src/services/inbox.js";
+import type { HookSocketResponse } from "@gravity/shared";
+
+// Thin wrapper: production inbox with synchronous respond() for test assertions
+interface TestInbox extends Omit<InboxService, "respond"> {
+  respond: (id: number, response: HookSocketResponse) => boolean;
+}
+
+function makeTestInbox(): TestInbox {
+  const inbox = makeInbox();
+  return {
+    ...inbox,
+    respond: (id, response) => Effect.runSync(inbox.respond(id, response)),
+  };
+}
 
 function mockSocket(): Socket & {
   written: string[];
@@ -26,10 +41,10 @@ function mockSocket(): Socket & {
 }
 
 describe("InboxManager", () => {
-  let inbox: InboxManager;
+  let inbox: TestInbox;
 
   beforeEach(() => {
-    inbox = new InboxManager();
+    inbox = makeTestInbox();
   });
 
   describe("add", () => {
@@ -315,7 +330,7 @@ describe("InboxManager", () => {
 
 describe("Bidirectional flow: PermissionRequest", () => {
   it("permission allow produces correct hookSpecificOutput", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     inbox.add("permission", "s1", "proj", "Read", "Reading file", {}, sock);
     const item = inbox.all()[0];
@@ -334,7 +349,7 @@ describe("Bidirectional flow: PermissionRequest", () => {
   });
 
   it("permission allow with updatedPermissions forwards them in decision", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     inbox.add("permission", "s1", "proj", "Bash", "Running npm", {}, sock);
     const item = inbox.all()[0];
@@ -353,7 +368,7 @@ describe("Bidirectional flow: PermissionRequest", () => {
   });
 
   it("permission allow without updatedPermissions omits the field", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     inbox.add("permission", "s1", "proj", "Read", "Reading file", {}, sock);
     const item = inbox.all()[0];
@@ -371,7 +386,7 @@ describe("Bidirectional flow: PermissionRequest", () => {
   });
 
   it("permission deny with message produces correct output", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     inbox.add("permission", "s1", "proj", "Bash", "Running npm", {}, sock);
     const item = inbox.all()[0];
@@ -391,7 +406,7 @@ describe("Bidirectional flow: PermissionRequest", () => {
 
 describe("Bidirectional flow: AskUserQuestion", () => {
   it("question answer produces PreToolUse allow with updatedInput", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     const hookData = {
       tool_name: "AskUserQuestion",
@@ -440,7 +455,7 @@ describe("Bidirectional flow: AskUserQuestion", () => {
 
 describe("ExitPlanMode plan review responses", () => {
   it("ExitPlanMode allow passes through", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     const item = inbox.add(
       "plan-review", "s1", "proj", "Plan Review", "Review plan",
@@ -459,7 +474,7 @@ describe("ExitPlanMode plan review responses", () => {
   });
 
   it("deny with feedback passes through", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     inbox.add(
       "plan-review", "s1", "proj", "Plan Review", "Review plan",
@@ -634,7 +649,7 @@ describe("Plan review deny with missing feedback fields", () => {
   }
 
   it("deny with feedback: undefined does not crash and sends deny response", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     inbox.add(
       "plan-review", "s1", "proj", "Plan Review", "Review plan",
@@ -661,7 +676,7 @@ describe("Plan review deny with missing feedback fields", () => {
   });
 
   it("deny with partial feedback { generalComment } does not crash and includes comment", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     inbox.add(
       "plan-review", "s1", "proj", "Plan Review", "Review plan",
@@ -692,7 +707,7 @@ describe("Plan review deny with missing feedback fields", () => {
   });
 
   it("deny with empty feedback {} does not crash", () => {
-    const inbox = new InboxManager();
+    const inbox = makeTestInbox();
     const sock = mockSocket();
     inbox.add(
       "plan-review", "s1", "proj", "Plan Review", "Review plan",

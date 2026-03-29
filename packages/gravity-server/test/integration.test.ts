@@ -104,16 +104,24 @@ describe("Integration: Server end-to-end", () => {
     }
 
     // Import and start server components inline (avoid global state issues)
-    // We'll create a minimal server setup here
-    const { SessionStore } = await import("../src/state/session-store.js");
-    const { InboxManager } = await import("../src/state/inbox.js");
-    const { TerminalServer } = await import("../src/protocol/terminal-server.js");
+    const { Effect, Layer } = await import("effect");
+    const { SessionStore: SessionStoreTag, makeSessionStore } = await import("../src/services/session-store.js");
+    const { Inbox: InboxTag, makeInbox } = await import("../src/services/inbox.js");
+    const { FsLive } = await import("../src/services/fs.js");
+    const { makeTerminal } = await import("../src/services/terminal.js");
     const { parseTerminalMessage } = await import("../src/protocol/messages.js");
     const { handleEvent } = await import("../src/handlers/event-handler.js");
 
-    const store = new SessionStore();
-    const inbox = new InboxManager();
-    const terminals = new TerminalServer();
+    const store = makeSessionStore();
+    const inbox = makeInbox();
+    const terminals = makeTerminal();
+
+    // Effect layer for handleEvent
+    const eventLayer = Layer.mergeAll(
+      Layer.succeed(SessionStoreTag, store),
+      Layer.succeed(InboxTag, inbox),
+      FsLive,
+    );
 
     hookServer = createServer((socket: Socket) => {
       let buf = "";
@@ -125,10 +133,13 @@ describe("Integration: Server end-to-end", () => {
           buf = buf.substring(idx + 1);
           if (line.length === 0) continue;
           const msg = JSON.parse(line) as HookSocketMessage;
-          const patches = handleEvent(
-            msg.event, msg.session_id, msg.cwd, msg.data, msg.pid,
-            { store, inbox }, msg.needs_response ? socket : undefined,
-          );
+          const patches = Effect.runSync(Effect.provide(
+            handleEvent(
+              msg.event, msg.session_id, msg.cwd, msg.data, msg.pid,
+              msg.needs_response ? socket : undefined,
+            ),
+            eventLayer,
+          ));
           if (patches.length > 0) {
             terminals.sendToSubscribers(msg.session_id, {
               type: "session.update", sessionId: msg.session_id, patches,
@@ -184,12 +195,12 @@ describe("Integration: Server end-to-end", () => {
               type: "overview.snapshot", projects: store.getProjectSummaries(),
             });
           } else if (msg.type === "action.permission") {
-            inbox.respond(msg.itemId, {
+            Effect.runSync(inbox.respond(msg.itemId, {
               hookSpecificOutput: {
                 hookEventName: "PermissionRequest",
                 decision: { behavior: msg.decision, message: msg.message, updatedPermissions: msg.updatedPermissions },
               },
-            });
+            }));
             terminals.broadcast({ type: "inbox.removed", itemId: msg.itemId });
           } else if (msg.type === "action.plan-review") {
             const pending = inbox.getPending(msg.itemId);
@@ -204,12 +215,12 @@ describe("Integration: Server end-to-end", () => {
               }
               message = parts.join("\n");
             }
-            inbox.respond(msg.itemId, {
+            Effect.runSync(inbox.respond(msg.itemId, {
               hookSpecificOutput: {
                 hookEventName: "PermissionRequest",
                 decision: { behavior: finalDecision, message },
               },
-            });
+            }));
             terminals.broadcast({ type: "inbox.removed", itemId: msg.itemId });
           }
         }

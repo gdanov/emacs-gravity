@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { Socket } from "net";
-import { TerminalServer } from "../src/protocol/terminal-server.js";
+import { makeTerminal, type TerminalService } from "../src/services/terminal.js";
 import type { ServerMessage } from "@gravity/shared";
 
 /** Create a mock socket with controllable destroyed/writable state. */
@@ -40,7 +40,7 @@ const sampleMessage: ServerMessage = {
 describe("TerminalServer: dead connection handling", () => {
   describe("broadcast", () => {
     it("skips connections with destroyed sockets", () => {
-      const ts = new TerminalServer();
+      const ts = makeTerminal();
       const deadSocket = mockSocket({ destroyed: true });
       const liveSocket = mockSocket();
       ts.addConnection(deadSocket);
@@ -54,7 +54,7 @@ describe("TerminalServer: dead connection handling", () => {
     });
 
     it("skips connections with non-writable sockets", () => {
-      const ts = new TerminalServer();
+      const ts = makeTerminal();
       const nonWritable = mockSocket({ writable: false });
       const liveSocket = mockSocket();
       ts.addConnection(nonWritable);
@@ -69,7 +69,7 @@ describe("TerminalServer: dead connection handling", () => {
 
   describe("sendToSubscribers", () => {
     it("skips subscribed connections with destroyed sockets", () => {
-      const ts = new TerminalServer();
+      const ts = makeTerminal();
       const deadSocket = mockSocket({ destroyed: true });
       const liveSocket = mockSocket();
       const deadConn = ts.addConnection(deadSocket);
@@ -84,7 +84,7 @@ describe("TerminalServer: dead connection handling", () => {
     });
 
     it("skips subscribed connections with non-writable sockets", () => {
-      const ts = new TerminalServer();
+      const ts = makeTerminal();
       const nonWritable = mockSocket({ writable: false });
       const liveSocket = mockSocket();
       const nwConn = ts.addConnection(nonWritable);
@@ -101,7 +101,7 @@ describe("TerminalServer: dead connection handling", () => {
 
   describe("sendTo", () => {
     it("does not write to a destroyed socket", () => {
-      const ts = new TerminalServer();
+      const ts = makeTerminal();
       const deadSocket = mockSocket({ destroyed: true });
       const conn = ts.addConnection(deadSocket);
 
@@ -112,7 +112,7 @@ describe("TerminalServer: dead connection handling", () => {
     });
 
     it("does not write to a non-writable socket", () => {
-      const ts = new TerminalServer();
+      const ts = makeTerminal();
       const nonWritable = mockSocket({ writable: false });
       const conn = ts.addConnection(nonWritable);
 
