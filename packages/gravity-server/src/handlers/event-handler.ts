@@ -51,14 +51,19 @@ function shortModelName(modelId: string): string {
   return modelId;
 }
 
+// Pre-compiled regexes for prompt text extraction
+const RE_SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+const RE_COMMAND_NAME_BLOCK = /<command-name>[\s\S]*?<\/command-name>/g;
+const RE_COMMAND_ARGS_BLOCK = /<command-args>[\s\S]*?<\/command-args>/g;
+const RE_COMMAND_NAME = /<command-name>([^<]+)<\/command-name>/;
+const RE_COMMAND_ARGS = /<command-args>([^<]*)<\/command-args>/;
+
 /** Strip system XML from user prompt text. */
 function stripSystemXml(raw: string | undefined): string | null {
   if (!raw) return null;
-  // Remove <command-name>...</command-name> and <command-args>...</command-args>
-  // and <system-reminder>...</system-reminder> blocks
-  let text = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "");
-  text = text.replace(/<command-name>[\s\S]*?<\/command-name>/g, "");
-  text = text.replace(/<command-args>[\s\S]*?<\/command-args>/g, "");
+  let text = raw.replace(RE_SYSTEM_REMINDER, "");
+  text = text.replace(RE_COMMAND_NAME_BLOCK, "");
+  text = text.replace(RE_COMMAND_ARGS_BLOCK, "");
   text = text.trim();
   return text.length > 0 ? text : null;
 }
@@ -66,10 +71,10 @@ function stripSystemXml(raw: string | undefined): string | null {
 /** Extract slash command as fallback display text. */
 function extractSlashCommand(raw: string | undefined): string | null {
   if (!raw) return null;
-  const nameMatch = raw.match(/<command-name>([^<]+)<\/command-name>/);
+  const nameMatch = raw.match(RE_COMMAND_NAME);
   if (!nameMatch) return null;
   const cmdName = nameMatch[1];
-  const argsMatch = raw.match(/<command-args>([^<]*)<\/command-args>/);
+  const argsMatch = raw.match(RE_COMMAND_ARGS);
   const cmdArgs = argsMatch?.[1];
   if (cmdArgs && cmdArgs.trim().length > 0) {
     return `/${cmdName} ${cmdArgs}`;
@@ -175,10 +180,13 @@ export function handleEvent(
         patches.push(...resetSession(session));
       }
       const s = ensureSession(store, sessionId, cwd, data.tmux_session);
+      // displayName already looked up above for existing sessions; only needed
+      // here for brand-new sessions that didn't exist before ensureSession.
+      const displayName = !s.displayName ? lookupDisplayName(cwd, sessionId) ?? undefined : undefined;
       const metaPatches = updateMeta(s, {
         pid: pid ?? undefined,
         slug: data.slug ?? undefined,
-        displayName: lookupDisplayName(cwd, sessionId) ?? undefined,
+        displayName,
         branch: data.branch ?? undefined,
         tmuxSession: data.tmux_session ?? undefined,
       });

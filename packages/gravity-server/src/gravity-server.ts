@@ -93,9 +93,11 @@ function startHookServer(): Server {
 }
 
 // How long to wait for a capable terminal before rejecting bidirectional events.
-// Covers the typical 2-second Emacs reconnect window plus margin.
 const CAPABILITY_WAIT_MS = 10_000;
 const CAPABILITY_POLL_MS = 500;
+
+const BIDIRECTIONAL_EVENTS = new Set<HookEventName>(["PermissionRequest", "AskUserQuestionIntercept"]);
+const OVERVIEW_EVENTS = new Set<HookEventName>(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
 
 /** Poll until a terminal with `capability` connects, or timeout. */
 function waitForCapableTerminal(capability: string, timeoutMs: number): Promise<boolean> {
@@ -127,8 +129,7 @@ async function handleHookMessage(msg: Record<string, unknown>, socket: Socket): 
   // Reject bidirectional events if no capable terminal is connected.
   // Wait briefly for a terminal to reconnect (handles EPIPE reconnect storms
   // where Emacs is momentarily disconnected). See emacs-gravity-kdg.
-  const bidirectionalEvents = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
-  if (needsResponse && bidirectionalEvents.has(eventName)) {
+  if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
     if (!terminals.hasCapableTerminal("action.permission")) {
       log(`No capable terminal connected — waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
       const arrived = await waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
@@ -147,7 +148,7 @@ async function handleHookMessage(msg: Record<string, unknown>, socket: Socket): 
   // Clean up stale bidirectional inbox items before processing.
   // Any non-bidirectional event means Claude Code has moved past any pending
   // permission/question (e.g. user approved in TUI, then PostToolUse fires).
-  if (!bidirectionalEvents.has(eventName)) {
+  if (!BIDIRECTIONAL_EVENTS.has(eventName)) {
     const staleRemoved = inbox.removeStaleForSession(sessionId);
     for (const item of staleRemoved) {
       log(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`, "info");
@@ -193,12 +194,10 @@ async function handleHookMessage(msg: Record<string, unknown>, socket: Socket): 
     store.cancelPurge(sessionId);
   }
 
-  // Broadcast overview on status-changing events or when patches contain status ops
-  const overviewEvents = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
   const hasStatusPatch = patches.some(p =>
     p.op === "set_claude_status" || p.op === "set_status"
   );
-  if (overviewEvents.has(eventName) || hasStatusPatch) {
+  if (OVERVIEW_EVENTS.has(eventName) || hasStatusPatch) {
     terminals.broadcast({
       type: "overview.snapshot",
       projects: store.getProjectSummaries(),
@@ -230,10 +229,7 @@ async function handleHookMessage(msg: Record<string, unknown>, socket: Socket): 
     }
   }
 
-  // Fire-and-forget events: close the socket if no response needed
-  if (!needsResponse) {
-    // Don't close — the bridge manages its own socket lifecycle
-  }
+  // Don't close fire-and-forget sockets — the bridge manages its own lifecycle
 }
 
 // ── Terminal Socket (Emacs/web/native connect here) ──────────────────
@@ -369,7 +365,6 @@ function handleTerminalMessage(
 
     case "action.permission": {
       const { itemId, decision, message, updatedPermissions } = msg;
-      // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
       inbox.respond(itemId, {
         hookSpecificOutput: {
           hookEventName: "PermissionRequest",
@@ -383,7 +378,6 @@ function handleTerminalMessage(
     case "action.question": {
       const { itemId, answers } = msg;
       // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
-      // AskUserQuestionIntercept is sent as PreToolUse event to Claude Code
       inbox.respond(itemId, {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
@@ -448,7 +442,6 @@ function handleTerminalMessage(
         message = parts.join("\n");
       }
 
-      // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
       inbox.respond(itemId, {
         hookSpecificOutput: {
           hookEventName: "PermissionRequest",
