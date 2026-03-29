@@ -95,20 +95,6 @@ export class InboxManager {
     return removed;
   }
 
-  /** Force-close plan-review items for a session (pending or not).
-   *  Writes {} to hook socket so bridge shim exits cleanly.
-   *  Called when a follow-up event proves the plan approval window has passed. */
-  forceClosePlanReviewForSession(sessionId: string): InboxItem[] {
-    const removed: InboxItem[] = [];
-    this.items = this.items.filter((item) => {
-      if (item.sessionId !== sessionId || item.type !== "plan-review") return true;
-      this.closePendingSocket(item.id);
-      removed.push(item);
-      return false;
-    });
-    return removed;
-  }
-
   /** Force-close all items for a session, including pending bridge connections.
    *  Writes {} to each bridge socket so the shim can exit cleanly.
    *  Use when a non-bidirectional event proves the session has moved past

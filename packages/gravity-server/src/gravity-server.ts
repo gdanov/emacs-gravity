@@ -155,12 +155,13 @@ async function handleHookMessage(msg: Record<string, unknown>, socket: Socket): 
       terminals.broadcast({ type: "inbox.removed", itemId: item.id });
     }
 
-    // Force-close plan-review items — the session has moved past plan approval.
+    // Force-close bidirectional items — the session has moved past any pending
+    // permission/question/plan-review (user resolved it in TUI, bridge is stale).
     // Notifications are excluded: they don't indicate the session moved forward.
     if (eventName !== "Notification") {
-      const planReviewRemoved = inbox.forceClosePlanReviewForSession(sessionId);
-      for (const item of planReviewRemoved) {
-        log(`Inbox item ${item.id} (plan-review) force-closed: superseded by ${eventName}`, "info");
+      const forceClosed = inbox.forceCloseStaleForSession(sessionId);
+      for (const item of forceClosed) {
+        log(`Inbox item ${item.id} (${item.type}) force-closed: superseded by ${eventName}`, "info");
         terminals.broadcast({ type: "inbox.removed", itemId: item.id });
       }
     }
