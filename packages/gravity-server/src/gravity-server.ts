@@ -388,15 +388,27 @@ function handleTerminalMessage(
 
     case "action.question": {
       const { itemId, answers } = msg;
-      // Write the full hookSpecificOutput format — the bridge writes it directly to stdout
+      // Retrieve original hook data to reconstruct updatedInput with answers
+      const pending = inbox.getPending(itemId);
+      const toolInput = (pending?.inboxItem.data?.tool_input as Record<string, unknown>) || {};
+      const questions = (toolInput.questions as Array<Record<string, unknown>>) || [];
+
+      // Build answers map: question text → selected answer
+      const answersMap: Record<string, string> = {};
+      questions.forEach((q, i) => {
+        const qText = (q.question as string) || `question_${i}`;
+        answersMap[qText] = answers[i] || answers[0] || "";
+      });
+
       inbox.respond(itemId, {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: `User answered: ${answers[0] || ""}`,
+          permissionDecision: "allow",
+          updatedInput: {
+            ...toolInput,
+            answers: answersMap,
+          },
         },
-        answer: answers[0] || "",
-        answers,
       });
       terminals.broadcast({ type: "inbox.removed", itemId });
       break;

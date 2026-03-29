@@ -390,29 +390,51 @@ describe("Bidirectional flow: PermissionRequest", () => {
 });
 
 describe("Bidirectional flow: AskUserQuestion", () => {
-  it("question answer produces PreToolUse deny with answer", () => {
+  it("question answer produces PreToolUse allow with updatedInput", () => {
     const inbox = new InboxManager();
     const sock = mockSocket();
-    inbox.add("question", "s1", "proj", "Question", "Which framework?", {}, sock);
+    const hookData = {
+      tool_name: "AskUserQuestion",
+      tool_input: {
+        questions: [
+          { question: "Which framework?", options: ["vitest", "jest"] },
+        ],
+      },
+    };
+    inbox.add("question", "s1", "proj", "Question", "Which framework?", hookData, sock);
     const item = inbox.all()[0];
 
-    // Simulate the response format from server.ts action.question handler
-    const answers = ["Use vitest"];
+    // Reconstruct the response as gravity-server.ts action.question handler does
+    const answers = ["vitest"];
+    const pending = inbox.getPending(item.id);
+    const toolInput = (pending?.inboxItem.data?.tool_input as Record<string, unknown>) || {};
+    const questions = (toolInput.questions as Array<Record<string, unknown>>) || [];
+    const answersMap: Record<string, string> = {};
+    questions.forEach((q: Record<string, unknown>, i: number) => {
+      const qText = (q.question as string) || `question_${i}`;
+      answersMap[qText] = answers[i] || answers[0] || "";
+    });
+
     inbox.respond(item.id, {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: `User answered: ${answers[0] || ""}`,
+        permissionDecision: "allow",
+        updatedInput: {
+          ...toolInput,
+          answers: answersMap,
+        },
       },
-      answer: answers[0] || "",
-      answers,
     });
 
     const response = JSON.parse(sock.written[0].replace("\n", ""));
     expect(response.hookSpecificOutput.hookEventName).toBe("PreToolUse");
-    expect(response.hookSpecificOutput.permissionDecision).toBe("deny");
-    expect(response.answer).toBe("Use vitest");
-    expect(response.answers).toEqual(["Use vitest"]);
+    expect(response.hookSpecificOutput.permissionDecision).toBe("allow");
+    expect(response.hookSpecificOutput.updatedInput.answers).toEqual({
+      "Which framework?": "vitest",
+    });
+    expect(response.hookSpecificOutput.updatedInput.questions).toEqual(
+      hookData.tool_input.questions,
+    );
   });
 });
 

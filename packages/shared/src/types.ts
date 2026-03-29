@@ -365,6 +365,7 @@ export interface HookSocketResponse {
     };
     permissionDecision?: string;
     permissionDecisionReason?: string;
+    updatedInput?: Record<string, unknown>;
   };
   /** Legacy format (used by Emacs socket direct mode) */
   decision?: {
