@@ -26,7 +26,7 @@ Claude Code's TUI is hidden by default. You see the conversation as data, not as
 
 ![Live session detail with inline diffs](<Screenshot 2026-03-29 at 19.54.59.png>)
 
-![Plan review with menubar status](<Screenshot 2026-03-29 at 20.03.53.png>)
+![Permission management with menubar status](<Screenshot 2026-03-29 at 19.53.16.png>) ![Plan review with menubar status](<Screenshot 2026-03-29 at 20.03.53.png>)
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full v3 design and [docs/refactor-implementation.md](docs/refactor-implementation.md) for the design rationale.
 
