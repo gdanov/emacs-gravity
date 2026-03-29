@@ -24,6 +24,8 @@ Claude Code's TUI is hidden by default. You see the conversation as data, not as
 8. **Monorepo with shared types** — `packages/{shared, emacs-bridge, gravity-server}` with npm workspaces and type-safe protocol definitions shared across all components.
 9. **Beads issue tracking integration** — Projects with a `.beads/` directory get a live Issues section in the overview buffer. Open, in-progress, and blocked issues displayed per project with priority labels, status indicators, and async refresh.
 
+![Live session detail with inline diffs](<Screenshot 2026-03-29 at 19.54.59.png>)
+
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full v3 design and [docs/refactor-implementation.md](docs/refactor-implementation.md) for the design rationale.
 
 ### Migrating from v2
