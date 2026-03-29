@@ -163,6 +163,26 @@ Launch and manage Claude Code sessions in tmux directly from Emacs. Compose prom
 
 ## How it compares
 
+### vs other Emacs integrations
+
+|                          | emacs-gravity                                | [claude-code-ide.el](https://github.com/manzaltu/claude-code-ide.el)  | [claude-code.el](https://github.com/stevemolitor/claude-code.el) + [monet](https://github.com/stevemolitor/monet) | [gptel](https://github.com/karthink/gptel)     | [aider.el](https://github.com/tninja/aider.el) / [aidermacs](https://github.com/MatthewZMD/aidermacs) |
+|--------------------------|----------------------------------------------|------------------------------------------------------------------------|------------------------------------------------------------------|-------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| **Approach**             | Hook-based server + semantic patches         | MCP bridge (Claude calls Emacs)                                        | Terminal emulator (eat/vterm) + IDE protocol via WebSocket (monet) | Direct API client                               | Aider CLI wrapper                                                                                      |
+| **What you see**         | Structured turn tree (magit-section)         | Terminal output + MCP-enhanced context                                 | Raw terminal output; monet adds inline diffs and diagnostics     | Chat buffer                                     | Terminal output + ediff                                                                                |
+| **Multi-session**        | Yes — per-project grouping, overview buffer  | No                                                                     | Yes — project-aware instances                                    | Multiple buffers                                | Multiple aider sessions                                                                                |
+| **Agent tracking**       | Full nested tree with transcript access      | No                                                                     | No                                                               | N/A                                             | No                                                                                                     |
+| **Plan review**          | Dedicated buffer, inline comments, diff, structured feedback | No                                              | No                                                               | N/A                                             | No                                                                                                     |
+| **Permission mgmt**      | Pattern generation + write to settings       | No                                                                     | No                                                               | N/A                                             | No                                                                                                     |
+| **Inline diffs**         | In session buffer alongside tool context     | No                                                                     | Yes (monet — ediff or simple diff)                               | No                                              | Yes (ediff)                                                                                            |
+| **Multi-client**         | Yes — Emacs + macOS menu bar (same server)   | No                                                                     | No                                                               | No                                              | No                                                                                                     |
+| **Capabilities browser** | Plugins, skills, agents, MCP — navigatable   | No                                                                     | No                                                               | No                                              | No                                                                                                     |
+| **Needs Claude Code CLI**| Yes                                          | Yes                                                                    | Yes                                                              | No (API only)                                   | No (uses Aider)                                                                                        |
+| **Extra dependencies**   | Node.js (gravity-server)                     | None                                                                   | eat or vterm; monet needs websocket.el                           | None                                            | Aider (Python)                                                                                         |
+
+**Different philosophies:** claude-code.el and claude-code-ide.el embed the Claude Code terminal inside Emacs — you interact with Claude's TUI directly. monet enhances claude-code.el with Claude Code's IDE protocol (diffs, diagnostics, go-to-definition) over WebSocket. emacs-gravity hides the TUI entirely and reconstructs the conversation as structured, navigatable data via hooks and a server-driven architecture. gptel and aider.el are general-purpose LLM tools that happen to support Claude models but don't integrate with Claude Code's hook system, agent framework, or plan workflow.
+
+### vs IDE tools
+
 |                      | Google AntiGravity      | Cursor                  | emacs-gravity                              |
 |----------------------|-------------------------|-------------------------|--------------------------------------------|
 | **UI paradigm**      | Web panels in IDE       | VS Code sidebar         | magit-section (terminal-native)            |
@@ -170,9 +190,6 @@ Launch and manage Claude Code sessions in tmux directly from Emacs. Compose prom
 | **Agent visibility** | Flat list               | Minimal                 | Full nested tree with transcript access    |
 | **Multi-session**    | No                      | No                      | Yes — per-project grouping                 |
 | **Multi-client**     | No                      | No                      | Yes — Emacs + menu bar (same server)       |
-| **Capabilities**     | Hidden                  | Hidden                  | Browsable tree (plugins, skills, MCP)      |
-| **Permission mgmt**  | —                       | —                       | Pattern generation + settings integration  |
-| **Inline diffs**     | No                      | In editor               | In session buffer alongside tool context   |
 | **Extensibility**    | Closed                  | Closed (extensions API) | Elisp — fully hackable                     |
 | **Runs in**          | Chrome / Electron       | Electron                | Terminal / TTY / SSH                        |
 | **Open source**      | No                      | No                      | Yes                                        |
