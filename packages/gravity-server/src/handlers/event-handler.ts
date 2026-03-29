@@ -193,8 +193,9 @@ export function handleEvent(
       patches.push({ op: "set_status", status: "active" });
       log(`Session ${sessionId} self-healed to active on ${eventName}`, "info");
     }
-    // Lazy retry: look up displayName if not yet set
-    const displayName = !existing.displayName ? lookupDisplayName(cwd, sessionId) ?? undefined : undefined;
+    // Always re-read displayName to pick up mid-session renames via /name
+    const freshDisplayName = lookupDisplayName(cwd, sessionId);
+    const displayName = (freshDisplayName && freshDisplayName !== existing.displayName) ? freshDisplayName : undefined;
     patches.push(...updateMeta(existing, {
       pid: pid ?? undefined,
       slug: data.slug ?? undefined,
@@ -292,12 +293,6 @@ export function handleEvent(
       if (tokenUsage) {
         patches.push(...setTokenUsage(session, tokenUsage));
         patches.push(...finalizeTurnTokens(session, tokenUsage));
-      }
-
-      // Re-read displayName on Stop to pick up mid-session renames via /name
-      const freshName = lookupDisplayName(cwd, sessionId);
-      if (freshName && freshName !== session.displayName) {
-        patches.push(...updateMeta(session, { displayName: freshName }));
       }
 
       // Add idle inbox item
