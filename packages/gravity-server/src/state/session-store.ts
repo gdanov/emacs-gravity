@@ -46,6 +46,7 @@ export class SessionStore {
         toolCount: s.totalToolCount,
         lastEventTime: s.lastEventTime,
         latestMessage: extractLatestMessage(s),
+        latestUserPrompt: extractLatestUserPrompt(s),
       })),
     }));
   }
@@ -107,5 +108,14 @@ function extractLatestMessage(s: Session): string | null {
     }
   }
 
+  return null;
+}
+
+/** Extract the latest user prompt from a session's turn tree. */
+function extractLatestUserPrompt(s: Session): string | null {
+  for (let i = s.turns.length - 1; i >= 0; i--) {
+    const turn: TurnNode = s.turns[i];
+    if (turn.prompt?.text) return turn.prompt.text;
+  }
   return null;
 }

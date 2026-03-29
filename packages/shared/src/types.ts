@@ -320,6 +320,7 @@ export interface SessionSummary {
   toolCount: number;
   lastEventTime: number;
   latestMessage: string | null;
+  latestUserPrompt: string | null;
 }
 
 export interface PlanFeedback {

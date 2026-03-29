@@ -77,7 +77,8 @@ public class MenuBarStateManager {
                             claudeStatus: s.claudeStatus,
                             toolCount: s.toolCount,
                             lastEventTime: s.lastEventTime,
-                            latestMessage: s.latestMessage
+                            latestMessage: s.latestMessage,
+                            latestUserPrompt: s.latestUserPrompt
                         )
                     }
                 )
@@ -184,6 +185,10 @@ public class MenuBarStateManager {
                     case "set_streaming_text":
                         // text may be nil (clearing streaming), which is fine
                         _ = mutateSession(sessionId, { $0.latestMessage = patch.text })
+                    case "add_prompt":
+                        if let promptText = patch.prompt?.text {
+                            _ = mutateSession(sessionId, { $0.latestUserPrompt = promptText })
+                        }
                     default:
                         break
                     }

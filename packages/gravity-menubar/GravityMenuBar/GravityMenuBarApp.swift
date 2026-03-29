@@ -94,7 +94,11 @@ struct ProjectSection: View {
                 .foregroundColor(.primary)
                 .padding(.top, 2)
 
-            ForEach(project.sessions) { session in
+            ForEach(Array(project.sessions.enumerated()), id: \.element.id) { index, session in
+                if index > 0 {
+                    Divider()
+                        .padding(.vertical, 4)
+                }
                 SessionSection(
                     session: session,
                     inboxItems: inboxItems.filter { $0.sessionId == session.id }
@@ -110,7 +114,7 @@ struct SessionSection: View {
     let inboxItems: [InboxInfo]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             // Session header row
             HStack(spacing: 4) {
                 Circle()
@@ -126,13 +130,17 @@ struct SessionSection: View {
             }
             .padding(.vertical, 1)
 
-            // Latest message (capped to 200 chars)
+            // User prompt bubble (right-aligned)
+            if let prompt = session.latestUserPrompt, !prompt.isEmpty {
+                let trimmed = prompt.count > 150 ? String(prompt.prefix(150)) + "..." : prompt
+                MessageBubble(text: trimmed, isUser: true)
+                    .padding(.leading, 10)
+            }
+
+            // Assistant message bubble (left-aligned)
             if let msg = session.latestMessage, !msg.isEmpty {
                 let trimmed = msg.count > 200 ? String(msg.prefix(200)) + "..." : msg
-                Text(trimmed)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .lineLimit(3)
+                MessageBubble(text: trimmed, isUser: false)
                     .padding(.leading, 10)
             }
 
@@ -147,18 +155,84 @@ struct SessionSection: View {
     }
 }
 
+// MARK: - Message Bubble
+
+struct MessageBubble: View {
+    let text: String
+    let isUser: Bool
+
+    var body: some View {
+        HStack {
+            if isUser { Spacer(minLength: 40) }
+
+            Text(text)
+                .font(.system(size: 11))
+                .foregroundColor(isUser ? .white : .secondary)
+                .lineLimit(3)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isUser ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.08))
+                )
+
+            if !isUser { Spacer(minLength: 40) }
+        }
+    }
+}
+
+// MARK: - Inbox Row (card style)
+
 struct InboxRow: View {
     let item: InboxInfo
 
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 10))
-                .foregroundColor(.orange)
-            Text(item.label)
-                .foregroundColor(.primary)
-                .lineLimit(1)
+    private var accentColor: Color {
+        switch item.type {
+        case "permission":  return .orange
+        case "question":    return .blue
+        case "plan-review": return .purple
+        default:            return .orange
         }
-        .padding(.vertical, 1)
+    }
+
+    private var iconName: String {
+        switch item.type {
+        case "permission":  return "lock.shield"
+        case "question":    return "questionmark.circle.fill"
+        case "plan-review": return "doc.text.magnifyingglass"
+        default:            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(accentColor)
+                .frame(width: 3)
+
+            Image(systemName: iconName)
+                .font(.system(size: 10))
+                .foregroundColor(accentColor)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.label)
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                if !item.summary.isEmpty {
+                    Text(item.summary)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(accentColor.opacity(0.06))
+        )
     }
 }

@@ -678,7 +678,40 @@ struct PatchApplicationTests {
         #expect(sm.projects[0].sessions[0].displayName == "my-slug")
     }
 
-    @Test("41: multiple add_tool patches increment count correctly")
+    @Test("41: add_prompt updates latestUserPrompt")
+    func addPromptUpdatesLatestUserPrompt() {
+        let sm = seededManager()
+        sm.handleMessage(ServerMessage(
+            type: "session.update",
+            sessionId: "s1",
+            patches: [PatchJSON(op: "add_prompt", prompt: PromptJSON(type: "user", text: "Fix the bug"))]
+        ))
+        #expect(sm.projects[0].sessions[0].latestUserPrompt == "Fix the bug")
+    }
+
+    @Test("42: overview.snapshot maps latestUserPrompt")
+    func overviewSnapshotMapsLatestUserPrompt() {
+        let sm = MenuBarStateManager()
+        sm.setConnected(true)
+        sm.handleMessage(ServerMessage(
+            type: "overview.snapshot",
+            projects: [
+                ProjectSummaryJSON(project: "proj", sessions: [
+                    SessionSummaryJSON(
+                        sessionId: "s1",
+                        status: "active",
+                        claudeStatus: "idle",
+                        latestMessage: "Done",
+                        latestUserPrompt: "Fix auth"
+                    )
+                ])
+            ]
+        ))
+        #expect(sm.projects[0].sessions[0].latestUserPrompt == "Fix auth")
+        #expect(sm.projects[0].sessions[0].latestMessage == "Done")
+    }
+
+    @Test("43: multiple add_tool patches increment count correctly")
     func multipleAddToolPatches() {
         let sm = seededManager(toolCount: 3)
         sm.handleMessage(ServerMessage(
