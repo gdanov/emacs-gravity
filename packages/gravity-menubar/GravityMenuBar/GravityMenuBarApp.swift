@@ -43,14 +43,10 @@ public struct MenuBarDropdown: View {
             }
 
             ForEach(monitor.projects) { project in
-                ProjectSection(project: project)
-            }
-
-            if !monitor.inboxItems.isEmpty {
-                Divider()
-                ForEach(monitor.inboxItems) { item in
-                    InboxRow(item: item)
-                }
+                ProjectSection(
+                    project: project,
+                    inboxItems: monitor.inboxItems
+                )
             }
 
             Divider()
@@ -89,6 +85,7 @@ public struct MenuBarDropdown: View {
 
 struct ProjectSection: View {
     let project: ProjectInfo
+    let inboxItems: [InboxInfo]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -98,30 +95,55 @@ struct ProjectSection: View {
                 .padding(.top, 2)
 
             ForEach(project.sessions) { session in
-                SessionRow(session: session)
-                    .padding(.leading, 12)
+                SessionSection(
+                    session: session,
+                    inboxItems: inboxItems.filter { $0.sessionId == session.id }
+                )
+                .padding(.leading, 12)
             }
         }
     }
 }
 
-struct SessionRow: View {
+struct SessionSection: View {
     let session: SessionInfo
+    let inboxItems: [InboxInfo]
 
     var body: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(session.statusColor)
-                .frame(width: 6, height: 6)
-            Text(session.displayName)
-                .foregroundColor(.primary)
-                .lineLimit(1)
-            Spacer()
-            Text(session.statusLabel)
-                .foregroundColor(.secondary)
-                .font(.system(size: 11))
+        VStack(alignment: .leading, spacing: 2) {
+            // Session header row
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(session.statusColor)
+                    .frame(width: 6, height: 6)
+                Text(session.displayName)
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                Spacer()
+                Text(session.statusLabel)
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 11))
+            }
+            .padding(.vertical, 1)
+
+            // Latest message (capped to 200 chars)
+            if let msg = session.latestMessage, !msg.isEmpty {
+                let trimmed = msg.count > 200 ? String(msg.prefix(200)) + "..." : msg
+                Text(trimmed)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(3)
+                    .padding(.leading, 10)
+            }
+
+            // Inbox items for this session
+            if !inboxItems.isEmpty {
+                ForEach(inboxItems) { item in
+                    InboxRow(item: item)
+                        .padding(.leading, 10)
+                }
+            }
         }
-        .padding(.vertical, 1)
     }
 }
 
@@ -130,15 +152,12 @@ struct InboxRow: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text("\u{26A0}")
-                .font(.system(size: 11))
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundColor(.orange)
             Text(item.label)
                 .foregroundColor(.primary)
                 .lineLimit(1)
-            Spacer()
-            Text(item.project ?? "")
-                .foregroundColor(.secondary)
-                .font(.system(size: 11))
         }
         .padding(.vertical, 1)
     }

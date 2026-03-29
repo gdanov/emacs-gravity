@@ -3,7 +3,7 @@
 // Map<sessionId, Session> with project grouping.
 // All mutations emit semantic patches for connected terminals.
 
-import type { Session, ProjectSummary } from "@gravity/shared";
+import type { Session, ProjectSummary, TurnNode } from "@gravity/shared";
 
 export class SessionStore {
   private sessions = new Map<string, Session>();
@@ -45,6 +45,7 @@ export class SessionStore {
         claudeStatus: s.claudeStatus,
         toolCount: s.totalToolCount,
         lastEventTime: s.lastEventTime,
+        latestMessage: extractLatestMessage(s),
       })),
     }));
   }
@@ -80,4 +81,31 @@ export class SessionStore {
   all(): Session[] {
     return Array.from(this.sessions.values());
   }
+}
+
+/** Extract the latest assistant message from a session's turn tree. */
+function extractLatestMessage(s: Session): string | null {
+  // Prefer streaming text if currently responding
+  if (s.streamingText) return s.streamingText;
+
+  // Walk turns backward to find the most recent text
+  for (let i = s.turns.length - 1; i >= 0; i--) {
+    const turn: TurnNode = s.turns[i];
+
+    // Turn-level stop text (final assistant message after all tools)
+    if (turn.stopText) return turn.stopText;
+
+    // Last step's assistant text
+    for (let j = turn.steps.length - 1; j >= 0; j--) {
+      const step = turn.steps[j];
+      // Check post-text on the last tool in the step
+      for (let k = step.tools.length - 1; k >= 0; k--) {
+        if (step.tools[k].postText) return step.tools[k].postText;
+      }
+      // Step-level assistant text
+      if (step.text) return step.text;
+    }
+  }
+
+  return null;
 }

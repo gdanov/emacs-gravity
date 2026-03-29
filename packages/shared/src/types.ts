@@ -319,6 +319,7 @@ export interface SessionSummary {
   claudeStatus: "idle" | "responding";
   toolCount: number;
   lastEventTime: number;
+  latestMessage: string | null;
 }
 
 export interface PlanFeedback {

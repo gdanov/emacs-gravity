@@ -52,8 +52,9 @@ public struct SessionInfo: Identifiable {
     public var claudeStatus: String  // "idle" | "responding"
     public var toolCount: Int
     public var lastEventTime: Double
+    public var latestMessage: String?
 
-    public init(id: String, slug: String?, serverDisplayName: String? = nil, status: String, claudeStatus: String, toolCount: Int, lastEventTime: Double) {
+    public init(id: String, slug: String?, serverDisplayName: String? = nil, status: String, claudeStatus: String, toolCount: Int, lastEventTime: Double, latestMessage: String? = nil) {
         self.id = id
         self.slug = slug
         self.serverDisplayName = serverDisplayName
@@ -61,6 +62,7 @@ public struct SessionInfo: Identifiable {
         self.claudeStatus = claudeStatus
         self.toolCount = toolCount
         self.lastEventTime = lastEventTime
+        self.latestMessage = latestMessage
     }
 
     public var displayName: String {
@@ -160,8 +162,9 @@ public struct SessionSummaryJSON: Decodable {
     public let claudeStatus: String
     public let toolCount: Int
     public let lastEventTime: Double
+    public let latestMessage: String?
 
-    public init(sessionId: String, slug: String? = nil, displayName: String? = nil, status: String, claudeStatus: String, toolCount: Int = 0, lastEventTime: Double = 0) {
+    public init(sessionId: String, slug: String? = nil, displayName: String? = nil, status: String, claudeStatus: String, toolCount: Int = 0, lastEventTime: Double = 0, latestMessage: String? = nil) {
         self.sessionId = sessionId
         self.slug = slug
         self.displayName = displayName
@@ -169,6 +172,7 @@ public struct SessionSummaryJSON: Decodable {
         self.claudeStatus = claudeStatus
         self.toolCount = toolCount
         self.lastEventTime = lastEventTime
+        self.latestMessage = latestMessage
     }
 }
 
@@ -190,24 +194,28 @@ public struct InboxItemJSON: Decodable {
     }
 }
 
-/// Patch decoding — status changes, tool counts, and metadata for the menu bar
+/// Patch decoding — status changes, tool counts, metadata, and text for the menu bar
 public struct PatchJSON: Decodable {
     public let op: String
     public let status: String?
     public let claudeStatus: String?
     public let slug: String?
     public let displayName: String?
+    public let stopText: String?
+    public let text: String?          // set_streaming_text
 
     enum CodingKeys: String, CodingKey {
-        case op, status, claudeStatus, slug, displayName
+        case op, status, claudeStatus, slug, displayName, stopText, text
     }
 
-    public init(op: String, status: String? = nil, claudeStatus: String? = nil, slug: String? = nil, displayName: String? = nil) {
+    public init(op: String, status: String? = nil, claudeStatus: String? = nil, slug: String? = nil, displayName: String? = nil, stopText: String? = nil, text: String? = nil) {
         self.op = op
         self.status = status
         self.claudeStatus = claudeStatus
         self.slug = slug
         self.displayName = displayName
+        self.stopText = stopText
+        self.text = text
     }
 }
 

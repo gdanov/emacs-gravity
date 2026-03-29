@@ -76,7 +76,8 @@ public class MenuBarStateManager {
                             status: s.status,
                             claudeStatus: s.claudeStatus,
                             toolCount: s.toolCount,
-                            lastEventTime: s.lastEventTime
+                            lastEventTime: s.lastEventTime,
+                            latestMessage: s.latestMessage
                         )
                     }
                 )
@@ -176,6 +177,13 @@ public class MenuBarStateManager {
                         if let dn = patch.displayName {
                             _ = mutateSession(sessionId, { $0.serverDisplayName = dn })
                         }
+                    case "set_turn_stop":
+                        if let stopText = patch.stopText {
+                            _ = mutateSession(sessionId, { $0.latestMessage = stopText })
+                        }
+                    case "set_streaming_text":
+                        // text may be nil (clearing streaming), which is fine
+                        _ = mutateSession(sessionId, { $0.latestMessage = patch.text })
                     default:
                         break
                     }
@@ -245,6 +253,11 @@ public class MenuBarStateManager {
             }
         }
         return false
+    }
+
+    /// Inbox items for a specific session.
+    public func inboxItems(for sessionId: String) -> [InboxInfo] {
+        inboxItems.filter { $0.sessionId == sessionId }
     }
 
 }
