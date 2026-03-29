@@ -6,6 +6,8 @@ emacs-bridge-agents.json
 /.opencode/
 result
 .direnv
+.envrc
+.vscode/
 
 # Dolt database files (added by bd init)
 .dolt/
