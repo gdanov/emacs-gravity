@@ -1195,6 +1195,21 @@ Only shows permission, question, and plan-review items (not idle)."
 (define-key claude-gravity-mode-map (kbd "S") claude-gravity-session-cmd-map)
 
 
+(defun claude-gravity--window-buffer-changed (_frame)
+  "Re-render gravity buffers that just became visible.
+Called via `window-buffer-change-functions' when a window switches buffers."
+  (dolist (win (window-list nil 'no-mini))
+    (let ((buf (window-buffer win)))
+      (cond
+       ((eq buf (get-buffer claude-gravity-buffer-name))
+        (claude-gravity--schedule-refresh))
+       ((buffer-local-value 'claude-gravity--buffer-session-id buf)
+        (let ((sid (buffer-local-value 'claude-gravity--buffer-session-id buf)))
+          (when sid
+            (claude-gravity--schedule-session-refresh sid))))))))
+
+(add-hook 'window-buffer-change-functions #'claude-gravity--window-buffer-changed)
+
 (define-derived-mode claude-gravity-mode magit-section-mode "Claude"
   "Major mode for Structured Claude Sessions overview.
 
