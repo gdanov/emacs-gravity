@@ -51,21 +51,36 @@ function shortModelName(modelId: string): string {
   return modelId;
 }
 
-// Pre-compiled regexes for prompt text extraction
+// Pre-compiled regexes for stripping Claude Code harness XML
 const RE_SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 const RE_COMMAND_NAME_BLOCK = /<command-name>[\s\S]*?<\/command-name>/g;
 const RE_COMMAND_ARGS_BLOCK = /<command-args>[\s\S]*?<\/command-args>/g;
 const RE_COMMAND_NAME = /<command-name>([^<]+)<\/command-name>/;
 const RE_COMMAND_ARGS = /<command-args>([^<]*)<\/command-args>/;
+// Additional harness tags that appear in assistant text
+const RE_TASK_NOTIFICATION = /<task-notification>[\s\S]*?<\/task-notification>/g;
+const RE_LOCAL_COMMAND_CAVEAT = /<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g;
+const RE_COMMAND_MESSAGE = /<command-message>[\s\S]*?<\/command-message>/g;
+const RE_LOCAL_COMMAND_STDOUT = /<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g;
+
+/** Strip all known harness XML tags from text. Works for both prompts and assistant text. */
+function stripSystemTags(raw: string | undefined | null): string | null {
+  if (!raw) return null;
+  let text = raw
+    .replace(RE_SYSTEM_REMINDER, "")
+    .replace(RE_COMMAND_NAME_BLOCK, "")
+    .replace(RE_COMMAND_ARGS_BLOCK, "")
+    .replace(RE_TASK_NOTIFICATION, "")
+    .replace(RE_LOCAL_COMMAND_CAVEAT, "")
+    .replace(RE_COMMAND_MESSAGE, "")
+    .replace(RE_LOCAL_COMMAND_STDOUT, "")
+    .trim();
+  return text.length > 0 ? text : null;
+}
 
 /** Strip system XML from user prompt text. */
 function stripSystemXml(raw: string | undefined): string | null {
-  if (!raw) return null;
-  let text = raw.replace(RE_SYSTEM_REMINDER, "");
-  text = text.replace(RE_COMMAND_NAME_BLOCK, "");
-  text = text.replace(RE_COMMAND_ARGS_BLOCK, "");
-  text = text.trim();
-  return text.length > 0 ? text : null;
+  return stripSystemTags(raw);
 }
 
 /** Extract slash command as fallback display text. */
@@ -152,6 +167,22 @@ export function handleEvent(
 
   const patches: Patch[] = [];
 
+  // Warn if tool/agent events arrive after Stop (before next UserPromptSubmit)
+  // This detects race conditions where the next turn starts before the previous Stop is processed
+  const postStopEvents: Set<HookEventName> = new Set([
+    "PreToolUse", "PostToolUse", "PostToolUseFailure",
+    "SubagentStart", "SubagentStop",
+  ]);
+  if (postStopEvents.has(eventName)) {
+    const session = store.get(sessionId);
+    if (session && session.claudeStatus === "idle") {
+      log(
+        `[post-stop] ${eventName} arrived for session ${sessionId} (turn ${session.currentTurn}) while claudeStatus=idle — possible race condition`,
+        "warn",
+      );
+    }
+  }
+
   // Update meta on every event for existing sessions
   const existing = store.get(sessionId);
   if (existing) {
@@ -180,9 +211,7 @@ export function handleEvent(
         patches.push(...resetSession(session));
       }
       const s = ensureSession(store, sessionId, cwd, data.tmux_session);
-      // displayName already looked up above for existing sessions; only needed
-      // here for brand-new sessions that didn't exist before ensureSession.
-      const displayName = !s.displayName ? lookupDisplayName(cwd, sessionId) ?? undefined : undefined;
+      const displayName = s.displayName ? undefined : lookupDisplayName(cwd, sessionId) ?? undefined;
       const metaPatches = updateMeta(s, {
         pid: pid ?? undefined,
         slug: data.slug ?? undefined,
@@ -254,8 +283,8 @@ export function handleEvent(
       patches.push(
         ...finalizeLastPrompt(
           session,
-          data.stop_text as string | undefined,
-          data.stop_thinking as string | undefined,
+          stripSystemTags(data.stop_text as string) ?? undefined,
+          stripSystemTags(data.stop_thinking as string) ?? undefined,
         ),
       );
 
@@ -307,8 +336,8 @@ export function handleEvent(
       if (agentId) {
         patches.push(
           ...completeAgent(session, agentId, {
-            stopText: data.agent_stop_text,
-            stopThinking: data.agent_stop_thinking,
+            stopText: stripSystemTags(data.agent_stop_text as string) ?? undefined,
+            stopThinking: stripSystemTags(data.agent_stop_thinking as string) ?? undefined,
             transcriptPath: data.agent_transcript_path,
           }),
         );
@@ -331,8 +360,8 @@ export function handleEvent(
         timestamp: Date.now(),
         duration: null,
         turn: session.currentTurn,
-        assistantText: data.assistant_text ?? null,
-        assistantThinking: data.assistant_thinking ?? null,
+        assistantText: stripSystemTags(data.assistant_text as string) ?? null,
+        assistantThinking: stripSystemTags(data.assistant_thinking as string) ?? null,
         postText: null,
         postThinking: null,
         parentAgentId: parentAgentId,
@@ -390,8 +419,8 @@ export function handleEvent(
     case "PostToolUse": {
       const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const toolUseId = data.tool_use_id as string;
-      const postText = data.post_tool_text as string | undefined;
-      const postThink = data.post_tool_thinking as string | undefined;
+      const postText = stripSystemTags(data.post_tool_text as string) ?? undefined;
+      const postThink = stripSystemTags(data.post_tool_thinking as string) ?? undefined;
       const toolResponse = (data as Record<string, unknown>).tool_response;
 
       if (toolUseId) {
@@ -455,8 +484,8 @@ export function handleEvent(
       const session = ensureSession(store, sessionId, cwd, data.tmux_session);
       const toolUseId = data.tool_use_id as string;
       const errorMsg = (data as Record<string, unknown>).error as string || "Unknown error";
-      const postText = data.post_tool_text as string | undefined;
-      const postThink = data.post_tool_thinking as string | undefined;
+      const postText = stripSystemTags(data.post_tool_text as string) ?? undefined;
+      const postThink = stripSystemTags(data.post_tool_thinking as string) ?? undefined;
 
       if (toolUseId) {
         patches.push(

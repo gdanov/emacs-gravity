@@ -16,6 +16,17 @@ export class InboxManager {
   private items: InboxItem[] = [];
   private pending = new Map<number, PendingResponse>();
 
+  /** Close a pending hook socket with empty response and remove from pending map. */
+  private closePendingSocket(itemId: number): void {
+    const pending = this.pending.get(itemId);
+    if (!pending) return;
+    try {
+      pending.hookSocket.write(JSON.stringify({}) + "\n");
+      pending.hookSocket.end();
+    } catch { /* socket may already be closed */ }
+    this.pending.delete(itemId);
+  }
+
   /** Add an inbox item. Returns the new item. */
   add(
     type: InboxItemType,
@@ -91,14 +102,7 @@ export class InboxManager {
     const removed: InboxItem[] = [];
     this.items = this.items.filter((item) => {
       if (item.sessionId !== sessionId || item.type !== "plan-review") return true;
-      const pending = this.pending.get(item.id);
-      if (pending) {
-        try {
-          pending.hookSocket.write(JSON.stringify({}) + "\n");
-          pending.hookSocket.end();
-        } catch { /* socket may already be closed */ }
-        this.pending.delete(item.id);
-      }
+      this.closePendingSocket(item.id);
       removed.push(item);
       return false;
     });
@@ -113,14 +117,7 @@ export class InboxManager {
     const removed: InboxItem[] = [];
     this.items = this.items.filter((item) => {
       if (item.sessionId !== sessionId) return true;
-      const pending = this.pending.get(item.id);
-      if (pending) {
-        try {
-          pending.hookSocket.write(JSON.stringify({}) + "\n");
-          pending.hookSocket.end();
-        } catch { /* socket may already be closed */ }
-        this.pending.delete(item.id);
-      }
+      this.closePendingSocket(item.id);
       removed.push(item);
       return false;
     });
