@@ -98,7 +98,8 @@
       "Read(//Users/gdanov/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/**)",
       "WebFetch(domain:api.minimax.io)",
       "WebFetch(domain:api.github.com)",
-      "WebFetch(domain:pypi.org)"
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:eventsapi.dolthub.com)"
     ],
     "additionalDirectories": [
       "/Users/gdanov/.emacs.d",
@@ -107,6 +108,13 @@
   },
   "sandbox": {
     "enabled": true,
-    "autoAllowBashIfSandboxed": true
+    "autoAllowBashIfSandboxed": true,
+    "filesystem": {
+      "allowWrite": ["/tmp/claude/"]
+    },
+    "network": {
+      "allowUnixSockets": ["/tmp/claude/"],
+      "allowLocalBinding": true
+    }
   }
 }

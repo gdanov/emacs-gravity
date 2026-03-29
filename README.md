@@ -6,6 +6,37 @@ emacs-gravity gives you a magit-style working memory interface for Claude Code. 
 
 Claude Code's TUI is hidden by default. You see the conversation as data, not as a chat log.
 
+---
+
+## v3: Server-Driven Architecture
+
+> **Breaking change.** v3 is a ground-up rewrite of the backend. The v2 standalone mode (where Emacs held all state directly) is gone. **You must remove v2 completely before upgrading** — gravity-server is now required.
+
+### What changed
+
+1. **Server-driven architecture** — All session state moved from Emacs Lisp hash tables to gravity-server, a long-running TypeScript/Effect backend. Emacs is now a thin terminal client that applies semantic patches and renders via magit-section.
+2. **Multi-client support** — Multiple terminals connect to the same server simultaneously. The macOS menu bar app and Emacs share the same live state. First responder wins for inbox actions.
+3. **Semantic patch protocol** — Typed incremental updates (`add_tool`, `complete_agent`, `set_plan`) replace full state rebuilds. Any client that speaks the protocol can render the full UI — future web or native dashboards included.
+4. **Centralized enrichment** — Transcript parsing, agent attribution, and event enrichment run server-side with full in-memory state. No more file I/O for agent tracking.
+5. **Inbox system** — Permissions, plan reviews, and questions from all sessions funnel into a centralized inbox. Any connected terminal can respond.
+6. **macOS menu bar client** — New lightweight Swift app with colored status dots per session, project-grouped dropdown, health monitoring, and auto-reconnect.
+7. **Two-socket architecture** — Hook socket (bridge shim, one-shot per event) and terminal socket (persistent client connections) are cleanly separated.
+8. **Monorepo with shared types** — `packages/{shared, emacs-bridge, gravity-server}` with npm workspaces and type-safe protocol definitions shared across all components.
+9. **Beads issue tracking integration** — Projects with a `.beads/` directory get a live Issues section in the overview buffer. Open, in-progress, and blocked issues displayed per project with priority labels, status indicators, and async refresh.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full v3 design and [docs/refactor-implementation.md](docs/refactor-implementation.md) for the design rationale.
+
+### Migrating from v2
+
+- **Remove old socket config** — v2 connected the bridge directly to Emacs. Delete any custom socket paths pointing at Emacs.
+- **Delete agent state files** — Remove `~/.claude/emacs-bridge-agents.json` (agent state is now in-memory in gravity-server).
+- **Clean install** — Run `npm install` at the monorepo root.
+- **Re-register the plugin** — Update `marketplace.json` if needed (the `source` path is unchanged).
+- **Update your init.el** — Replace `(claude-gravity-start)` with `(claude-gravity-server-start)`.
+- **Delete stale byte-compiled files** — Run `rm -f *.elc` in the project root. Emacs loads `.elc` over `.el`, so stale compiled files silently override your changes.
+
+---
+
 ## Why emacs-gravity?
 
 **You already live in Emacs.** Claude Code is powerful, but its terminal UI is a firehose — scrolling text, interleaved tool calls, agent output mixed with thinking. emacs-gravity restructures all of that into something you can actually navigate.
@@ -23,7 +54,7 @@ Claude Code's TUI is hidden by default. You see the conversation as data, not as
 emacs-gravity is a **server-driven, multi-client system**. A long-running TypeScript backend owns all session state and broadcasts semantic patches to any number of connected terminal clients over a typed protocol.
 
 ```
-Claude Code (11 hook events)
+Claude Code (12 hook events)
     |
 emacs-bridge (Node.js one-shot shim)
     | hook socket
@@ -224,9 +255,10 @@ The Emacs package is split into 15 modular files with a thin loader:
 | `claude-gravity-client.el` | Terminal socket client to gravity-server |
 | `claude-gravity-actions.el` | Permission/question action buffers, inbox handling |
 | `claude-gravity-tmux.el` | Tmux session management, compose buffer |
+| `claude-gravity-daemon.el` | Agent SDK daemon bridge (ON HOLD) |
 | `claude-gravity-debug.el` | Terminal protocol debug viewer |
 
-**Load order:** `core -> {faces, session, discovery} -> state -> {text, diff} -> render -> ui -> plan-review -> client -> {actions, tmux}`
+**Load order:** `core -> {faces, session, discovery} -> state -> {text, diff} -> render -> ui -> plan-review -> actions -> client -> {tmux, daemon, debug}`
 
 Each module has no circular dependencies, making isolated testing and customization straightforward. Every face, keybinding, and rendering function is yours to override.
 

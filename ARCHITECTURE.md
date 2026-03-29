@@ -8,13 +8,13 @@ This document describes the overall system design, component interactions, and m
 Claude Code
     ↓ (hooks: PreToolUse, PostToolUse, PostToolUseFailure, Stop,
     │         UserPromptSubmit, SubagentStart, SubagentStop,
-    │         SessionStart, SessionEnd, Notification, PermissionRequest)
+    │         SessionStart, SessionEnd, Notification,
+    │         PermissionRequest, AskUserQuestionIntercept)
 emacs-bridge (Node.js, one-shot shim)
     ↓ hook socket (~/.local/state/gravity-hooks.sock)
 gravity-server (TypeScript/Effect, long-running)
-    ├── enrichment (transcript parsing, agent attribution)
     ├── state manager (sessions, turn tree, indexes, inbox)
-    ├── event handler (hook → state mutations → semantic patches)
+    ├── event handler (hook → enrichment → state mutations → semantic patches)
     ↓ terminal socket (~/.local/state/gravity-terminal.sock)
 Terminal clients
     ├── Emacs client (claude-gravity-client.el)
@@ -78,10 +78,6 @@ packages/
         session-store.ts         -- Map<sessionId, Session>, project grouping
         session.ts               -- Session factory, mutation methods (emit patches)
         inbox.ts                 -- InboxManager, PendingResponse
-      enrichment/
-        enrich.ts                -- Event enrichment (transcript parsing)
-        enrichment.ts            -- Pure extraction functions
-        agent-state.ts           -- In-memory agent state (no file I/O)
       protocol/
         messages.ts              -- Protocol message types
         terminal-server.ts       -- Terminal connections, broadcast
@@ -112,18 +108,22 @@ Makefile                         -- Build orchestration
 { type: "session.removed", sessionId: string }
 { type: "inbox.added", item: InboxItem }
 { type: "inbox.removed", itemId: number }
+{ type: "inbox.snapshot", items: InboxItem[] }
 { type: "overview.snapshot", projects: ProjectSummary[] }
 ```
 
 ### Terminal → Server Messages
 
 ```typescript
-{ type: "action.permission", itemId: number, decision: "allow"|"deny", message?: string }
+{ type: "hello", capabilities: string[] }
+{ type: "action.permission", itemId: number, decision: "allow"|"deny", message?: string, updatedPermissions?: unknown[] }
 { type: "action.question", itemId: number, answers: string[] }
 { type: "action.plan-review", itemId: number, decision: "allow"|"deny", feedback?: PlanFeedback }
 { type: "action.turn-auto-approve", sessionId: string }
 { type: "request.session", sessionId: string }
 { type: "request.overview" }
+{ type: "request.resync" }
+{ type: "hint.session-dead", sessionId: string }
 ```
 
 ### Semantic Patches
@@ -132,25 +132,26 @@ Instead of JSON Patch (RFC 6902), the server emits **typed semantic operations**
 
 ```typescript
 type Patch =
-  | { op: "set_status", status: "active" | "ended" }
-  | { op: "set_claude_status", claudeStatus: "idle" | "responding" }
-  | { op: "set_token_usage", usage: TokenUsage }
-  | { op: "set_plan", plan: Plan | null }
-  | { op: "set_streaming_text", text: string | null }
-  | { op: "set_meta", slug?: string, branch?: string, pid?: number }
-  | { op: "add_turn", turn: TurnNode }
-  | { op: "freeze_turn", turnNumber: number }
-  | { op: "set_turn_stop", turnNumber, stopText?, stopThinking? }
-  | { op: "set_turn_tokens", turnNumber, tokenIn, tokenOut }
-  | { op: "add_step", turnNumber, agentId?, step: StepNode }
-  | { op: "add_tool", turnNumber, stepIndex, agentId?, tool: Tool }
-  | { op: "complete_tool", toolUseId, result, status, duration?, postText? }
-  | { op: "add_agent", agent: Agent }
-  | { op: "complete_agent", agentId, stopText?, stopThinking?, duration? }
-  | { op: "update_task", taskId, task: Task }
-  | { op: "track_file", path, fileOp }
-  | { op: "add_prompt", turnNumber, prompt: PromptEntry }
-  | { op: "set_prompt_answer", turnNumber, toolUseId, answer }
+  | { op: "set_status"; status: "active" | "ended" }
+  | { op: "set_claude_status"; claudeStatus: "idle" | "responding" }
+  | { op: "set_token_usage"; usage: TokenUsage }
+  | { op: "set_plan"; plan: Plan | null }
+  | { op: "set_streaming_text"; text: string | null }
+  | { op: "set_permission_mode"; mode: string | null }
+  | { op: "set_meta"; slug?: string; displayName?: string; branch?: string; pid?: number; modelName?: string; tmuxSession?: string }
+  | { op: "add_turn"; turn: TurnNode }
+  | { op: "freeze_turn"; turnNumber: number }
+  | { op: "set_turn_stop"; turnNumber: number; stopText?: string; stopThinking?: string }
+  | { op: "set_turn_tokens"; turnNumber: number; tokenIn: number; tokenOut: number }
+  | { op: "add_step"; turnNumber: number; agentId?: string; step: StepNode }
+  | { op: "add_tool"; turnNumber: number; stepIndex: number; agentId?: string; tool: Tool }
+  | { op: "complete_tool"; toolUseId: string; result: unknown; status: "done" | "error"; duration?: number; postText?: string; postThinking?: string }
+  | { op: "add_agent"; agent: Agent }
+  | { op: "complete_agent"; agentId: string; stopText?: string; stopThinking?: string; duration?: number; transcriptPath?: string }
+  | { op: "update_task"; taskId: string; task: Task }
+  | { op: "track_file"; path: string; fileOp: string }
+  | { op: "add_prompt"; turnNumber: number; prompt: PromptEntry }
+  | { op: "set_prompt_answer"; turnNumber: number; toolUseId: string; answer: string }
 ```
 
 **Why semantic over JSON Patch:**
@@ -160,7 +161,7 @@ type Patch =
 
 ## Hook System
 
-Hook scripts in `packages/emacs-bridge/hooks/` are registered via `hooks.json`. Each hook sources `_ensure-server` (to auto-start gravity-server) then invokes `tsx src/index.ts <EventName>`. The system handles 11 event types:
+Hook scripts in `packages/emacs-bridge/hooks/` are registered via `hooks.json`. Each hook sources `_ensure-server` (to auto-start gravity-server) then invokes `tsx src/index.ts <EventName>`. The system handles 12 event types:
 
 ### Session Lifecycle
 - **SessionStart**: User starts a new Claude Code conversation or runs `/clear`
@@ -185,26 +186,30 @@ Hook scripts in `packages/emacs-bridge/hooks/` are registered via `hooks.json`. 
   - Matcher: `ExitPlanMode` (when Claude Code exits plan mode)
   - Timeout: 96 hours
   - Response: routed through gravity-server inbox → terminal → user action → server → bridge
+- **AskUserQuestionIntercept**: Bridge keeps socket open, waits for user answer
+  - Routes through inbox like PermissionRequest
 
 ## Emacs Module Structure
 
-The Emacs package is split into 14 modular files loaded via `claude-gravity.el` (thin loader):
+The Emacs package is split into 15 modular files loaded via `claude-gravity.el` (thin loader):
 
 | Module | Lines | Purpose | Key Functions |
 |--------|-------|---------|---|
-| `claude-gravity-core.el` | ~270 | defgroup, defcustom, logging, tlist | `claude-gravity-log`, `claude-gravity--tlist-*` |
+| `claude-gravity-core.el` | ~280 | defgroup, defcustom, logging, tlist | `claude-gravity-log`, `claude-gravity--tlist-*` |
 | `claude-gravity-faces.el` | ~270 | 37 defface declarations + fringe bitmaps | `claude-gravity-face-*` |
 | `claude-gravity-session.el` | ~285 | Session hash table, CRUD operations | `claude-gravity--session-get`, `claude-gravity--session-set` |
-| `claude-gravity-discovery.el` | ~470 | Plugin/skill/agent/MCP capability discovery | `claude-gravity--discover-capabilities` |
-| `claude-gravity-state.el` | ~575 | Session state helpers, inbox, tool/agent lookup | `claude-gravity--session-get`, `claude-gravity--apply-patch` |
+| `claude-gravity-discovery.el` | ~1000 | Plugin/skill/agent/MCP capability discovery | `claude-gravity--discover-capabilities` |
+| `claude-gravity-state.el` | ~475 | Session state helpers, inbox, tool/agent lookup | `claude-gravity--session-get`, `claude-gravity--apply-patch` |
 | `claude-gravity-text.el` | ~480 | Text utilities: dividers, tables, markdown, wrapping | `claude-gravity--wrap-text`, `claude-gravity--render-plan` |
-| `claude-gravity-diff.el` | ~690 | Inline diffs, tool display, plan revision diff | `claude-gravity--render-tool-diff` |
-| `claude-gravity-render.el` | ~860 | Section renderers, turn grouping, agent/tool/task UI | `claude-gravity--insert-turn-section`, `claude-gravity--insert-tool` |
-| `claude-gravity-ui.el` | ~2210 | Overview/session buffers, modes, keymaps, transient | `claude-gravity-status` (main entry point) |
+| `claude-gravity-diff.el` | ~685 | Inline diffs, tool display, plan revision diff | `claude-gravity--render-tool-diff` |
+| `claude-gravity-render.el` | ~855 | Section renderers, turn grouping, agent/tool/task UI | `claude-gravity--insert-turn-section`, `claude-gravity--insert-tool` |
+| `claude-gravity-ui.el` | ~2610 | Overview/session buffers, modes, keymaps, transient | `claude-gravity-status` (main entry point) |
 | `claude-gravity-plan-review.el` | ~550 | Plan review buffer, comment overlays, feedback flow | `claude-gravity-plan-review-approve`, `claude-gravity-plan-review-deny` |
-| `claude-gravity-client.el` | ~1010 | Terminal socket client to gravity-server | `claude-gravity-server-start`, `claude-gravity--apply-patch` |
 | `claude-gravity-actions.el` | ~920 | Permission/question action buffers, inbox handling | `claude-gravity--show-permission-buffer` |
-| `claude-gravity-tmux.el` | ~1320 | Tmux session management, compose buffer | `claude-gravity--tmux-start-session` |
+| `claude-gravity-client.el` | ~1135 | Terminal socket client to gravity-server | `claude-gravity-server-start`, `claude-gravity--apply-patch` |
+| `claude-gravity-tmux.el` | ~1295 | Tmux session management, compose buffer | `claude-gravity--tmux-start-session` |
+| `claude-gravity-daemon.el` | ~695 | Agent SDK daemon bridge (ON HOLD) | `claude-gravity-daemon-start` |
+| `claude-gravity-debug.el` | ~750 | Terminal protocol debug viewer | `claude-gravity-debug-open` |
 | `claude-gravity.el` | ~35 | Thin loader: requires all modules | Entry point |
 
 ### Load Order (Dependency DAG)
@@ -214,9 +219,11 @@ core → {faces, session, discovery} → state → {text, diff} → render → u
                                                                   ↓
                                                               plan-review
                                                                   ↓
+                                                               actions
+                                                                  ↓
                                                                 client
                                                                   ↓
-                                                            {actions, tmux}
+                                                            {tmux, daemon, debug}
 ```
 
 - `core` defines utilities, custom vars, tlist (no dependencies)
@@ -226,8 +233,9 @@ core → {faces, session, discovery} → state → {text, diff} → render → u
 - `render` depends on all above (renders turns, tools, tasks, agents)
 - `ui` depends on `render` (main UI buffers and keymaps)
 - `plan-review` depends on `ui` (plan review buffer)
-- `client` depends on `plan-review` (terminal socket, patch application, server lifecycle)
-- `actions` and `tmux` depend on `client` and `ui` (interactive buffers, server actions)
+- `actions` depends on `plan-review` and `ui` (permission/question action buffers)
+- `client` depends on `actions` (terminal socket, patch application, server lifecycle)
+- `tmux`, `daemon`, and `debug` depend on `client` (interactive buffers, server actions)
 
 **Cross-module forward references:**
 - Use `declare-function` for functions called before they're defined

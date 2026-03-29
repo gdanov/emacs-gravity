@@ -9,7 +9,7 @@ Emacs UI for Claude Code, inspired by Google's AntiGravity and Cursor. Provides 
 ## Quick Architecture
 
 ```
-Claude Code (11 hooks)
+Claude Code (12 hooks)
     ↓
 emacs-bridge (Node.js, one-shot shim)
     ↓ hook socket (~/.local/state/gravity-hooks.sock)
@@ -29,7 +29,7 @@ For detailed architecture, see @ARCHITECTURE.md. For the v3 design rationale, se
 
 ## Module Structure (Summary)
 
-The Emacs package is split into 14 modular files:
+The Emacs package is split into 15 modular files:
 
 | Module | Purpose |
 |--------|---------|
@@ -46,17 +46,19 @@ The Emacs package is split into 14 modular files:
 | `claude-gravity-client.el` | Terminal socket client to gravity-server |
 | `claude-gravity-actions.el` | Permission and question action buffers |
 | `claude-gravity-tmux.el` | Tmux session management |
+| `claude-gravity-daemon.el` | Agent SDK daemon bridge (ON HOLD) |
+| `claude-gravity-debug.el` | Terminal protocol debug viewer |
 | `claude-gravity.el` | Thin loader |
 
-**Load order:** `core → {faces,session,discovery} → state → {text,diff} → render → ui → plan-review → client → {actions,tmux}`
+**Load order:** `core → {faces,session,discovery} → state → {text,diff} → render → ui → plan-review → actions → client → {tmux,daemon,debug}`
 
 For line counts, key functions, and dependency details, see @ARCHITECTURE.md.
 
 ## Hook System
 
-11 events: `SessionStart`, `SessionEnd`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, `Stop`, `Notification`, `PermissionRequest`.
+12 events: `SessionStart`, `SessionEnd`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, `Stop`, `Notification`, `PermissionRequest`, `AskUserQuestionIntercept`.
 
-Fire-and-forget except `PermissionRequest` (bidirectional, waits for user response in Emacs).
+Fire-and-forget except `PermissionRequest` and `AskUserQuestionIntercept` (bidirectional, wait for user response).
 
 Registered in `hooks.json` and forwarded by shell scripts to the Node.js bridge.
 
