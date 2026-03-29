@@ -154,6 +154,16 @@ async function handleHookMessage(msg: Record<string, unknown>, socket: Socket): 
       log(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`, "info");
       terminals.broadcast({ type: "inbox.removed", itemId: item.id });
     }
+
+    // Force-close plan-review items — the session has moved past plan approval.
+    // Notifications are excluded: they don't indicate the session moved forward.
+    if (eventName !== "Notification") {
+      const planReviewRemoved = inbox.forceClosePlanReviewForSession(sessionId);
+      for (const item of planReviewRemoved) {
+        log(`Inbox item ${item.id} (plan-review) force-closed: superseded by ${eventName}`, "info");
+        terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+      }
+    }
   }
 
   const patches = handleEvent(
