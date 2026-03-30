@@ -12,3 +12,8 @@ result
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Taskplane runtime artifacts
+.pi/
+.worktrees/
+.taskplane-tasks/
