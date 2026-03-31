@@ -30,18 +30,8 @@ process.stdin.on('end', () => {
     c.on('error', () => {});
   }
 
-  // Terminal output
   const mode = process.env.CLAUDE_GRAVITY_STATUSLINE_MODE || 'minimal';
-  if (mode === 'suppress') {
+  if (mode === 'minimal' || mode === 'suppress') {
     process.exit(0);
   }
-
-  const model = (data.model && data.model.display_name) || '?';
-  const pct = Math.floor((data.context_window && data.context_window.used_percentage) || 0);
-  const cost = ((data.cost && data.cost.total_cost_usd) || 0).toFixed(2);
-  const inTok = (data.context_window && data.context_window.total_input_tokens) || 0;
-  const outTok = (data.context_window && data.context_window.total_output_tokens) || 0;
-  const fmtTok = n => n < 1000 ? '' + n : n < 1000000 ? (n / 1000).toFixed(1) + 'k' : (n / 1000000).toFixed(1) + 'M';
-  const tokPart = inTok > 0 ? '  ↓' + fmtTok(inTok) + ' ↑' + fmtTok(outTok) : '';
-  console.log('[' + model + '] ctx:' + pct + '%' + tokPart + '  $' + cost);
 });

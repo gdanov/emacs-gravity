@@ -255,7 +255,7 @@ if (args.includes("--mode") && args[args.indexOf("--mode") + 1] === "opencode") 
   import("./opencode-bridge.js").then(() => {
     log("OpenCode bridge started");
   }).catch((e) => {
-    console.error("Failed to load opencode-bridge:", e);
+    log(`Failed to load opencode-bridge: ${e}`, "error");
     process.exit(1);
   });
 } else {
