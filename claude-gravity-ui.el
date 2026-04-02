@@ -466,57 +466,87 @@ Replaced by scope-first layout."
 ;;; ── Beads issue status (lazy-loaded) ──────────────────────────────────
 
 (defvar claude-gravity--beads-stats-cache (make-hash-table :test 'equal)
-  "Cache: project-dir → (TIMESTAMP . issues-list) or `pending'.")
+  "Cache: project-dir → (TIMESTAMP issues-list ready-ids-hash) or `pending'.
+READY-IDS-HASH is a hash-table of issue IDs that `bd ready' reports as unblocked.")
 
 (defconst claude-gravity--beads-stats-ttl 60
   "Seconds before cached beads data is considered stale.")
 
+(defun claude-gravity--beads-parse-json (raw)
+  "Parse JSON from RAW string, stripping leading stderr lines."
+  (let* ((json-start (string-match "^[{[]" raw))
+         (json-str (if json-start (substring raw json-start) raw)))
+    (ignore-errors
+      (json-parse-string json-str :object-type 'alist :array-type 'list))))
+
 (defun claude-gravity--fetch-beads-stats (project-dir)
-  "Fetch `bd list --json' asynchronously for PROJECT-DIR.
+  "Fetch `bd list' and `bd ready' asynchronously for PROJECT-DIR.
+Both run in parallel; result is merged once both complete.
 Caches result and triggers an overview refresh on completion."
   (let ((bd (executable-find "bd")))
     (when (and bd
                (not (string-empty-p project-dir))
                (file-directory-p (expand-file-name ".beads" project-dir)))
       (puthash project-dir 'pending claude-gravity--beads-stats-cache)
-      (let ((buf (generate-new-buffer " *beads-stats*"))
-            (default-directory project-dir))
+      ;; Shared state for the two parallel fetches
+      (let* ((state (list nil nil nil)) ; (list-result ready-result done-count)
+             (default-directory project-dir)
+             (merge-fn
+              (lambda ()
+                "Merge results when both fetches complete."
+                (let ((issues (nth 0 state))
+                      (ready (nth 1 state)))
+                  (if issues
+                      (let ((ready-ids (make-hash-table :test 'equal)))
+                        (dolist (r (or ready '()))
+                          (when-let ((id (alist-get 'id r)))
+                            (puthash id t ready-ids)))
+                        (puthash project-dir
+                                 (list (current-time) issues ready-ids)
+                                 claude-gravity--beads-stats-cache)
+                        (claude-gravity--schedule-refresh))
+                    (remhash project-dir claude-gravity--beads-stats-cache)))))
+             (make-sentinel
+              (lambda (slot)
+                "Return a process sentinel that stores parsed JSON in SLOT and calls merge."
+                (lambda (proc _event)
+                  (when (memq (process-status proc) '(exit signal))
+                    (unwind-protect
+                        (when (= 0 (process-exit-status proc))
+                          (let ((parsed (claude-gravity--beads-parse-json
+                                         (with-current-buffer (process-buffer proc)
+                                           (buffer-string)))))
+                            (when parsed
+                              (setf (nth slot state) parsed))))
+                      (when (buffer-live-p (process-buffer proc))
+                        (kill-buffer (process-buffer proc)))
+                      (setf (nth 2 state) (1+ (or (nth 2 state) 0)))
+                      (when (>= (nth 2 state) 2)
+                        (funcall merge-fn))))))))
+        ;; Launch both fetches in parallel
         (make-process
-         :name "beads-stats"
-         :buffer buf
-         :command (list bd "list" "--json")
+         :name "beads-list"
+         :buffer (generate-new-buffer " *beads-list*")
+         :command (list bd "list" "--json" "-n" "0")
          :connection-type 'pipe
          :noquery t
-         :sentinel
-         (lambda (proc _event)
-           (when (memq (process-status proc) '(exit signal))
-             (unwind-protect
-                 (if (/= 0 (process-exit-status proc))
-                     (remhash project-dir claude-gravity--beads-stats-cache)
-                   (let* ((raw (with-current-buffer (process-buffer proc)
-                                 (buffer-string)))
-                          ;; Strip stderr lines before JSON (bd prints "Info:" etc)
-                          (json-start (string-match "^[{[]" raw))
-                          (json-str (if json-start (substring raw json-start) raw))
-                          (parsed (ignore-errors
-                                    (json-parse-string json-str
-                                                       :object-type 'alist
-                                                       :array-type 'list))))
-                     (if parsed
-                         (progn
-                           (puthash project-dir
-                                    (cons (current-time) parsed)
-                                    claude-gravity--beads-stats-cache)
-                           (claude-gravity--schedule-refresh))
-                       (remhash project-dir claude-gravity--beads-stats-cache))))
-               (when (buffer-live-p (process-buffer proc))
-                 (kill-buffer (process-buffer proc)))))))))))
+         :sentinel (funcall make-sentinel 0))
+        (make-process
+         :name "beads-ready"
+         :buffer (generate-new-buffer " *beads-ready*")
+         :command (list bd "ready" "--json" "-n" "0")
+         :connection-type 'pipe
+         :noquery t
+         :sentinel (funcall make-sentinel 1))))))
 
-(defun claude-gravity--beads-issue-status-indicator (status)
-  "Return a status indicator string for beads issue STATUS."
+(defun claude-gravity--beads-issue-status-indicator (status &optional readyp)
+  "Return a status indicator string for beads issue STATUS.
+When READYP is non-nil and STATUS is \"open\", show as ready (green)."
   (pcase status
     ("in_progress" (propertize "◐" 'face 'claude-gravity-status-responding))
-    ("open"        (propertize "○" 'face 'claude-gravity-detail-label))
+    ("open"        (if readyp
+                       (propertize "◉" 'face 'claude-gravity-status-idle)
+                     (propertize "○" 'face 'claude-gravity-detail-label)))
     ("blocked"     (propertize "●" 'face 'claude-gravity-tool-error))
     (_             (propertize "?" 'face 'claude-gravity-detail-label))))
 
@@ -537,8 +567,9 @@ Heading shows summary counts; expanded body shows one line per non-closed issue.
      ((eq cached 'pending) nil)
      ;; Have data — check staleness, then render
      (t
-      (let ((timestamp (car cached))
-            (all-issues (cdr cached)))
+      (let ((timestamp (nth 0 cached))
+            (all-issues (nth 1 cached))
+            (ready-ids (nth 2 cached)))
         ;; Refetch in background if stale (but still show last-known data)
         (when (> (float-time (time-subtract (current-time) timestamp))
                  claude-gravity--beads-stats-ttl)
@@ -548,6 +579,13 @@ Heading shows summary counts; expanded body shows one line per non-closed issue.
                         (lambda (i) (equal (alist-get 'status i) "closed"))
                         all-issues))
                (open (cl-count "open" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
+               (ready-count (if ready-ids
+                                (cl-count-if
+                                 (lambda (i)
+                                   (and (equal (alist-get 'status i) "open")
+                                        (gethash (alist-get 'id i) ready-ids)))
+                                 issues)
+                              0))
                (in-prog (cl-count "in_progress" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
                (blocked (cl-count "blocked" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
                (indent (claude-gravity--indent))
@@ -562,31 +600,55 @@ Heading shows summary counts; expanded body shows one line per non-closed issue.
                                 'face 'claude-gravity-status-responding)
                     parts))
             (when (> open 0)
-              (push (propertize (format "%d open" open)
-                                'face 'claude-gravity-detail-label)
-                    parts))
+              (if (> ready-count 0)
+                  (push (concat (propertize (format "%d open" open)
+                                            'face 'claude-gravity-detail-label)
+                                " "
+                                (propertize (format "(%d ready)" ready-count)
+                                            'face 'claude-gravity-status-idle))
+                        parts)
+                (push (propertize (format "%d open" open)
+                                  'face 'claude-gravity-detail-label)
+                      parts)))
             (magit-insert-section (beads-status project-dir t)
               (magit-insert-heading
                 (format "%s%s  %s"
                         indent
                         (propertize "Issues" 'face 'claude-gravity-section-heading)
                         (string-join parts "  ")))
-              ;; Expanded body: one line per issue, sorted by priority
+              ;; Expanded body: sorted by status group (in_progress → ready → open → blocked), then priority
               (let ((sorted (sort (copy-sequence issues)
                                   (lambda (a b)
-                                    (< (or (alist-get 'priority a) 4)
-                                       (or (alist-get 'priority b) 4))))))
+                                    (let* ((a-ready (and ready-ids (gethash (alist-get 'id a) ready-ids)))
+                                           (b-ready (and ready-ids (gethash (alist-get 'id b) ready-ids)))
+                                           (a-status (alist-get 'status a))
+                                           (b-status (alist-get 'status b))
+                                           (a-rank (cond ((equal a-status "in_progress") 0)
+                                                         (a-ready 1)
+                                                         ((equal a-status "open") 2)
+                                                         ((equal a-status "blocked") 3)
+                                                         (t 4)))
+                                           (b-rank (cond ((equal b-status "in_progress") 0)
+                                                         (b-ready 1)
+                                                         ((equal b-status "open") 2)
+                                                         ((equal b-status "blocked") 3)
+                                                         (t 4))))
+                                      (if (= a-rank b-rank)
+                                          (< (or (alist-get 'priority a) 4)
+                                             (or (alist-get 'priority b) 4))
+                                        (< a-rank b-rank)))))))
                 (dolist (issue sorted)
                   (let* ((id (alist-get 'id issue))
                          (title (alist-get 'title issue))
                          (status (alist-get 'status issue))
                          (priority (alist-get 'priority issue))
-                         (itype (alist-get 'issue_type issue)))
+                         (itype (alist-get 'issue_type issue))
+                         (readyp (and ready-ids (gethash id ready-ids))))
                     (magit-insert-section (beads-issue id)
                       (magit-insert-heading
                         (format "%s  %s %s %s %s  %s"
                                 indent
-                                (claude-gravity--beads-issue-status-indicator status)
+                                (claude-gravity--beads-issue-status-indicator status readyp)
                                 (claude-gravity--beads-priority-label priority)
                                 (propertize (format "[%s]" (or itype "task"))
                                             'face 'claude-gravity-detail-label)
