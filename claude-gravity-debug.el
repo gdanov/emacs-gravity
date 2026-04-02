@@ -395,6 +395,15 @@ String keys \"msg-id:patch-idx\" = patch expansion (level 2).")
           (_ (format "%s" op)))
       (error (or op "?")))))
 
+;;; Utilities
+
+(defun claude-gravity--debug-format-size (bytes)
+  "Format BYTES as a human-readable size string (e.g. 1.2K, 3.4M)."
+  (cond
+   ((< bytes 1024) (format "%dB" bytes))
+   ((< bytes (* 1024 1024)) (format "%.1fK" (/ bytes 1024.0)))
+   (t (format "%.1fM" (/ bytes (* 1024.0 1024.0))))))
+
 ;;; Rendering
 
 (defun claude-gravity--debug-render ()
@@ -448,6 +457,9 @@ String keys \"msg-id:patch-idx\" = patch expansion (level 2).")
   (let* ((timestamp (alist-get 'timestamp msg))
          (direction (alist-get 'direction msg))
          (msg-type (alist-get 'msg-type msg))
+         (raw (alist-get 'raw msg))
+         (raw-size (if raw (string-bytes raw) 0))
+         (size-str (claude-gravity--debug-format-size raw-size))
          (label (alist-get 'session-label msg))
          (time-str (format-time-string "%H:%M:%S" timestamp))
          (dir-char (if (eq direction 'incoming) "\u25c0" "\u25b6"))
@@ -462,6 +474,7 @@ String keys \"msg-id:patch-idx\" = patch expansion (level 2).")
        (propertize dir-char 'face dir-face)
        " "
        (propertize (format "%-22s" (or msg-type "???")) 'face 'claude-gravity-tool-name)
+       (propertize (format " %6s" size-str) 'face 'claude-gravity-detail-label)
        " "
        (if label
            (propertize (format "%-12s" label) 'face 'claude-gravity-slug)
@@ -489,13 +502,15 @@ For other types: shows raw JSON."
       (dolist (patch patches)
         (let* ((op (or (alist-get 'op patch) "?"))
                (detail (claude-gravity--debug-patch-detail-summary patch))
+               (patch-json (condition-case nil (json-encode patch) (error "")))
+               (patch-size (claude-gravity--debug-format-size (string-bytes patch-json)))
                (patch-key (format "%d:%d" mid idx))
                (patch-expanded (gethash patch-key claude-gravity--debug-expanded))
                (start (point)))
           (insert
            (propertize (format "    [%d] " (1+ idx)) 'face 'claude-gravity-detail-label)
            (propertize (format "%-18s" op) 'face 'claude-gravity-tool-name)
-           " "
+           (propertize (format " %6s " patch-size) 'face 'claude-gravity-detail-label)
            detail
            "\n")
           (put-text-property start (point) 'claude-debug-patch-idx idx)

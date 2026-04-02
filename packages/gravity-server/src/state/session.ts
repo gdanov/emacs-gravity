@@ -19,6 +19,24 @@ import type {
   AgentLocation,
 } from "@gravity/shared";
 
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/** Fields on tool results that are large and unused by terminal clients. */
+const BLOATED_RESULT_FIELDS = ["structured_patch"];
+
+/** Strip large unused fields from tool results to reduce patch size. */
+function stripBloatedFields(result: unknown): unknown {
+  if (result == null || typeof result !== "object" || Array.isArray(result)) return result;
+  const rec = result as Record<string, unknown>;
+  const hasBloat = BLOATED_RESULT_FIELDS.some((f) => f in rec);
+  if (!hasBloat) return result;
+  const cleaned: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rec)) {
+    if (!BLOATED_RESULT_FIELDS.includes(k)) cleaned[k] = v;
+  }
+  return cleaned;
+}
+
 // ── Factory ──────────────────────────────────────────────────────────
 
 /** Create a new empty session. */
@@ -366,8 +384,10 @@ export function completeTool(
   const tool = findToolByLocation(s, loc);
   if (!tool) return [];
 
+  const cleanResult = stripBloatedFields(result);
+
   tool.status = status;
-  tool.result = result;
+  tool.result = cleanResult;
   if (tool.timestamp) {
     tool.duration = (Date.now() - tool.timestamp) / 1000;
   }
@@ -377,7 +397,7 @@ export function completeTool(
   return [{
     op: "complete_tool",
     toolUseId,
-    result,
+    result: cleanResult,
     status,
     duration: tool.duration ?? undefined,
     postText,
