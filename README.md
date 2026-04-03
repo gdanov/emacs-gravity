@@ -7,6 +7,21 @@ emacs-gravity gives you a magit-style working memory interface for Claude Code. 
 Claude Code's TUI is hidden by default. You see the conversation as data, not as a chat log.
 
 ---
+# Current state
+
+
+I'm using it as my daily driver for several projects with Claude Code TUI. While stability is imploving, we're at beta quality, mostly.
+
+- unmanaged sessions are the most frequently used and have the least amount of bugs
+  * the most confusing "feature" is that in 90% of the cases you see permission request or question displayed both in TUI and Gravity. The remaining 10% Claude may appear "stuck" because the request/question is not shown in the TUI, but only in Gravity. The menubar indicator helps a lot with this case.
+* managed sessions (tmux) are not well tested yet. They are my next priority.
+  * known issue is you have to have running tmux before Gravity can start managed session
+  
+This project has been vibecoded on purpose as experiment, so desipite my best effort to keep complete test suite, regressions happen.
+
+Project is being used & developed exclusively on MacOS, so windows & linux users may hit obstacles I'm unaware of.
+
+---
 
 ## v3: Server-Driven Architecture
 
