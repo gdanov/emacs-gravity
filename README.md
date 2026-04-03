@@ -15,7 +15,8 @@ I'm using it as my daily driver for several projects with Claude Code TUI. While
 - unmanaged sessions are the most frequently used and have the least amount of bugs
   * the most confusing "feature" is that in 90% of the cases you see permission request or question displayed both in TUI and Gravity. The remaining 10% Claude may appear "stuck" because the request/question is not shown in the TUI, but only in Gravity. The menubar indicator helps a lot with this case.
 * managed sessions (tmux) are not well tested yet. They are my next priority.
-  * known issue is you have to have running tmux before Gravity can start managed session
+  * known issue is you have to have running tmux before Gravity can start managed session.
+* performance is OK. With many sessions and frequent updates editors freeze too often. I regularly have performance focused sessions, but I'm not sure we can ever get to state where Gravity buffers are receiving frequent updates and regular editors feel as smooth as usual.
   
 This project has been vibecoded on purpose as experiment, so desipite my best effort to keep complete test suite, regressions happen.
 
