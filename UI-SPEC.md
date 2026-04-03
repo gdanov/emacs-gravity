@@ -671,7 +671,6 @@ Permissions
 Sessions
   D  Remove ended sessions
   R  Reset all status to idle
-  X  Detect dead sessions
   d  Delete session
 
 Navigation

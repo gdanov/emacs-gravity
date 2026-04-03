@@ -1198,7 +1198,7 @@ Only shows permission, question, and plan-review items (not idle)."
 
 (define-key claude-gravity-mode-map (kbd "R") 'claude-gravity-reset-status)
 
-(define-key claude-gravity-mode-map (kbd "X") 'claude-gravity-detect-dead-sessions)
+;; X keybinding removed — session liveness handled server-side
 
 (define-key claude-gravity-mode-map (kbd "d") 'claude-gravity-delete-at-point)
 
@@ -1777,7 +1777,6 @@ prompts to confirm the directory before starting."
     ("S ," "Rename session" claude-gravity-rename-session)]
    ["Session Cleanup"
     ("D" "Remove ended" claude-gravity-cleanup-sessions)
-    ("X" "Detect dead" claude-gravity-detect-dead-sessions)
     ("R" "Reset all idle" claude-gravity-reset-status)
     ("d" "Delete at point" claude-gravity-delete-at-point)
     ("I" "Toggle ignored" claude-gravity-toggle-ignored-session)]
@@ -1872,45 +1871,8 @@ prompts to confirm the directory before starting."
     (claude-gravity--render-overview)))
 
 
-(defun claude-gravity--process-alive-p (pid)
-  "Return non-nil if process PID is alive.
-Uses `ps' on macOS where `signal-process' returns t for zombie PIDs."
-  (if (eq system-type 'darwin)
-      (string-match-p (format "^ *%d " pid)
-                      (shell-command-to-string
-                       (format "ps -p %d -o pid,state= 2>/dev/null" pid)))
-    (condition-case nil
-        (progn (signal-process pid 0) t)
-      (error nil))))
-
-
-(defun claude-gravity-detect-dead-sessions ()
-  "Detect dead sessions and send hints to the server.
-Checks PID liveness when available, falls back to last-event-time staleness.
-The server owns session state — we send hint.session-dead instead of
-mutating locally."
-  (interactive)
-  (let ((count 0))
-    (maphash
-     (lambda (id session)
-       (when (eq (plist-get session :status) 'active)
-         (let ((pid (plist-get session :pid))
-               (last-event (plist-get session :last-event-time)))
-           (when (cond
-                  ;; PID known: check if process is alive
-                  ((and pid (numberp pid) (> pid 0))
-                   (not (claude-gravity--process-alive-p pid)))
-                  ;; No PID, has last-event: use staleness (>5 min since last event)
-                  ((and last-event
-                        (> (float-time (time-subtract (current-time) last-event)) 300))
-                   t)
-                  ;; No PID, no last-event: legacy session with no way to verify
-                  ((null last-event) t))
-             (claude-gravity--send-to-server
-              `((type . "hint.session-dead") (sessionId . ,id)))
-             (cl-incf count)))))
-     claude-gravity--sessions)
-    (claude-gravity--log 'debug "Sent %d dead-session hint(s) to server" count)))
+;; Session liveness detection is handled server-side (PID checks + staleness).
+;; Removed: claude-gravity--process-alive-p, claude-gravity-detect-dead-sessions
 
 
 (defun claude-gravity-toggle-ignored-session ()

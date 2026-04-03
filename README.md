@@ -159,7 +159,7 @@ All plugins, skills, agents, commands, and MCP servers rendered in a collapsible
 ![Capabilities](<Screenshot 2026-02-17 at 10.29.53.png>)
 
 ### Tmux Integration
-Launch and manage Claude Code sessions in tmux directly from Emacs. Compose prompts in a dedicated buffer, send via `C-c C-c`. Heartbeat monitoring detects dead sessions. External sessions running inside tmux are fully integrated via hooks.
+Launch and manage Claude Code sessions in tmux directly from Emacs. Compose prompts in a dedicated buffer, send via `C-c C-c`. External sessions running inside tmux are fully integrated via hooks. Session liveness is monitored server-side.
 
 ## How it compares
 

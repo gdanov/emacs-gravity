@@ -31,6 +31,9 @@ import type { ServerConfigData } from "./services/config.js";
 const CAPABILITY_WAIT_MS = 10_000;
 const CAPABILITY_POLL_MS = 500;
 const PURGE_DELAY_MS = 2 * 60 * 1000;
+const HEALTH_CHECK_INTERVAL_MS = 30_000;
+const STALENESS_THRESHOLD_MS = 5 * 60 * 1000;
+const HINT_RECENCY_GUARD_MS = 30_000;
 
 const BIDIRECTIONAL_EVENTS: ReadonlySet<HookEventName> = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 const OVERVIEW_EVENTS: ReadonlySet<HookEventName> = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
@@ -336,6 +339,11 @@ const program = Effect.gen(function* () {
         const { sessionId } = msg;
         const session = store.get(sessionId);
         if (session && session.status === "active") {
+          const age = Date.now() - session.lastEventTime;
+          if (age < HINT_RECENCY_GUARD_MS) {
+            logMsg(`Terminal hint: session ${sessionId} ignored — last event ${Math.round(age / 1000)}s ago (< ${HINT_RECENCY_GUARD_MS / 1000}s)`, "warn");
+            break;
+          }
           logMsg(`Terminal hint: session ${sessionId} is dead — marking ended`);
           const patches = sessionEnd(session);
           if (patches.length > 0) {
@@ -453,6 +461,41 @@ const program = Effect.gen(function* () {
     logMsg(`Terminal socket listening on ${config.terminalSocketPath}`);
   });
 
+  // ── Session health monitor ───────────────────────────────────────
+
+  const healthCheckInterval = setInterval(() => {
+    const now = Date.now();
+    for (const session of store.all()) {
+      if (session.status !== "active") continue;
+      const sessionId = session.sessionId;
+      let isDead = false;
+
+      if (session.pid && session.pid > 0) {
+        try {
+          process.kill(session.pid, 0);
+        } catch {
+          isDead = true;
+          logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
+        }
+      } else if (now - session.lastEventTime > STALENESS_THRESHOLD_MS) {
+        isDead = true;
+        logMsg(`Health check: session ${sessionId} stale (no events for ${Math.round((now - session.lastEventTime) / 1000)}s)`);
+      }
+
+      if (isDead) {
+        const patches = sessionEnd(session);
+        if (patches.length > 0) {
+          terminals.broadcast({ type: "session.update", sessionId, patches });
+        }
+        schedulePurge(sessionId);
+        terminals.broadcast({
+          type: "overview.snapshot",
+          projects: store.getProjectSummaries(),
+        });
+      }
+    }
+  }, HEALTH_CHECK_INTERVAL_MS);
+
   // ── PID file ─────────────────────────────────────────────────────
 
   yield* fs.mkdirp(dirname(config.pidFilePath));
@@ -463,6 +506,7 @@ const program = Effect.gen(function* () {
 
   const shutdown = (): void => {
     logMsg("gravity-server shutting down...");
+    clearInterval(healthCheckInterval);
     store.clearAllPurgeTimers();
     hookServer.close();
     terminalServer.close();

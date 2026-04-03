@@ -805,12 +805,14 @@ within `claude-gravity--tmux-stop-timeout' seconds, force-kills it."
 
 
 
-;;; Tmux heartbeat — detect dead sessions
+;;; Tmux heartbeat — clean up Monet servers for dead tmux sessions
+;;
+;; Session liveness is handled server-side (PID checks + staleness).
+;; The heartbeat only cleans up local Monet IDE server mappings.
 
 (defun claude-gravity--tmux-heartbeat ()
-  "Check all tmux sessions for liveness asynchronously.
-Uses a single `tmux list-sessions' call instead of N `has-session' calls.
-Sends hint.session-dead to gravity-server instead of mutating local state."
+  "Clean up Monet IDE servers for dead tmux sessions.
+Session liveness detection is handled by gravity-server."
   (when (> (hash-table-count claude-gravity--tmux-sessions) 0)
     (let ((buf (generate-new-buffer " *tmux-heartbeat*")))
       (set-process-sentinel
@@ -818,24 +820,15 @@ Sends hint.session-dead to gravity-server instead of mutating local state."
                       "-F" "#{session_name}")
        (lambda (proc _event)
          (when (memq (process-status proc) '(exit signal))
-           ;; Only act on successful tmux output; non-zero exit (tmux not
-           ;; running, server hiccup) means we have no data — skip entirely.
            (when (= (process-exit-status proc) 0)
              (let ((alive-names
                     (with-current-buffer (process-buffer proc)
-                      (split-string (buffer-string) "\n" t)))
-                   (dead nil))
-               (maphash (lambda (sid tmux-name)
-                          (unless (member tmux-name alive-names)
-                            (push sid dead)))
-                        claude-gravity--tmux-sessions)
-               (dolist (sid dead)
-                 (let ((tmux-name (gethash sid claude-gravity--tmux-sessions)))
-                   (when tmux-name (claude-gravity--monet-stop tmux-name)))
-                 (remhash sid claude-gravity--tmux-sessions)
-                 ;; Tell the server — it owns session state
-                 (claude-gravity--send-to-server
-                  `((type . "hint.session-dead") (sessionId . ,sid))))))
+                      (split-string (buffer-string) "\n" t))))
+               (maphash (lambda (_sid tmux-name)
+                          (when (and (stringp tmux-name)
+                                     (not (member tmux-name alive-names)))
+                            (claude-gravity--monet-stop tmux-name)))
+                        claude-gravity--tmux-sessions)))
            (kill-buffer (process-buffer proc))))))))
 
 
@@ -843,7 +836,7 @@ Sends hint.session-dead to gravity-server instead of mutating local state."
   "Start the tmux heartbeat timer if not already running."
   (unless claude-gravity--tmux-heartbeat-timer
     (setq claude-gravity--tmux-heartbeat-timer
-          (run-with-timer 5 5 #'claude-gravity--tmux-heartbeat))))
+          (run-with-timer 10 10 #'claude-gravity--tmux-heartbeat))))
 
 
 (defun claude-gravity--tmux-cleanup-all ()
