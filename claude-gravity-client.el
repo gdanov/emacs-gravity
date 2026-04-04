@@ -244,6 +244,8 @@ PROC is the process, EVENT is the status change."
            (capabilities . ["action.permission" "action.question" "action.plan-review"])))
         (claude-gravity--send-to-server
          '((type . "request.overview")))
+        (claude-gravity--send-to-server
+         '((type . "request.resync")))
         ;; Re-subscribe to previously-opened session details
         (maphash (lambda (sid _)
                    (claude-gravity--send-to-server
@@ -711,7 +713,8 @@ MSG contains sessionId and full session state."
     ;; Refresh UI
     (claude-gravity--schedule-refresh)
     (claude-gravity--schedule-session-refresh session-id)
-    (claude-gravity--log 'debug "Session snapshot received: %s" session-id)))
+    (claude-gravity--log 'info "Session snapshot received: %s (total sessions now: %d)"
+                         session-id (hash-table-count claude-gravity--sessions))))
 
 
 ;;; ── Patch application ───────────────────────────────────────────────
@@ -731,8 +734,15 @@ MSG contains sessionId and patches array."
       ;; Apply each patch
       (dolist (patch patches)
         (claude-gravity--apply-patch session patch))
-      ;; Schedule refresh
-      (claude-gravity--schedule-refresh)
+      ;; Only refresh overview when patches affect overview-visible state
+      (when (cl-some (lambda (p)
+                       (member (alist-get 'op p)
+                               '("set_status" "set_claude_status" "set_meta"
+                                 "set_permission_mode" "set_plan"
+                                 "add_turn" "add_tool" "add_agent")))
+                     patches)
+        (claude-gravity--schedule-refresh))
+      ;; Always refresh session detail
       (claude-gravity--schedule-session-refresh session-id))))
 
 (defun claude-gravity--apply-patch (session patch)
@@ -973,12 +983,19 @@ Also prunes orphan sessions that the server no longer knows about."
           (let ((sid (alist-get 'sessionId s)))
             (when sid
               (puthash sid t server-ids))))))
+    (claude-gravity--log 'info "Overview: %d projects, %d server sessions, %d local sessions, %d subscribed"
+                         (length projects)
+                         (hash-table-count server-ids)
+                         (hash-table-count claude-gravity--sessions)
+                         (hash-table-count claude-gravity--client-subscribed-sessions))
     ;; Auto-subscribe to new sessions
     (dolist (proj projects)
       (let ((sessions (alist-get 'sessions proj)))
         (dolist (s sessions)
           (let ((sid (alist-get 'sessionId s)))
             (when (and sid (not (gethash sid claude-gravity--sessions)))
+              (claude-gravity--log 'info "Overview: auto-subscribing to %s (already-subscribed=%s)"
+                                   sid (if (gethash sid claude-gravity--client-subscribed-sessions) "yes" "no"))
               (claude-gravity--request-session sid))))))
     ;; Remove orphan sessions: server doesn't know them
     (let ((orphans nil))
