@@ -30,6 +30,11 @@
 (declare-function claude-gravity-debug-show "claude-gravity-debug")
 (defvar claude-gravity--tmux-sessions)
 
+(defvar claude-gravity--rendering-p nil
+  "Non-nil when a programmatic render is in progress.
+Suppresses `magit-section-set-visibility-hook' side effects that
+would otherwise schedule redundant re-renders.")
+
 
 ;;; Window Navigation Helpers
 
@@ -421,8 +426,49 @@ instructions, settings, mcp-servers, hooks, base-dir."
 
 
 (defun claude-gravity--insert-configuration-section (project-dir)
-  "Insert scope-first Configuration section for PROJECT-DIR.
-Shows Project scope, User scope, then Plugins."
+  "Insert Configuration section for PROJECT-DIR.
+When capability data has not changed since last render, inserts
+only a summary heading to avoid expensive magit-section tree construction."
+  (let* ((key (expand-file-name project-dir))
+         (cache-cell (gethash key claude-gravity--capabilities-by-scope-cache))
+         (prev-cell (gethash key claude-gravity--config-render-data))
+         (unchanged (and cache-cell prev-cell (eq cache-cell prev-cell))))
+    (if unchanged
+        (claude-gravity--insert-configuration-summary key cache-cell)
+      (claude-gravity--insert-configuration-full project-dir)
+      ;; Record the cache cell used for this render
+      (puthash key (gethash key claude-gravity--capabilities-by-scope-cache)
+               claude-gravity--config-render-data))))
+
+(defun claude-gravity--insert-configuration-summary (key cache-cell)
+  "Insert a summary-only Configuration section (no sub-tree).
+KEY is the expanded project dir, CACHE-CELL is (timestamp . scoped-alist)."
+  (let* ((scoped (cdr cache-cell))
+         (count-scope
+          (lambda (scope-data)
+            (+ (length (alist-get 'rules scope-data))
+               (length (alist-get 'skills scope-data))
+               (length (alist-get 'agents scope-data))
+               (length (alist-get 'commands scope-data))
+               (length (alist-get 'hooks scope-data))
+               (length (alist-get 'mcp-servers scope-data)))))
+         (total (+ (funcall count-scope (alist-get 'project scoped))
+                   (funcall count-scope (alist-get 'user scoped))
+                   (cl-reduce #'+ (mapcar (lambda (p) (or (alist-get 'total p) 0))
+                                          (alist-get 'plugins scoped))
+                              :initial-value 0)))
+         (indent (claude-gravity--indent)))
+    (magit-insert-section (configuration key t)
+      (magit-insert-heading
+        (format "%s%s  %s"
+                indent
+                (propertize "Configuration"
+                            'face 'claude-gravity-section-heading)
+                (propertize (format "(%d items)" total)
+                            'face 'claude-gravity-detail-label))))))
+
+(defun claude-gravity--insert-configuration-full (project-dir)
+  "Insert full Configuration section with all sub-trees for PROJECT-DIR."
   (let ((scoped (claude-gravity--discover-project-capabilities-by-scope project-dir)))
     (let ((project-data (alist-get 'project scoped))
           (user-data (alist-get 'user scoped))
@@ -451,6 +497,21 @@ Shows Project scope, User scope, then Plugins."
               (dolist (plugin plugins)
                 (claude-gravity--insert-plugin-capabilities plugin)))))))))
 
+(defun claude-gravity--config-section-visibility (section)
+  "When a summary Configuration section is expanded, trigger full re-render.
+Added to `magit-section-set-visibility-hook'."
+  (when (and (not claude-gravity--rendering-p)
+             (eq (oref section type) 'configuration)
+             (not (oref section children))
+             (oref section value))
+    (remhash (expand-file-name (oref section value))
+             claude-gravity--config-render-data)
+    (claude-gravity--schedule-refresh)
+    nil))
+
+(add-hook 'magit-section-set-visibility-hook
+          #'claude-gravity--config-section-visibility)
+
 
 ;; Backward compat aliases
 (defun claude-gravity--insert-hierarchical-capabilities (project-dir)
@@ -471,6 +532,10 @@ READY-IDS-HASH is a hash-table of issue IDs that `bd ready' reports as unblocked
 
 (defconst claude-gravity--beads-stats-ttl 60
   "Seconds before cached beads data is considered stale.")
+
+(defvar claude-gravity--beads-render-data (make-hash-table :test 'equal)
+  "Maps project-dir → cache cell from last render of beads section.
+Used to skip re-rendering when beads data hasn't changed.")
 
 (defun claude-gravity--beads-parse-json (raw)
   "Parse JSON from RAW string, stripping leading stderr lines."
@@ -554,10 +619,46 @@ When READYP is non-nil and STATUS is \"open\", show as ready (green)."
   "Return a short priority label for PRIORITY number."
   (propertize (format "P%s" (or priority "?")) 'face 'claude-gravity-detail-label))
 
+(defun claude-gravity--beads-summary-heading (cached indent)
+  "Build the Issues heading string from CACHED beads data.
+INDENT is the current indentation prefix."
+  (let* ((all-issues (nth 1 cached))
+         (ready-ids (nth 2 cached))
+         (issues (cl-remove-if
+                  (lambda (i) (equal (alist-get 'status i) "closed"))
+                  all-issues))
+         (open (cl-count "open" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
+         (ready-count (if ready-ids
+                          (cl-count-if
+                           (lambda (i)
+                             (and (equal (alist-get 'status i) "open")
+                                  (gethash (alist-get 'id i) ready-ids)))
+                           issues)
+                        0))
+         (in-prog (cl-count "in_progress" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
+         (blocked (cl-count "blocked" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
+         (parts nil))
+    (when (> blocked 0)
+      (push (propertize (format "%d blocked" blocked) 'face 'claude-gravity-tool-error) parts))
+    (when (> in-prog 0)
+      (push (propertize (format "%d active" in-prog) 'face 'claude-gravity-status-responding) parts))
+    (when (> open 0)
+      (if (> ready-count 0)
+          (push (concat (propertize (format "%d open" open) 'face 'claude-gravity-detail-label)
+                        " "
+                        (propertize (format "(%d ready)" ready-count) 'face 'claude-gravity-status-idle))
+                parts)
+        (push (propertize (format "%d open" open) 'face 'claude-gravity-detail-label) parts)))
+    (when issues
+      (format "%s%s  %s"
+              indent
+              (propertize "Issues" 'face 'claude-gravity-section-heading)
+              (string-join parts "  ")))))
+
 (defun claude-gravity--insert-beads-status (project-dir)
   "Insert expandable beads issue section for PROJECT-DIR.
 Lazy: triggers async fetch on first call, renders cached data thereafter.
-Heading shows summary counts; expanded body shows one line per non-closed issue."
+When data hasn't changed since last render, inserts summary heading only."
   (let ((cached (gethash project-dir claude-gravity--beads-stats-cache)))
     (cond
      ;; No cache — trigger fetch, render nothing yet
@@ -567,94 +668,74 @@ Heading shows summary counts; expanded body shows one line per non-closed issue.
      ((eq cached 'pending) nil)
      ;; Have data — check staleness, then render
      (t
-      (let ((timestamp (nth 0 cached))
-            (all-issues (nth 1 cached))
-            (ready-ids (nth 2 cached)))
+      (let ((timestamp (nth 0 cached)))
         ;; Refetch in background if stale (but still show last-known data)
         (when (> (float-time (time-subtract (current-time) timestamp))
                  claude-gravity--beads-stats-ttl)
           (claude-gravity--fetch-beads-stats project-dir))
-        ;; Filter to non-closed issues
-        (let* ((issues (cl-remove-if
-                        (lambda (i) (equal (alist-get 'status i) "closed"))
-                        all-issues))
-               (open (cl-count "open" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
-               (ready-count (if ready-ids
-                                (cl-count-if
-                                 (lambda (i)
-                                   (and (equal (alist-get 'status i) "open")
-                                        (gethash (alist-get 'id i) ready-ids)))
-                                 issues)
-                              0))
-               (in-prog (cl-count "in_progress" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
-               (blocked (cl-count "blocked" issues :key (lambda (i) (alist-get 'status i)) :test #'equal))
+        ;; Check if data changed since last render
+        (let* ((prev (gethash project-dir claude-gravity--beads-render-data))
+               (unchanged (and prev (eq cached prev)))
                (indent (claude-gravity--indent))
-               (parts nil))
-          (when issues
-            (when (> blocked 0)
-              (push (propertize (format "%d blocked" blocked)
-                                'face 'claude-gravity-tool-error)
-                    parts))
-            (when (> in-prog 0)
-              (push (propertize (format "%d active" in-prog)
-                                'face 'claude-gravity-status-responding)
-                    parts))
-            (when (> open 0)
-              (if (> ready-count 0)
-                  (push (concat (propertize (format "%d open" open)
-                                            'face 'claude-gravity-detail-label)
-                                " "
-                                (propertize (format "(%d ready)" ready-count)
-                                            'face 'claude-gravity-status-idle))
-                        parts)
-                (push (propertize (format "%d open" open)
-                                  'face 'claude-gravity-detail-label)
-                      parts)))
-            (magit-insert-section (beads-status project-dir t)
+               (heading (claude-gravity--beads-summary-heading cached indent)))
+          (when heading
+            (if unchanged
+                ;; Summary only — heading without children
+                (magit-insert-section (beads-status project-dir t)
+                  (magit-insert-heading heading))
+              ;; Full render with issue list
+              (claude-gravity--insert-beads-status-full project-dir cached indent heading)
+              (puthash project-dir cached claude-gravity--beads-render-data)))))))))
+
+(defun claude-gravity--insert-beads-status-full (project-dir cached indent heading)
+  "Insert full beads section with individual issue lines.
+PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
+  (let* ((all-issues (nth 1 cached))
+         (ready-ids (nth 2 cached))
+         (issues (cl-remove-if
+                  (lambda (i) (equal (alist-get 'status i) "closed"))
+                  all-issues)))
+    (magit-insert-section (beads-status project-dir t)
+      (magit-insert-heading heading)
+      ;; Expanded body: sorted by status group (in_progress → ready → open → blocked), then priority
+      (let ((sorted (sort (copy-sequence issues)
+                          (lambda (a b)
+                            (let* ((a-ready (and ready-ids (gethash (alist-get 'id a) ready-ids)))
+                                   (b-ready (and ready-ids (gethash (alist-get 'id b) ready-ids)))
+                                   (a-status (alist-get 'status a))
+                                   (b-status (alist-get 'status b))
+                                   (a-rank (cond ((equal a-status "in_progress") 0)
+                                                 (a-ready 1)
+                                                 ((equal a-status "open") 2)
+                                                 ((equal a-status "blocked") 3)
+                                                 (t 4)))
+                                   (b-rank (cond ((equal b-status "in_progress") 0)
+                                                 (b-ready 1)
+                                                 ((equal b-status "open") 2)
+                                                 ((equal b-status "blocked") 3)
+                                                 (t 4))))
+                              (if (= a-rank b-rank)
+                                  (< (or (alist-get 'priority a) 4)
+                                     (or (alist-get 'priority b) 4))
+                                (< a-rank b-rank)))))))
+        (dolist (issue sorted)
+          (let* ((id (alist-get 'id issue))
+                 (title (alist-get 'title issue))
+                 (status (alist-get 'status issue))
+                 (priority (alist-get 'priority issue))
+                 (itype (alist-get 'issue_type issue))
+                 (readyp (and ready-ids (gethash id ready-ids))))
+            (magit-insert-section (beads-issue id)
               (magit-insert-heading
-                (format "%s%s  %s"
+                (format "%s  %s %s %s %s  %s"
                         indent
-                        (propertize "Issues" 'face 'claude-gravity-section-heading)
-                        (string-join parts "  ")))
-              ;; Expanded body: sorted by status group (in_progress → ready → open → blocked), then priority
-              (let ((sorted (sort (copy-sequence issues)
-                                  (lambda (a b)
-                                    (let* ((a-ready (and ready-ids (gethash (alist-get 'id a) ready-ids)))
-                                           (b-ready (and ready-ids (gethash (alist-get 'id b) ready-ids)))
-                                           (a-status (alist-get 'status a))
-                                           (b-status (alist-get 'status b))
-                                           (a-rank (cond ((equal a-status "in_progress") 0)
-                                                         (a-ready 1)
-                                                         ((equal a-status "open") 2)
-                                                         ((equal a-status "blocked") 3)
-                                                         (t 4)))
-                                           (b-rank (cond ((equal b-status "in_progress") 0)
-                                                         (b-ready 1)
-                                                         ((equal b-status "open") 2)
-                                                         ((equal b-status "blocked") 3)
-                                                         (t 4))))
-                                      (if (= a-rank b-rank)
-                                          (< (or (alist-get 'priority a) 4)
-                                             (or (alist-get 'priority b) 4))
-                                        (< a-rank b-rank)))))))
-                (dolist (issue sorted)
-                  (let* ((id (alist-get 'id issue))
-                         (title (alist-get 'title issue))
-                         (status (alist-get 'status issue))
-                         (priority (alist-get 'priority issue))
-                         (itype (alist-get 'issue_type issue))
-                         (readyp (and ready-ids (gethash id ready-ids))))
-                    (magit-insert-section (beads-issue id)
-                      (magit-insert-heading
-                        (format "%s  %s %s %s %s  %s"
-                                indent
-                                (claude-gravity--beads-issue-status-indicator status readyp)
-                                (claude-gravity--beads-priority-label priority)
-                                (propertize (format "[%s]" (or itype "task"))
-                                            'face 'claude-gravity-detail-label)
-                                (or title "")
-                                (propertize (or id "") 'face 'claude-gravity-detail-label)))))))
-              (insert "\n")))))))))
+                        (claude-gravity--beads-issue-status-indicator status readyp)
+                        (claude-gravity--beads-priority-label priority)
+                        (propertize (format "[%s]" (or itype "task"))
+                                    'face 'claude-gravity-detail-label)
+                        (or title "")
+                        (propertize (or id "") 'face 'claude-gravity-detail-label)))))))
+      (insert "\n"))))
 
 
 (defun claude-gravity--render-overview ()
@@ -663,6 +744,7 @@ Heading shows summary counts; expanded body shows one line per non-closed issue.
     (when buf
       (with-current-buffer buf
         (let ((inhibit-read-only t)
+              (claude-gravity--rendering-p t)
               (section-ident (when (magit-current-section)
                                (magit-section-ident (magit-current-section))))
               (pos-in-section (when (magit-current-section)
@@ -1119,6 +1201,7 @@ Only shows permission, question, and plan-review items (not idle)."
     (when buf
       (with-current-buffer buf
         (let ((inhibit-read-only t)
+              (claude-gravity--rendering-p t)
               (section-ident (when (magit-current-section)
                                (magit-section-ident (magit-current-section))))
               (pos-in-section (when (magit-current-section)
