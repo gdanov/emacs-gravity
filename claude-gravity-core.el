@@ -133,6 +133,13 @@ Dynamically let-bound inside agent branches for nested tint selection.")
   "Name of the overview buffer.")
 
 
+(defvar claude-gravity--config-render-data (make-hash-table :test 'equal)
+  "Per-project config render state.
+Maps project-dir -> cache cons cell from `claude-gravity--capabilities-by-scope-cache'
+that was current when Configuration section was last fully rendered.
+Used for `eq' identity comparison to skip re-rendering unchanged data.")
+
+
 (defvar claude-gravity--last-project-dir nil
   "Directory of the most recently started claude-gravity session.
 Used as a fallback default when starting a new session with no better context.")

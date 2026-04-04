@@ -976,11 +976,13 @@ Results are cached for `claude-gravity--capabilities-ttl' seconds."
 (defun claude-gravity--invalidate-capabilities-cache (&optional project-dir)
   "Invalidate capabilities cache for PROJECT-DIR, or all if nil."
   (if project-dir
-      (progn
-        (remhash (expand-file-name project-dir) claude-gravity--capabilities-cache)
-        (remhash (expand-file-name project-dir) claude-gravity--capabilities-by-scope-cache))
+      (let ((key (expand-file-name project-dir)))
+        (remhash key claude-gravity--capabilities-cache)
+        (remhash key claude-gravity--capabilities-by-scope-cache)
+        (remhash key claude-gravity--config-render-data))
     (clrhash claude-gravity--capabilities-cache)
-    (clrhash claude-gravity--capabilities-by-scope-cache)))
+    (clrhash claude-gravity--capabilities-by-scope-cache)
+    (clrhash claude-gravity--config-render-data)))
 
 
 (defun claude-gravity-refresh-capabilities ()
