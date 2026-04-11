@@ -7,10 +7,12 @@ name: Release
 # `emacs-gravity-marketplace` pick up the new version on next Claude
 # Code startup.
 #
-# Loop protection: the bump commit carries `[skip release]` in the
-# subject and the job's `if:` clause skips those. GitHub Actions also
-# does not re-trigger workflows on commits made with GITHUB_TOKEN, so
-# this is belt-and-suspenders.
+# Loop protection: bump commits always have a `chore(release):` subject
+# prefix, so the job `if:` skips them via startsWith on the commit
+# message. This is more robust than a free-form marker (which can
+# accidentally match prose in PR descriptions or commit bodies).
+# GitHub Actions also does not re-trigger workflows on commits made
+# with GITHUB_TOKEN, so this is belt-and-suspenders.
 
 on:
   push:
@@ -25,7 +27,7 @@ permissions:
 
 jobs:
   release:
-    if: "!contains(github.event.head_commit.message, '[skip release]')"
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -69,7 +71,7 @@ jobs:
             echo "No changes staged — aborting release"
             exit 1
           fi
-          git commit -m "chore(release): v${VERSION} (${LEVEL} from ${PREV}) [skip release]"
+          git commit -m "chore(release): v${VERSION} (${LEVEL} from ${PREV})"
           git tag "v${VERSION}"
           git push origin HEAD:master --follow-tags
 
