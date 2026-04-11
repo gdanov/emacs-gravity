@@ -30,6 +30,7 @@ build-bridge:
 
 build-server:
 	cd packages/gravity-server && node build.mjs
+	cp packages/gravity-server/dist/gravity-server.mjs packages/emacs-bridge/dist/gravity-server.mjs
 
 sync-cache: build-bridge build-server
 	@echo "Syncing to plugin cache ($(PLUGIN_VERSION))..."
