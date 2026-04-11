@@ -131,9 +131,19 @@ nix flake check
 
 Runs the ERT test suite in a hermetic sandbox (both GUI and nox Emacs variants). Currently fails due to the 1 pre-existing test failure. Useful for verifying the flake definition is valid.
 
-## Step 6: Register the Claude Code plugin
+## Step 6: Register the Claude Code plugin (contributor dev loop)
 
-Create `~/.claude/plugins/marketplace.json`:
+This walkthrough assumes you're running against a local checkout of the source. End users should install from the GitHub marketplace instead — see [INSTALL.md](../INSTALL.md#quick-install).
+
+For contributors, first build and deploy the bundles to the local plugin cache:
+
+```bash
+make sync-cache
+```
+
+That builds `dist/emacs-bridge.mjs` and `dist/gravity-server.mjs` and copies them (plus hooks and `.claude-plugin/plugin.json`) into `~/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/<version>/`.
+
+Then create `~/.claude/plugins/marketplace.json` pointing at your checkout so Claude Code discovers the plugin:
 
 ```bash
 mkdir -p ~/.claude/plugins
@@ -149,16 +159,18 @@ mkdir -p ~/.claude/plugins
   "plugins": [
     {
       "name": "emacs-bridge",
-      "description": "Bridge to Emacs via Unix Socket",
+      "description": "Bridge to Emacs via Unix Socket (local dev)",
       "source": "/absolute/path/to/emacs-gravity/packages/emacs-bridge"
     }
   ]
 }
 ```
 
-**The `source` path must be absolute** and point to the `packages/emacs-bridge` directory (not the project root). Claude Code resolves plugins at startup.
+**The `source` path must be absolute** and point to the `packages/emacs-bridge` directory (not the project root).
 
-**Verify:** After restarting Claude Code, hook status messages appear in the Claude Code output (e.g., `gravity: session start`).
+Re-run `make sync-cache` after every TypeScript change, otherwise stale cached code runs instead of your dev version.
+
+**Verify:** After restarting Claude Code, hook status messages appear in the status line (e.g., `gravity: session start`).
 
 ## Step 7: Load in Emacs
 

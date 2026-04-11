@@ -1,11 +1,29 @@
 # Installation Guide
 
-Two installation paths: **Nix** (recommended, reproducible) or **manual** (bring your own Emacs/Node.js).
+Three installation paths, depending on who you are:
+
+- **End users** — Install the plugin from the GitHub marketplace; no clone, no build. Jump to [Quick install](#quick-install).
+- **Contributors** — Clone the repo and run from source. Use **Nix** (reproducible) or **manual** (bring your own Emacs/Node.js).
 
 ## Prerequisites
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- Git
+- Git (only if cloning the repo)
+
+## Quick install
+
+If you just want to use emacs-gravity, install the plugin from the GitHub marketplace directly inside Claude Code:
+
+```
+/plugin marketplace add gdanov/emacs-gravity
+/plugin install emacs-bridge@emacs-gravity-marketplace
+```
+
+This pulls a prebuilt, self-contained bundle — no `npm install`, no path juggling.
+
+> **Auto-update:** Third-party marketplaces have auto-update disabled by default. Enable it in `/plugin` → **Marketplaces** → `emacs-gravity-marketplace` → **Enable auto-update** so new releases are applied on Claude Code startup.
+
+After installing, add the Emacs side to your init file (see [Load in Emacs](#load-in-emacs) below) and you're done. The contributor-only sections below are **not** required for end users.
 
 ## Option A: Nix (recommended)
 
@@ -96,11 +114,19 @@ cd emacs-gravity
 npm install
 ```
 
-## Register the Claude Code plugin
+## Register the Claude Code plugin (contributors only)
 
-This step is the same for both installation paths.
+This step is the same for both Nix and manual contributor setups, and is **only** needed if you want Claude Code to load your local checkout instead of the published GitHub-marketplace release.
 
-The bridge is a Claude Code plugin. Register it by creating `~/.claude/plugins/marketplace.json`:
+Run `make sync-cache` from the repo root. It builds both bundles and copies them to a versioned local cache dir:
+
+```bash
+make sync-cache
+```
+
+That deploys to `~/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/<version>/` where `<version>` is read from `packages/emacs-bridge/.claude-plugin/plugin.json`. The cache-side bundle picks up your source changes on the next hook fire.
+
+Then register a **local** marketplace so Claude Code sees the cache dir. Create or edit `~/.claude/plugins/marketplace.json`:
 
 ```json
 {
@@ -112,14 +138,16 @@ The bridge is a Claude Code plugin. Register it by creating `~/.claude/plugins/m
   "plugins": [
     {
       "name": "emacs-bridge",
-      "description": "Bridge to Emacs via Unix Socket",
+      "description": "Bridge to Emacs via Unix Socket (local dev)",
       "source": "/absolute/path/to/emacs-gravity/packages/emacs-bridge"
     }
   ]
 }
 ```
 
-**The `source` path must be absolute.** Claude Code resolves plugins at startup from this file.
+**The `source` path must be absolute.** Re-run `make sync-cache` after every TypeScript change; otherwise stale cached code runs instead of your dev version.
+
+> If you already installed the plugin from `gdanov/emacs-gravity` via the quick-install path, uninstall it first (`/plugin uninstall emacs-bridge@emacs-gravity-marketplace`) so the local version is the one Claude Code loads.
 
 After saving, restart Claude Code. You should see hook status messages (e.g., "gravity: session start") confirming the plugin is active.
 
