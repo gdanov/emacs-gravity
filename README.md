@@ -24,6 +24,30 @@ Project is being used & developed exclusively on MacOS, so windows & linux users
 
 ---
 
+## v4: GitHub-marketplace distribution
+
+> **No user-facing behaviour change.** v4 is strictly about how the plugin is packaged and delivered. If you were already running v3 from a local checkout, everything you see inside Emacs still works the same. What changed is installation and updates.
+
+### What changed
+
+1. **Self-contained plugin bundle** — Both the Node bridge and gravity-server are now bundled with esbuild into `dist/emacs-bridge.mjs` and `dist/gravity-server.mjs`. No `npm install` at the install site, no `tsx`/`node_modules` shipping with the plugin, no `${CLAUDE_PLUGIN_ROOT}` hard-coded paths.
+2. **GitHub-sourced marketplace** — `.claude-plugin/marketplace.json` is now hosted in this repo as a `github` source. End users install with `/plugin marketplace add gdanov/emacs-gravity` instead of hand-editing an absolute-path local marketplace file.
+3. **Auto-updating releases** — A GitHub Actions workflow on every push to `master` bumps the semver version (derived from Conventional Commits), rebuilds the bundles, commits them back, tags, and publishes a GitHub Release. Clients with auto-update enabled for the marketplace pick up new versions on Claude Code startup. See the [Releases](#releases) and [Commit conventions](#commit-conventions) sections below.
+4. **Contributor/user paths cleanly separated** — [INSTALL.md](INSTALL.md) now has a **Quick install** section for end users (marketplace command), and contributor-only sections for running from a local checkout via `make sync-cache` + a local marketplace entry.
+
+### Migrating from v3
+
+- **Drop the old local marketplace entry** — If your `~/.claude/plugins/marketplace.json` has an absolute-path `source` pointing at this repo, remove it (or uninstall via `claude plugin uninstall 'emacs-bridge@local-emacs-marketplace'` and `claude plugin marketplace remove local-emacs-marketplace`).
+- **Install from the GitHub marketplace**:
+  ```
+  /plugin marketplace add gdanov/emacs-gravity
+  /plugin install emacs-bridge@emacs-gravity-marketplace
+  ```
+- **Enable auto-update** (optional) — `/plugin` → **Marketplaces** → `emacs-gravity-marketplace` → **Enable auto-update**. Off by default for third-party marketplaces.
+- **No `init.el` change needed** — `(claude-gravity-server-start)` still works as before.
+
+---
+
 ## v3: Server-Driven Architecture
 
 > **Breaking change.** v3 is a ground-up rewrite of the backend. The v2 standalone mode (where Emacs held all state directly) is gone. **You must remove v2 completely before upgrading** — gravity-server is now required.
