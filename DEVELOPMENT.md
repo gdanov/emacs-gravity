@@ -123,15 +123,21 @@ In v3, agent state is managed in-memory by gravity-server (no file I/O). The leg
 ### Building and Deploying
 
 ```bash
-make build            # esbuild both bridge and server (dist/emacs-bridge.mjs, dist/gravity-server.mjs)
-make build-bridge     # bridge only
-make build-server     # server only
-make sync-cache       # Build, then sync the two bundles + hooks + .claude-plugin/plugin.json to the local plugin cache
+make build             # esbuild both bridge and server (dist/emacs-bridge.mjs, dist/gravity-server.mjs)
+make build-bridge      # bridge only
+make build-server      # server only
+make sync-cache        # Build, then sync bundles + hooks + .claude-plugin/plugin.json into the LOCAL-marketplace cache
+make sync-marketplace  # Build, then stage bundles into the PUBLISHED (emacs-gravity-marketplace) cache dir
+make restart-server    # sync-marketplace + kill-server. Next hook fire respawns from the updated bundle.
 ```
 
-**CRITICAL (local dev only):** After any TypeScript change, run `make sync-cache` to copy the bundled `dist/*.mjs` files and hook scripts into `~/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/<version>/`. The version segment is derived from `packages/emacs-bridge/.claude-plugin/plugin.json` via `jq`, so bumping the manifest version automatically targets a new cache directory. Without `sync-cache`, stale cached code runs instead of your dev version.
+**Two dev flows depending on how you installed the plugin:**
 
-> **Note:** `sync-cache` is only useful if you're running Claude Code against a locally-installed plugin. If you've installed `emacs-bridge` via the GitHub marketplace, that cache is managed by Claude Code — local changes won't be picked up until you either ship a release or point a local marketplace at this checkout.
+- **You installed via `/plugin install emacs-bridge@emacs-gravity-marketplace`** (the published plugin from `gdanov/emacs-gravity`). Use `make restart-server` (or `make sync-marketplace` if you don't want to kill the running server). It auto-discovers the newest git-SHA subdirectory under `~/.claude/plugins/cache/emacs-gravity-marketplace/emacs-bridge/` and writes bundles straight into it. On the next auto-update Claude Code creates a new SHA dir and your staged files are left behind — just re-run `make restart-server` and it picks up the new dir.
+
+- **You wired up a local marketplace** (contributor workflow — a `local-emacs-marketplace` entry in `~/.claude/plugins/marketplace.json` pointing at your checkout). Use `make sync-cache`. It writes to `~/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/<version>/` where `<version>` comes from `packages/emacs-bridge/.claude-plugin/plugin.json`.
+
+**CRITICAL:** Without one of these sync steps after a TypeScript change, stale cached code runs instead of your dev version. Elisp edits don't need syncing — reload in the running Emacs instead.
 
 ### Emacs Debugging
 

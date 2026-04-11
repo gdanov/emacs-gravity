@@ -1,9 +1,14 @@
 EMACS ?= emacs
 
-.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-bridge build-server sync-cache clean menubar kill-server restart-server
+.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-bridge build-server sync-cache sync-marketplace clean menubar kill-server restart-server
 
 PLUGIN_VERSION := $(shell jq -r .version packages/emacs-bridge/.claude-plugin/plugin.json)
 PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/$(PLUGIN_VERSION)
+
+# Discover the published-marketplace install cache dir (newest by mtime).
+# Picks the current install even after auto-update swaps the git-SHA dirname.
+# Trailing slash from the glob is preserved and used in paths below.
+MARKETPLACE_CACHE := $(shell ls -td $(HOME)/.claude/plugins/cache/emacs-gravity-marketplace/emacs-bridge/*/ 2>/dev/null | head -1)
 
 test: test-elisp test-bridge test-server test-menubar
 
@@ -41,6 +46,28 @@ sync-cache: build-bridge build-server
 	cp packages/gravity-server/dist/gravity-server.mjs $(PLUGIN_CACHE)/dist/
 	@echo "Cache synced."
 
+# Stage freshly-built bundles into the published `emacs-gravity-marketplace`
+# install dir. For contributors who run the published plugin and want to
+# iterate on server/bridge code without uninstalling and rewiring a local
+# marketplace. Staged files are overwritten on the next `/plugin update` —
+# that's fine, just re-run after an auto-update.
+sync-marketplace: build-bridge build-server
+	@if [ -z "$(MARKETPLACE_CACHE)" ]; then \
+		echo "error: marketplace install not found under"; \
+		echo "       ~/.claude/plugins/cache/emacs-gravity-marketplace/emacs-bridge/"; \
+		echo "       install first via: /plugin install emacs-bridge@emacs-gravity-marketplace"; \
+		exit 1; \
+	fi
+	@echo "Staging bundles into $(MARKETPLACE_CACHE)"
+	@mkdir -p "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist" "$(MARKETPLACE_CACHE)packages/gravity-server/dist"
+	install -m 644 packages/emacs-bridge/dist/emacs-bridge.mjs "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/emacs-bridge.mjs"
+	@# Server: stage to BOTH layouts so this works for v4.0.1 (pre-fix) and v4.0.2+ installs.
+	@#   v4.0.1 _ensure-server uses fallback #2 → packages/gravity-server/dist/
+	@#   v4.0.2+ _ensure-server uses only      → packages/emacs-bridge/dist/
+	install -m 644 packages/gravity-server/dist/gravity-server.mjs "$(MARKETPLACE_CACHE)packages/gravity-server/dist/gravity-server.mjs"
+	install -m 644 packages/gravity-server/dist/gravity-server.mjs "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/gravity-server.mjs"
+	@echo "Marketplace cache synced."
+
 menubar:
 	cd packages/gravity-menubar && swift build
 	-pkill -f GravityMenuBar
@@ -62,8 +89,9 @@ kill-server:
 	@rm -f "$(HOME)/.local/state/gravity-hooks.sock" "$(HOME)/.local/state/gravity-terminal.sock"
 	@sleep 0.3
 
-restart-server: sync-cache kill-server
-	npx -w packages/gravity-server tsx src/gravity-server.ts &
+restart-server: sync-marketplace kill-server
+	@echo "Server stopped. Next Claude Code hook will respawn from:"
+	@echo "  $(MARKETPLACE_CACHE)"
 
 test-install:
 	docker build -t gravity-smoke -f test/Dockerfile .
