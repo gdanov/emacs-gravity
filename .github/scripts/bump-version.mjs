@@ -37,8 +37,12 @@ const commitsSince = (range) => {
 const bumpLevel = (commits) => {
   let level = "patch";
   for (const { subject, body } of commits) {
-    // Breaking change: `type!:` subject or `BREAKING CHANGE:` footer
-    if (/^[a-z]+(\([^)]*\))?!:/.test(subject) || /BREAKING CHANGE:/.test(body)) {
+    // Breaking change: `type!:` in subject OR `BREAKING CHANGE:` as a
+    // conventional-commits footer — start of a line in the body, not
+    // mid-sentence or inside backticks. Without the `^...m` anchor, the
+    // v3.0.1 → v4.0.0 bump was accidentally triggered by a commit body
+    // that *documented* this very regex inside backticks.
+    if (/^[a-z]+(\([^)]*\))?!:/.test(subject) || /^BREAKING CHANGE:/m.test(body)) {
       return "major";
     }
     if (/^feat(\([^)]*\))?:/.test(subject)) {
