@@ -90,8 +90,22 @@ kill-server:
 	@sleep 0.3
 
 restart-server: sync-marketplace kill-server
-	@echo "Server stopped. Next Claude Code hook will respawn from:"
-	@echo "  $(MARKETPLACE_CACHE)"
+	@# Eagerly respawn the freshly-staged bundle so long-lived clients
+	@# (menubar, Emacs) reconnect immediately without waiting for a
+	@# Claude Code hook to fire. kill-server already cleaned up orphans
+	@# and sockets, so we don't need _ensure-server's lock/cleanup logic.
+	@# (Sourcing _ensure-server directly doesn't work here anyway: under
+	@# `sh -c '. file'` $0 is `sh`, which breaks its $(dirname $0)/... path
+	@# resolution. Direct spawn from MARKETPLACE_CACHE is cleaner.)
+	@echo "Respawning server from $(MARKETPLACE_CACHE)..."
+	@nohup node "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/gravity-server.mjs" >>/tmp/gravity-server.log 2>&1 &
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		if [ -S "$(HOME)/.local/state/gravity-hooks.sock" ]; then \
+			echo "Server up."; exit 0; \
+		fi; \
+		sleep 0.2; \
+	done; \
+	echo "error: server did not come up within 2s — check /tmp/gravity-server.log"; exit 1
 
 test-install:
 	docker build -t gravity-smoke -f test/Dockerfile .
