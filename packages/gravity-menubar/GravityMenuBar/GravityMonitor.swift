@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import QuartzCore
 
 /// Connects to gravity-server's terminal socket, receives NDJSON broadcasts,
 /// and publishes state for the SwiftUI menu bar.
@@ -19,7 +20,11 @@ public class GravityMonitor: ObservableObject {
     private let socketPath: String
 
     private var healthTimer: Timer?
-    private var lastResponseTime = Date()
+    // Monotonic timestamp (CACurrentMediaTime) — unaffected by wall-clock jumps
+    // caused by App Nap wake-ups, NTP adjustments, or system sleep.
+    private var lastResponseMonotonic: CFTimeInterval = CACurrentMediaTime()
+    // Require two consecutive missed heartbeats before declaring the link dead.
+    private var missedHeartbeats = 0
 
     public init() {
         if let envPath = ProcessInfo.processInfo.environment["GRAVITY_TERMINAL_SOCK"] {
@@ -103,20 +108,31 @@ public class GravityMonitor: ObservableObject {
 
         DispatchQueue.main.async {
             self.stateManager.setConnected(true)
-            self.lastResponseTime = Date()
-            // Start periodic overview refresh (10s heartbeat) with timeout detection
+            self.lastResponseMonotonic = CACurrentMediaTime()
+            self.missedHeartbeats = 0
+            // Start periodic overview refresh (10s heartbeat) with timeout detection.
+            // Use Timer(timeInterval:) + RunLoop.main .common so the timer fires
+            // during menu tracking (event tracking mode) too, not only .default.
             self.healthTimer?.invalidate()
-            self.healthTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: 10.0, repeats: true) { [weak self] _ in
                 guard let self = self else { return }
-                // If no response received in 30s, treat as dead connection
-                if Date().timeIntervalSince(self.lastResponseTime) > 30.0 {
-                    NSLog("gravity-menubar: heartbeat timeout (no response in 30s), reconnecting")
-                    self.disconnect()
-                    self.scheduleReconnect()
-                    return
+                let elapsed = CACurrentMediaTime() - self.lastResponseMonotonic
+                // Tolerate a single missed reply; require two consecutive misses
+                // before declaring the link dead. This protects against transient
+                // scheduling hiccups (App Nap wake, brief main-queue stalls).
+                if elapsed > 25.0 {
+                    self.missedHeartbeats += 1
+                    if self.missedHeartbeats >= 2 {
+                        NSLog("gravity-menubar: heartbeat timeout (no response in %.1fs), reconnecting", elapsed)
+                        self.disconnect()
+                        self.scheduleReconnect()
+                        return
+                    }
                 }
                 self.sendRequest(TerminalRequest(type: "request.overview"))
             }
+            RunLoop.main.add(timer, forMode: .common)
+            self.healthTimer = timer
         }
 
         startReading()
@@ -207,7 +223,8 @@ public class GravityMonitor: ObservableObject {
             do {
                 let msg = try JSONDecoder().decode(ServerMessage.self, from: lineData)
                 DispatchQueue.main.async {
-                    self.lastResponseTime = Date()
+                    self.lastResponseMonotonic = CACurrentMediaTime()
+                    self.missedHeartbeats = 0
                     self.stateManager.handleMessage(msg)
                     // Drain pending requests
                     for request in self.stateManager.pendingRequests {
