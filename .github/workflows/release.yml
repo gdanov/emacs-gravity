@@ -1,0 +1,81 @@
+name: Release
+
+# On every push to master: run tests, rebuild the plugin bundles, bump
+# the semver version based on commit messages, commit the bumped manifest
+# and artifacts back to master, tag as v<x.y.z>, and publish a GitHub
+# Release. End users with auto-update enabled on
+# `emacs-gravity-marketplace` pick up the new version on next Claude
+# Code startup.
+#
+# Loop protection: the bump commit carries `[skip release]` in the
+# subject and the job's `if:` clause skips those. GitHub Actions also
+# does not re-trigger workflows on commits made with GITHUB_TOKEN, so
+# this is belt-and-suspenders.
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run bridge + server tests
+        run: make test-bridge test-server
+
+      - name: Build bundles
+        run: make build
+
+      - name: Compute next version
+        id: ver
+        run: node .github/scripts/bump-version.mjs
+
+      - name: Commit, tag, and push
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          LEVEL: ${{ steps.ver.outputs.level }}
+          PREV: ${{ steps.ver.outputs.previous }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            packages/emacs-bridge/.claude-plugin/plugin.json \
+            packages/emacs-bridge/dist/emacs-bridge.mjs \
+            packages/gravity-server/dist/gravity-server.mjs
+          if git diff --cached --quiet; then
+            echo "No changes staged — aborting release"
+            exit 1
+          fi
+          git commit -m "chore(release): v${VERSION} (${LEVEL} from ${PREV}) [skip release]"
+          git tag "v${VERSION}"
+          git push origin HEAD:master --follow-tags
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          generate_release_notes: true
