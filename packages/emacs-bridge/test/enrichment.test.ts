@@ -41,7 +41,9 @@ describe("Event enrichment snapshots", () => {
     expect(enriched.assistant_thinking).toContain("pointing me to a specific GitHub issue");
     expect(enriched.tool_use_id).toBe("toolu_0117AHsMTSWiUkLVBhQ43wzv");
     expect(enriched.slug).toBe("dazzling-brewing-otter");
-    expect(enriched).toMatchSnapshot();
+    // transcript_path is absolute and varies between dev machines and CI —
+    // match on type only so snapshots stay portable.
+    expect(enriched).toMatchSnapshot({ transcript_path: expect.any(String) });
   });
 
   it("PreToolUse: Task agent start with thinking", () => {
@@ -51,7 +53,9 @@ describe("Event enrichment snapshots", () => {
     expect(enriched.assistant_thinking).toBeTruthy();
     expect(enriched.assistant_thinking).toContain("hook");
     expect(enriched.slug).toBe("dazzling-brewing-otter");
-    expect(enriched).toMatchSnapshot();
+    // transcript_path is absolute and varies between dev machines and CI —
+    // match on type only so snapshots stay portable.
+    expect(enriched).toMatchSnapshot({ transcript_path: expect.any(String) });
   });
 
   // --- PostToolUse ---
@@ -64,7 +68,9 @@ describe("Event enrichment snapshots", () => {
     expect(enriched.post_tool_text).toContain("hello");
     expect(enriched.post_tool_thinking).toBeTruthy();
     expect(enriched.slug).toBe("test-slug-posttool");
-    expect(enriched).toMatchSnapshot();
+    // transcript_path is absolute and varies between dev machines and CI —
+    // match on type only so snapshots stay portable.
+    expect(enriched).toMatchSnapshot({ transcript_path: expect.any(String) });
   });
 
   // --- Stop ---
@@ -82,7 +88,9 @@ describe("Event enrichment snapshots", () => {
     expect(enriched.token_usage).toHaveProperty("cache_read_input_tokens");
     expect(enriched.token_usage).toHaveProperty("cache_creation_input_tokens");
     expect(enriched.slug).toBe("dazzling-brewing-otter");
-    expect(enriched).toMatchSnapshot();
+    // transcript_path is absolute and varies between dev machines and CI —
+    // match on type only so snapshots stay portable.
+    expect(enriched).toMatchSnapshot({ transcript_path: expect.any(String) });
   });
 
   it("Stop: second stop with different trailing text", () => {
@@ -93,7 +101,9 @@ describe("Event enrichment snapshots", () => {
     expect(enriched.stop_text).toContain("You're right, my initial analysis was wrong");
     expect(enriched.token_usage).toBeDefined();
     expect(enriched.slug).toBe("dazzling-brewing-otter");
-    expect(enriched).toMatchSnapshot();
+    // transcript_path is absolute and varies between dev machines and CI —
+    // match on type only so snapshots stay portable.
+    expect(enriched).toMatchSnapshot({ transcript_path: expect.any(String) });
   });
 
   // --- SubagentStart ---
