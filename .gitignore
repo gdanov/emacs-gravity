@@ -12,6 +12,7 @@ result
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+.beads/.beads-credential-key
 
 # Taskplane runtime artifacts
 .pi/
