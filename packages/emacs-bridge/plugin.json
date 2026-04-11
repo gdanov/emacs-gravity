@@ -1,5 +1,0 @@
-{
-  "name": "emacs-bridge",
-  "version": "3.0.0",
-  "description": "Bridge to Emacs via Unix Socket"
-}

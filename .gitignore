@@ -1,5 +1,8 @@
 node_modules/
-packages/*/dist/
+packages/*/dist/*
+# Committed release artifacts (built by CI on release, also by `make build-*` locally)
+!packages/emacs-bridge/dist/emacs-bridge.mjs
+!packages/gravity-server/dist/gravity-server.mjs
 emacs-bridge-agents.json
 .claude/
 */.claude/
