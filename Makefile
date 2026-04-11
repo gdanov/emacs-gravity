@@ -1,8 +1,9 @@
 EMACS ?= emacs
 
-.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-server sync-cache clean menubar kill-server restart-server
+.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-bridge build-server sync-cache clean menubar kill-server restart-server
 
-PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/3.0.0
+PLUGIN_VERSION := $(shell jq -r .version packages/emacs-bridge/.claude-plugin/plugin.json)
+PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/$(PLUGIN_VERSION)
 
 test: test-elisp test-bridge test-server test-menubar
 
@@ -22,22 +23,21 @@ test-server:
 test-menubar:
 	cd packages/gravity-menubar && swift test
 
-build:
-	npm install
+build: build-bridge build-server
+
+build-bridge:
+	cd packages/emacs-bridge && node build.mjs
 
 build-server:
 	cd packages/gravity-server && node build.mjs
 
-sync-cache: build-server
-	@echo "Syncing to plugin cache..."
-	rsync -a --delete packages/emacs-bridge/src/ $(PLUGIN_CACHE)/src/
+sync-cache: build-bridge build-server
+	@echo "Syncing to plugin cache ($(PLUGIN_VERSION))..."
+	mkdir -p $(PLUGIN_CACHE)/hooks $(PLUGIN_CACHE)/dist $(PLUGIN_CACHE)/.claude-plugin
 	rsync -a packages/emacs-bridge/hooks/ $(PLUGIN_CACHE)/hooks/
-	rsync -a --delete packages/shared/ $(PLUGIN_CACHE)/shared/
-	cp packages/emacs-bridge/package.json $(PLUGIN_CACHE)/package.json
+	cp packages/emacs-bridge/.claude-plugin/plugin.json $(PLUGIN_CACHE)/.claude-plugin/plugin.json
+	cp packages/emacs-bridge/dist/emacs-bridge.mjs $(PLUGIN_CACHE)/dist/
 	cp packages/gravity-server/dist/gravity-server.mjs $(PLUGIN_CACHE)/dist/
-	@# Rewrite @gravity/shared workspace ref to local path for standalone install
-	sed -i '' 's|"@gravity/shared": "\*"|"@gravity/shared": "file:./shared"|' $(PLUGIN_CACHE)/package.json
-	cd $(PLUGIN_CACHE) && npm install
 	@echo "Cache synced."
 
 menubar:
