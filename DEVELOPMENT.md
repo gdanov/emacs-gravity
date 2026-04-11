@@ -123,11 +123,15 @@ In v3, agent state is managed in-memory by gravity-server (no file I/O). The leg
 ### Building and Deploying
 
 ```bash
-make build-server     # esbuild gravity-server → dist/gravity-server.mjs
-make sync-cache       # Sync bridge + server dist to plugin marketplace cache
+make build            # esbuild both bridge and server (dist/emacs-bridge.mjs, dist/gravity-server.mjs)
+make build-bridge     # bridge only
+make build-server     # server only
+make sync-cache       # Build, then sync the two bundles + hooks + .claude-plugin/plugin.json to the local plugin cache
 ```
 
-**CRITICAL:** After any TypeScript change, run `make sync-cache` to copy dist files to `~/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/2.0.0/dist/`. Without this, stale cached code runs instead of the dev version.
+**CRITICAL (local dev only):** After any TypeScript change, run `make sync-cache` to copy the bundled `dist/*.mjs` files and hook scripts into `~/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/<version>/`. The version segment is derived from `packages/emacs-bridge/.claude-plugin/plugin.json` via `jq`, so bumping the manifest version automatically targets a new cache directory. Without `sync-cache`, stale cached code runs instead of your dev version.
+
+> **Note:** `sync-cache` is only useful if you're running Claude Code against a locally-installed plugin. If you've installed `emacs-bridge` via the GitHub marketplace, that cache is managed by Claude Code — local changes won't be picked up until you either ship a release or point a local marketplace at this checkout.
 
 ### Emacs Debugging
 

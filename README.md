@@ -50,8 +50,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full v3 design and [docs/refactor
 
 - **Remove old socket config** — v2 connected the bridge directly to Emacs. Delete any custom socket paths pointing at Emacs.
 - **Delete agent state files** — Remove `~/.claude/emacs-bridge-agents.json` (agent state is now in-memory in gravity-server).
-- **Clean install** — Run `npm install` at the monorepo root.
-- **Re-register the plugin** — Update `marketplace.json` if needed (the `source` path is unchanged).
+- **Drop the old local marketplace entry** — If your `~/.claude/plugins/marketplace.json` has an absolute-path `source` pointing at this repo, remove it. The plugin is now installed from the GitHub marketplace (see below).
+- **Install from the GitHub marketplace** — `/plugin marketplace add gdanov/emacs-gravity` then `/plugin install emacs-bridge@emacs-gravity-marketplace`.
 - **Update your init.el** — Replace `(claude-gravity-start)` with `(claude-gravity-server-start)`.
 - **Delete stale byte-compiled files** — Run `rm -f *.elc` in the project root. Emacs loads `.elc` over `.el`, so stale compiled files silently override your changes.
 
@@ -214,44 +214,25 @@ Launch and manage Claude Code sessions in tmux directly from Emacs. Compose prom
 
 ### Prerequisites
 - Emacs 27.1+ with `magit-section` (>= 3.0) and `transient` (>= 0.3)
-- Node.js 18+ and npm
+- Node.js 18+ (only required if you want to build from source; the published plugin ships prebuilt bundles)
 - Claude Code CLI installed
 
-### 1. Install dependencies
+### 1. Install the Claude Code plugin
 
-```bash
-cd emacs-gravity
-npm install
+emacs-gravity is published as a Claude Code plugin in a GitHub marketplace. Inside Claude Code, run:
+
+```
+/plugin marketplace add gdanov/emacs-gravity
+/plugin install emacs-bridge@emacs-gravity-marketplace
 ```
 
-### 2. Register the Claude Code plugin
+That pulls the plugin (bundled bridge + gravity-server) directly from this repo. No `npm install`, no path juggling.
 
-The bridge is a Claude Code plugin that hooks into lifecycle events. Register it via a marketplace file.
+> **Auto-update:** Third-party marketplaces have auto-update **disabled by default**. To enable it, open `/plugin` → **Marketplaces** → select `emacs-gravity-marketplace` → toggle **Enable auto-update**. New releases will then be applied on Claude Code startup.
 
-Create or edit `~/.claude/plugins/marketplace.json`:
+After installing, restart Claude Code. You should see hook status messages (e.g., "gravity: session start") in the status line, confirming the plugin is active.
 
-```json
-{
-  "name": "local-emacs-marketplace",
-  "owner": {
-    "name": "your-name",
-    "email": "your-email@example.com"
-  },
-  "plugins": [
-    {
-      "name": "emacs-bridge",
-      "description": "Bridge to Emacs via Unix Socket",
-      "source": "/absolute/path/to/emacs-gravity/packages/emacs-bridge"
-    }
-  ]
-}
-```
-
-> **Important:** The `source` path must be absolute. Claude Code resolves plugins at startup from this file.
-
-After saving, restart Claude Code. You should see hook status messages (e.g., "gravity: session start") in the Claude Code status line, confirming the plugin is active.
-
-### 3. Load in Emacs
+### 2. Load in Emacs
 
 Add to your `~/.emacs.d/init.el`:
 
