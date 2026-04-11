@@ -253,6 +253,101 @@ RET                          — visit session or file
 ?                            — transient menu (all commands)
 ```
 
+## Releases
+
+The plugin ships via GitHub Releases. Every push to `master` runs a GitHub Actions workflow that tests the bridge + server, rebuilds the bundles, bumps the semver version in `packages/emacs-bridge/.claude-plugin/plugin.json`, commits the bumped manifest and fresh `dist/*.mjs` artifacts back to `master`, tags `v<x.y.z>`, and publishes a GitHub Release with auto-generated notes.
+
+**Version scheme** — derived from the commit history since the previous `v*` tag:
+
+| Commit shape | Bump |
+|---|---|
+| `fix:` / `chore:` / `docs:` / `refactor:` / `ci:` / `perf:` / `test:` | patch |
+| `feat:` or `feat(scope):` (any commit in the batch) | minor |
+| `type!:` in subject or `BREAKING CHANGE:` on a line by itself in the body | major |
+
+The workflow skips itself on its own bump commits via `if: !startsWith(github.event.head_commit.message, 'chore(release):')`, so the release loop can't re-enter. The bump logic is a ~80-line Node script at [.github/scripts/bump-version.mjs](.github/scripts/bump-version.mjs); the workflow is [.github/workflows/release.yml](.github/workflows/release.yml).
+
+**Clients** installed via `/plugin marketplace add gdanov/emacs-gravity` automatically pick up new releases on Claude Code startup — provided auto-update is enabled for the marketplace (`/plugin` → **Marketplaces** → `emacs-gravity-marketplace` → **Enable auto-update**; disabled by default for third-party marketplaces).
+
+## Commit conventions
+
+Since the release workflow derives the next version from commit messages, **every commit that lands on `master` must follow [Conventional Commits](https://www.conventionalcommits.org/)**:
+
+```
+<type>[optional scope][!]: <subject>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+**Types used by this project:**
+
+| Type | Meaning | Bump |
+|---|---|---|
+| `feat` | New user-visible feature | minor |
+| `fix` | Bug fix | patch |
+| `perf` | Performance improvement | patch |
+| `refactor` | Internal refactor, no behavioural change | patch |
+| `docs` | Documentation only | patch |
+| `test` | Test changes only | patch |
+| `ci` | CI/workflow changes | patch |
+| `chore` | Tooling, dependencies, or other housekeeping | patch |
+
+**Breaking changes** are signalled in one of two ways:
+
+1. `!` after the type/scope: `feat!: drop v2 standalone mode` → major
+2. A `BREAKING CHANGE:` footer at the start of a line:
+
+   ```
+   feat: new permission protocol
+
+   BREAKING CHANGE: permission responses now require an `updatedPermissions`
+   field. Older terminal clients will need to be updated.
+   ```
+
+Prose mentions inside a commit body that *happen* to contain the literal words "BREAKING CHANGE" or "[skip release]" are safe — both detectors are line-anchored / subject-anchored.
+
+**Scopes** (optional but encouraged): `bridge`, `server`, `emacs`, `menubar`, `tmux`, `docs`, `ci`, `tests`.
+
+## Development
+
+Prerequisites: Node.js 18+, npm, and optionally Emacs 29+ if you want to run the elisp test suite locally.
+
+```bash
+git clone git@github.com:gdanov/emacs-gravity.git
+cd emacs-gravity
+npm install
+make build            # esbuild both bundles
+make test             # elisp + bridge + server + menubar tests
+```
+
+**Build targets** (`Makefile`):
+
+| Target | Description |
+|---|---|
+| `make build` | Build both plugin bundles (`packages/emacs-bridge/dist/emacs-bridge.mjs`, `packages/gravity-server/dist/gravity-server.mjs`) |
+| `make build-bridge` | Bridge bundle only |
+| `make build-server` | Server bundle only |
+| `make test` | Run everything: elisp + bridge + server + macOS menu bar |
+| `make test-bridge` | vitest in `packages/emacs-bridge/` |
+| `make test-server` | vitest in `packages/gravity-server/` |
+| `make test-elisp` | ERT tests via batch Emacs |
+| `make sync-cache` | **Contributor dev loop:** builds both bundles and copies them into `~/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/<version>/`, where `<version>` is read from `plugin.json` via `jq`. Pair with a `~/.claude/plugins/marketplace.json` pointing at your checkout (see [INSTALL.md](INSTALL.md#register-the-claude-code-plugin-contributors-only)) so Claude Code loads the local version instead of the published release. |
+| `make kill-server` / `make restart-server` | Manage the running gravity-server during development |
+| `make menubar` | Build and run the macOS menu bar app |
+
+**Contributor install:** See [INSTALL.md](INSTALL.md) for the full contributor setup, including the Nix dev shell and the local-marketplace registration needed for Claude Code to load your in-repo checkout instead of the published plugin.
+
+**PR workflow:** Branch off `master`, open a PR targeting `master`. CI on merge will run the release workflow — if your PR contains a `feat:` commit it will bump minor, otherwise patch. There is no separate release action to take.
+
+**Further docs:**
+
+- [DEVELOPMENT.md](DEVELOPMENT.md) — full build, debug, and testing guide (pitfalls, performance notes)
+- [ARCHITECTURE.md](ARCHITECTURE.md) — system design, modules, hooks, state API
+- [AGENTS.md](AGENTS.md) — agent workflow and "landing the plane" protocol
+- [UI-SPEC.md](UI-SPEC.md) — visual specification for every UI state
+
 ## Emacs Modules
 
 The Emacs package is split into 15 modular files with a thin loader:
