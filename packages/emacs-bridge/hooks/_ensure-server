@@ -33,12 +33,10 @@ fi
 if [ -n "$GRAVITY_SERVER_BIN" ] && [ -f "$GRAVITY_SERVER_BIN" ]; then
   SERVER_BIN="$GRAVITY_SERVER_BIN"
 else
-  # Try monorepo layout: hooks/ → ../../gravity-server/dist/gravity-server.mjs
-  SERVER_BIN="$(dirname "$0")/../../gravity-server/dist/gravity-server.mjs"
-  if [ ! -f "$SERVER_BIN" ]; then
-    # Try plugin cache layout: hooks/ → ../dist/gravity-server.mjs
-    SERVER_BIN="$(dirname "$0")/../dist/gravity-server.mjs"
-  fi
+  # Plugin layout: hooks/ → ../dist/gravity-server.mjs
+  # Works in the dev sync-cache, local marketplace checkouts, and GitHub
+  # releases — all ship the server bundle alongside the bridge.
+  SERVER_BIN="$(dirname "$0")/../dist/gravity-server.mjs"
 fi
 [ -f "$SERVER_BIN" ] || return 0  # Not found → skip, Emacs can start it
 
