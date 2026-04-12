@@ -292,7 +292,8 @@ export type ServerMessage =
   | { type: "inbox.added"; item: InboxItem }
   | { type: "inbox.removed"; itemId: number }
   | { type: "inbox.snapshot"; items: InboxItem[] }
-  | { type: "overview.snapshot"; projects: ProjectSummary[] };
+  | { type: "overview.snapshot"; projects: ProjectSummary[] }
+  | { type: "notice"; level: "info" | "warn" | "error"; text: string };
 
 /** Messages from terminal to server. */
 export type TerminalMessage =

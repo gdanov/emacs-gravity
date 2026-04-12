@@ -22,6 +22,8 @@ If you just want to use emacs-gravity, install the plugin from the GitHub market
 This pulls a prebuilt, self-contained bundle — no `npm install`, no path juggling.
 
 > **Auto-update:** Third-party marketplaces have auto-update disabled by default. Enable it in `/plugin` → **Marketplaces** → `emacs-gravity-marketplace` → **Enable auto-update** so new releases are applied on Claude Code startup.
+>
+> **Important:** After an auto-update, restart any running `claude` CLIs to pick up the new hook wiring. Running sessions retain their startup-time plugin state and won't fire hooks from the updated version until restarted.
 
 After installing, add the Emacs side to your init file (see [Load in Emacs](#load-in-emacs) below) and you're done. The contributor-only sections below are **not** required for end users.
 

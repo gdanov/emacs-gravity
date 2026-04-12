@@ -9,19 +9,19 @@
       "name": "emacs-bridge",
       "description": "Structured Claude Code UI for Emacs",
       "source": {
-        "source": "github",
-        "repo": "gdanov/emacs-gravity"
-      },
-      "path": "packages/emacs-bridge"
+        "source": "git-subdir",
+        "url": "gdanov/emacs-gravity",
+        "path": "packages/emacs-bridge"
+      }
     },
     {
       "name": "dev-loop",
       "description": "Closed-loop feature development: story, architecture, verification",
       "source": {
-        "source": "github",
-        "repo": "gdanov/emacs-gravity"
-      },
-      "path": "dev-loop"
+        "source": "git-subdir",
+        "url": "gdanov/emacs-gravity",
+        "path": "dev-loop"
+      }
     }
   ]
 }

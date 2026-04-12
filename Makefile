@@ -1,6 +1,6 @@
 EMACS ?= emacs
 
-.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-bridge build-server sync-cache sync-marketplace clean menubar kill-server restart-server
+.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-bridge build-server sync-cache sync-marketplace clean menubar kill-server restart-server check-settings
 
 PLUGIN_VERSION := $(shell jq -r .version packages/emacs-bridge/.claude-plugin/plugin.json)
 PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-bridge/$(PLUGIN_VERSION)
@@ -10,7 +10,7 @@ PLUGIN_CACHE := $(HOME)/.claude/plugins/cache/local-emacs-marketplace/emacs-brid
 # Trailing slash from the glob is preserved and used in paths below.
 MARKETPLACE_CACHE := $(shell ls -td $(HOME)/.claude/plugins/cache/emacs-gravity-marketplace/emacs-bridge/*/ 2>/dev/null | head -1)
 
-test: test-elisp test-bridge test-server test-menubar
+test: test-elisp test-bridge test-server test-menubar check-settings
 
 test-elisp:
 	$(EMACS) -nw --batch -L . -L test \
@@ -126,6 +126,9 @@ test-install-shell:
 		-v /workspace/packages/gravity-server/node_modules \
 		-v /workspace/packages/shared/node_modules \
 		gravity-smoke bash
+
+check-settings:
+	node scripts/check-project-settings.mjs
 
 clean:
 	rm -rf node_modules packages/*/node_modules packages/*/dist

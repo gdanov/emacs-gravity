@@ -29,6 +29,7 @@
 (declare-function claude-gravity-unified-resume "claude-gravity-daemon")
 (declare-function claude-gravity-debug-show "claude-gravity-debug")
 (defvar claude-gravity--tmux-sessions)
+(defvar claude-gravity--notice-text)
 
 (defvar claude-gravity--rendering-p nil
   "Non-nil when a programmatic render is in progress.
@@ -772,6 +773,12 @@ PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
                 (insert (propertize top-line 'face 'claude-gravity-divider) "\n\n")))
             ;; Inbox: summary strip at top
             (claude-gravity--insert-inbox-summary)
+            ;; Server notice banner (hooks-silence warning, etc.)
+            (when claude-gravity--notice-text
+              (magit-insert-section (notice)
+                (insert (propertize (concat "  ⚠ " claude-gravity--notice-text "\n")
+                                   'face 'claude-gravity-warning-face))
+                (insert "\n")))
             (if (= (hash-table-count claude-gravity--sessions) 0)
                 (insert (propertize "  No sessions.\n" 'face 'claude-gravity-detail-label))  ;; static text, not a section
               (maphash
