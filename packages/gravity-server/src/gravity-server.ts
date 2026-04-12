@@ -34,6 +34,8 @@ const PURGE_DELAY_MS = 2 * 60 * 1000;
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 const STALENESS_THRESHOLD_MS = 5 * 60 * 1000;
 const HINT_RECENCY_GUARD_MS = 30_000;
+const HOOKS_SILENCE_WARN_MS = 90_000;
+const HOOKS_SILENCE_REARM_MS = 600_000;
 
 const BIDIRECTIONAL_EVENTS: ReadonlySet<HookEventName> = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 const OVERVIEW_EVENTS: ReadonlySet<HookEventName> = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
@@ -115,6 +117,7 @@ const program = Effect.gen(function* () {
     const needsResponse = msg.needs_response === true;
 
     logMsg(`Hook event: ${eventName} session=${sessionId}`);
+    hookEventReceived = true;
 
     // Reject bidirectional events if no capable terminal is connected
     if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
@@ -463,6 +466,10 @@ const program = Effect.gen(function* () {
 
   // ── Session health monitor ───────────────────────────────────────
 
+  const serverStartedAt = Date.now();
+  let lastHooksSilenceWarn = 0;
+  let hookEventReceived = false;
+
   const healthCheckInterval = setInterval(() => {
     const now = Date.now();
     for (const session of store.all()) {
@@ -493,6 +500,22 @@ const program = Effect.gen(function* () {
           projects: store.getProjectSummaries(),
         });
       }
+    }
+
+    // Hooks-silence warning: if terminals are connected but no hook
+    // events have ever arrived, warn that the plugin may be disabled.
+    if (
+      !hookEventReceived &&
+      store.all().length === 0 &&
+      terminals.connectionCount() > 0 &&
+      now - serverStartedAt > HOOKS_SILENCE_WARN_MS &&
+      now - lastHooksSilenceWarn > HOOKS_SILENCE_REARM_MS
+    ) {
+      lastHooksSilenceWarn = now;
+      const elapsed = Math.round((now - serverStartedAt) / 1000);
+      const text = `No hook events received in ${elapsed}s — is the emacs-bridge plugin enabled? Check project .claude/settings.json for enabledPlugins overrides.`;
+      logMsg(text, "warn");
+      terminals.broadcast({ type: "notice", level: "warn", text });
     }
   }, HEALTH_CHECK_INTERVAL_MS);
 

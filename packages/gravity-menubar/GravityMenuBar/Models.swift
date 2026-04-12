@@ -130,12 +130,16 @@ public struct ServerMessage: Decodable {
     public let sessionId: String?
     public let patches: [PatchJSON]?
 
+    // notice
+    public let level: String?
+    public let text: String?
+
     enum CodingKeys: String, CodingKey {
-        case type, projects, item, itemId, items, sessionId, patches
+        case type, projects, item, itemId, items, sessionId, patches, level, text
     }
 
     /// Memberwise init for test factories
-    public init(type: String, projects: [ProjectSummaryJSON]? = nil, item: InboxItemJSON? = nil, itemId: Int? = nil, items: [InboxItemJSON]? = nil, sessionId: String? = nil, patches: [PatchJSON]? = nil) {
+    public init(type: String, projects: [ProjectSummaryJSON]? = nil, item: InboxItemJSON? = nil, itemId: Int? = nil, items: [InboxItemJSON]? = nil, sessionId: String? = nil, patches: [PatchJSON]? = nil, level: String? = nil, text: String? = nil) {
         self.type = type
         self.projects = projects
         self.item = item
@@ -143,6 +147,8 @@ public struct ServerMessage: Decodable {
         self.items = items
         self.sessionId = sessionId
         self.patches = patches
+        self.level = level
+        self.text = text
     }
 }
 

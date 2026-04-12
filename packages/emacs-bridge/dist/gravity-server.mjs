@@ -6770,6 +6770,8 @@ var PURGE_DELAY_MS = 2 * 60 * 1e3;
 var HEALTH_CHECK_INTERVAL_MS = 3e4;
 var STALENESS_THRESHOLD_MS = 5 * 60 * 1e3;
 var HINT_RECENCY_GUARD_MS = 3e4;
+var HOOKS_SILENCE_WARN_MS = 9e4;
+var HOOKS_SILENCE_REARM_MS = 6e5;
 var BIDIRECTIONAL_EVENTS = /* @__PURE__ */ new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 var OVERVIEW_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
 function logMsg(message, level = "info") {
@@ -6832,6 +6834,7 @@ var program = Effect_exports.gen(function* () {
     const data = msg.data || {};
     const needsResponse = msg.needs_response === true;
     logMsg(`Hook event: ${eventName} session=${sessionId}`);
+    hookEventReceived = true;
     if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
       if (!terminals.hasCapableTerminal("action.permission")) {
         logMsg(`No capable terminal connected \u2014 waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
@@ -7126,6 +7129,9 @@ var program = Effect_exports.gen(function* () {
   terminalServer.listen(config.terminalSocketPath, () => {
     logMsg(`Terminal socket listening on ${config.terminalSocketPath}`);
   });
+  const serverStartedAt = Date.now();
+  let lastHooksSilenceWarn = 0;
+  let hookEventReceived = false;
   const healthCheckInterval = setInterval(() => {
     const now = Date.now();
     for (const session of store.all()) {
@@ -7154,6 +7160,13 @@ var program = Effect_exports.gen(function* () {
           projects: store.getProjectSummaries()
         });
       }
+    }
+    if (!hookEventReceived && store.all().length === 0 && terminals.connectionCount() > 0 && now - serverStartedAt > HOOKS_SILENCE_WARN_MS && now - lastHooksSilenceWarn > HOOKS_SILENCE_REARM_MS) {
+      lastHooksSilenceWarn = now;
+      const elapsed = Math.round((now - serverStartedAt) / 1e3);
+      const text = `No hook events received in ${elapsed}s \u2014 is the emacs-bridge plugin enabled? Check project .claude/settings.json for enabledPlugins overrides.`;
+      logMsg(text, "warn");
+      terminals.broadcast({ type: "notice", level: "warn", text });
     }
   }, HEALTH_CHECK_INTERVAL_MS);
   yield* fs.mkdirp(dirname(config.pidFilePath));

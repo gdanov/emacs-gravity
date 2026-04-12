@@ -429,6 +429,8 @@ Accumulates partial data and processes complete newline-delimited JSON."
        (claude-gravity--handle-inbox-snapshot msg))
       ("overview.snapshot"
        (claude-gravity--handle-overview-snapshot msg))
+      ("notice"
+       (claude-gravity--handle-notice msg))
       (_
        (claude-gravity--log 'warn "Unknown server message type: %s" type)))))
 
@@ -968,6 +970,20 @@ MSG contains sessionId and patches array."
            (claude-gravity--request-session sid)))))))
 
 
+;;; ── Notice handler ─────────────────────────────────────────────────
+
+(defvar claude-gravity--notice-text nil
+  "Current notice from gravity-server, or nil.")
+
+(defun claude-gravity--handle-notice (msg)
+  "Handle notice message — display warning banner in overview buffer.
+MSG has `level' and `text' fields."
+  (let ((text (alist-get 'text msg))
+        (level (alist-get 'level msg)))
+    (claude-gravity--log 'warn "Server notice [%s]: %s" level text)
+    (setq claude-gravity--notice-text text)
+    (claude-gravity--schedule-refresh)))
+
 ;;; ── Overview handler ────────────────────────────────────────────────
 
 (defun claude-gravity--handle-overview-snapshot (msg)
@@ -976,6 +992,9 @@ MSG contains projects array with session summaries.
 Also prunes orphan sessions that the server no longer knows about."
   (let ((projects (alist-get 'projects msg))
         (server-ids (make-hash-table :test 'equal)))
+    ;; Clear notice when server starts seeing sessions
+    (when (and claude-gravity--notice-text (> (length projects) 0))
+      (setq claude-gravity--notice-text nil))
     ;; Collect all server session IDs
     (dolist (proj projects)
       (let ((sessions (alist-get 'sessions proj)))

@@ -253,6 +253,8 @@ emacs-gravity is published as a Claude Code plugin in a GitHub marketplace. Insi
 That pulls the plugin (bundled bridge + gravity-server) directly from this repo. No `npm install`, no path juggling.
 
 > **Auto-update:** Third-party marketplaces have auto-update **disabled by default**. To enable it, open `/plugin` → **Marketplaces** → select `emacs-gravity-marketplace` → toggle **Enable auto-update**. New releases will then be applied on Claude Code startup.
+>
+> **Important:** After an auto-update, restart any running `claude` CLIs to pick up the new hook wiring. Running sessions retain their startup-time plugin state and won't fire hooks from the updated version until restarted.
 
 After installing, restart Claude Code. You should see hook status messages (e.g., "gravity: session start") in the status line, confirming the plugin is active.
 

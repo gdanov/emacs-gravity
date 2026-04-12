@@ -25,6 +25,12 @@
   :group 'claude-gravity)
 
 
+(defface claude-gravity-warning-face
+  '((t :foreground "orange" :weight bold))
+  "Face for server warnings and notices."
+  :group 'claude-gravity)
+
+
 (defface claude-gravity-tool-name
   '((t :weight bold))
   "Face for tool name."

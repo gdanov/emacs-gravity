@@ -9,6 +9,7 @@ public class MenuBarStateManager {
     public private(set) var projects: [ProjectInfo] = []
     public private(set) var inboxItems: [InboxInfo] = []
     public private(set) var iconState: MenuBarIconState = .disconnected
+    public private(set) var noticeText: String? = nil
 
     // MARK: - Internal state (visible for testing via @testable import)
 
@@ -30,7 +31,7 @@ public class MenuBarStateManager {
     public func updateIconState() {
         let newState: MenuBarIconState
         if !connected { newState = .disconnected }
-        else if !inboxItems.isEmpty { newState = .attention }
+        else if !inboxItems.isEmpty || noticeText != nil { newState = .attention }
         else if justFinished { newState = .justFinished }
         else if hasResponding { newState = .responding }
         else { newState = .neutral }
@@ -64,6 +65,10 @@ public class MenuBarStateManager {
         switch msg.type {
         case "overview.snapshot":
             guard let jsonProjects = msg.projects else { return }
+            // Clear notice when sessions start appearing
+            if jsonProjects.contains(where: { !$0.sessions.isEmpty }) {
+                noticeText = nil
+            }
             projects = jsonProjects.map { p in
                 ProjectInfo(
                     id: p.project,
@@ -236,6 +241,10 @@ public class MenuBarStateManager {
                 updateIconState()
             }
             pendingRequests.append(TerminalRequest(type: "request.overview"))
+
+        case "notice":
+            noticeText = msg.text
+            updateIconState()
 
         default:
             break
