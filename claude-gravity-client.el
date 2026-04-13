@@ -112,6 +112,9 @@ If server is already running (socket exists), just connect."
   (unless (or (claude-gravity--server-running-p)
               (file-exists-p claude-gravity-server-terminal-sock))
     (claude-gravity--start-backend))
+  ;; Increase process output batching from default 4-65KB to 1MB (once).
+  (when (boundp 'read-process-output-max)
+    (setq read-process-output-max (* 1024 1024)))
   ;; Connect to terminal socket
   (claude-gravity--client-connect)
   ;; Register mode-line indicator
@@ -229,7 +232,7 @@ PROC is the process, EVENT is the status change."
   (condition-case err
       (progn
         (let ((buf (get-buffer claude-gravity--client-process-buffer)))
-          (when buf (with-current-buffer buf (erase-buffer))))
+          (when buf (kill-buffer buf)))
         (setq claude-gravity--client-process
               (make-network-process
                :name "gravity-client"
@@ -238,12 +241,6 @@ PROC is the process, EVENT is the status change."
                :filter #'claude-gravity--client-filter
                :sentinel #'claude-gravity--client-sentinel
                :noquery t))
-        ;; Increase process output batching from default 4-65KB to 1MB.
-        ;; This is a global setting (affects all process filters in this
-        ;; Emacs session).  Not restored on disconnect — 1MB benefits
-        ;; most subsystems (LSP, compilation, etc.).
-        (when (boundp 'read-process-output-max)
-          (setq read-process-output-max (* 1024 1024)))
         (claude-gravity--log 'info "Connected to gravity-server at %s"
                              claude-gravity-server-terminal-sock)
         ;; Declare capabilities and request overview on connect

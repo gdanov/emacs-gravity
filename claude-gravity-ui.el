@@ -2826,10 +2826,12 @@ Avoids full buffer rebuild for streaming text updates."
                 ;; at the end; we swap it into the old slot and remove
                 ;; the trailing duplicate.
                 (let* ((children (oref magit-root-section children))
-                       (new-section (car (last children))))
-                  (setcar (memq section children) new-section)
-                  (oset magit-root-section children
-                        (butlast children)))
+                       (new-section (car (last children)))
+                       (slot (memq section children)))
+                  (when slot
+                    (setcar slot new-section)
+                    (oset magit-root-section children
+                          (butlast children))))
                 ;; Re-apply margin indicators for the newly inserted content
                 (save-excursion
                   (goto-char start)
