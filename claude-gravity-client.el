@@ -756,8 +756,11 @@ MSG contains sessionId and patches array."
                                  "add_turn" "add_tool" "add_agent")))
                      patches)
         (claude-gravity--schedule-refresh))
-      ;; Always refresh session detail
-      (claude-gravity--schedule-session-refresh session-id))))
+      ;; Use fast-path for streaming-text-only batches, full refresh otherwise
+      (if (and (= (length patches) 1)
+               (equal (alist-get 'op (car patches)) "set_streaming_text"))
+          (claude-gravity--schedule-streaming-refresh session-id)
+        (claude-gravity--schedule-session-refresh session-id)))))
 
 (defun claude-gravity--apply-patch (session patch)
   "Apply a single semantic PATCH to SESSION."
