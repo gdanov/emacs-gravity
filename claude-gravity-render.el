@@ -647,7 +647,10 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                       (propertize elapsed-str 'face 'claude-gravity-detail-label)
                                       (claude-gravity--format-turn-tokens turn-node)
                                       summary-str))
-                            ;; Attach washer — defers children rendering
+                            ;; Attach washer — defers children rendering.
+                            ;; Captures turn-node and turn-agents by reference.  Safe
+                            ;; because frozen turns are immutable — no patches modify
+                            ;; them after freeze.
                             (let ((sec section)
                                   (tn turn-node)
                                   (ta turn-agents)

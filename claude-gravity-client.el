@@ -143,7 +143,7 @@ If server is already running (socket exists), just connect."
     (delete-process claude-gravity--client-process))
   (setq claude-gravity--client-process nil)
   (let ((buf (get-buffer claude-gravity--client-process-buffer)))
-    (when buf (with-current-buffer buf (erase-buffer))))
+    (when buf (kill-buffer buf)))
   ;; Stop backend — kill entire process group to avoid tsx wrapper zombies
   (claude-gravity--kill-server-processes)
   (claude-gravity--log 'info "Gravity client stopped"))
@@ -238,7 +238,10 @@ PROC is the process, EVENT is the status change."
                :filter #'claude-gravity--client-filter
                :sentinel #'claude-gravity--client-sentinel
                :noquery t))
-        ;; Allow kernel to batch socket reads (1MB vs default 4-65KB)
+        ;; Increase process output batching from default 4-65KB to 1MB.
+        ;; This is a global setting (affects all process filters in this
+        ;; Emacs session).  Not restored on disconnect — 1MB benefits
+        ;; most subsystems (LSP, compilation, etc.).
         (when (boundp 'read-process-output-max)
           (setq read-process-output-max (* 1024 1024)))
         (claude-gravity--log 'info "Connected to gravity-server at %s"

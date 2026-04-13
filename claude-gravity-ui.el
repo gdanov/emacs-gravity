@@ -706,100 +706,63 @@ the washer re-attaches itself so it fires on real user TAB."
               (if claude-gravity--rendering-p
                   (progn (oset sec washer washer-fn)
                          (oset sec hidden t))
-                (let* ((all-issues (nth 1 cached))
-                       (ready-ids (nth 2 cached))
-                       (issues (cl-remove-if
-                                (lambda (i) (equal (alist-get 'status i) "closed"))
-                                all-issues))
-                       (sorted (sort (copy-sequence issues)
-                                     (lambda (a b)
-                                       (let* ((a-ready (and ready-ids (gethash (alist-get 'id a) ready-ids)))
-                                              (b-ready (and ready-ids (gethash (alist-get 'id b) ready-ids)))
-                                              (a-status (alist-get 'status a))
-                                              (b-status (alist-get 'status b))
-                                              (a-rank (cond ((equal a-status "in_progress") 0)
-                                                            (a-ready 1)
-                                                            ((equal a-status "open") 2)
-                                                            ((equal a-status "blocked") 3)
-                                                            (t 4)))
-                                              (b-rank (cond ((equal b-status "in_progress") 0)
-                                                            (b-ready 1)
-                                                            ((equal b-status "open") 2)
-                                                            ((equal b-status "blocked") 3)
-                                                            (t 4))))
-                                         (if (= a-rank b-rank)
-                                             (< (or (alist-get 'priority a) 4)
-                                                (or (alist-get 'priority b) 4))
-                                           (< a-rank b-rank)))))))
-                  (dolist (issue sorted)
-                    (let* ((id (alist-get 'id issue))
-                           (title (alist-get 'title issue))
-                           (status (alist-get 'status issue))
-                           (priority (alist-get 'priority issue))
-                           (itype (alist-get 'issue_type issue))
-                           (readyp (and ready-ids (gethash id ready-ids))))
-                      (magit-insert-section (beads-issue id)
-                        (magit-insert-heading
-                          (format "%s  %s %s %s %s  %s"
-                                  indent
-                                  (claude-gravity--beads-issue-status-indicator status readyp)
-                                  (claude-gravity--beads-priority-label priority)
-                                  (propertize (format "[%s]" (or itype "task"))
-                                              'face 'claude-gravity-detail-label)
-                                  (or title "")
-                                  (propertize (or id "") 'face 'claude-gravity-detail-label))))))
-                  (insert "\n")))))
+                (claude-gravity--insert-beads-issue-list cached indent))))
       (oset section washer washer-fn))))
 
-(defun claude-gravity--insert-beads-status-full (project-dir cached indent heading)
-  "Insert full beads section with individual issue lines.
-PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
+(defun claude-gravity--insert-beads-issue-list (cached indent)
+  "Insert sorted issue list from CACHED beads data with INDENT prefix.
+Filters closed issues, sorts by status rank then priority, and inserts
+each as a magit section.  Shared by both washer and full render paths."
   (let* ((all-issues (nth 1 cached))
          (ready-ids (nth 2 cached))
          (issues (cl-remove-if
                   (lambda (i) (equal (alist-get 'status i) "closed"))
-                  all-issues)))
-    (magit-insert-section (beads-status project-dir t)
-      (magit-insert-heading heading)
-      ;; Expanded body: sorted by status group (in_progress → ready → open → blocked), then priority
-      (let ((sorted (sort (copy-sequence issues)
-                          (lambda (a b)
-                            (let* ((a-ready (and ready-ids (gethash (alist-get 'id a) ready-ids)))
-                                   (b-ready (and ready-ids (gethash (alist-get 'id b) ready-ids)))
-                                   (a-status (alist-get 'status a))
-                                   (b-status (alist-get 'status b))
-                                   (a-rank (cond ((equal a-status "in_progress") 0)
-                                                 (a-ready 1)
-                                                 ((equal a-status "open") 2)
-                                                 ((equal a-status "blocked") 3)
-                                                 (t 4)))
-                                   (b-rank (cond ((equal b-status "in_progress") 0)
-                                                 (b-ready 1)
-                                                 ((equal b-status "open") 2)
-                                                 ((equal b-status "blocked") 3)
-                                                 (t 4))))
-                              (if (= a-rank b-rank)
-                                  (< (or (alist-get 'priority a) 4)
-                                     (or (alist-get 'priority b) 4))
-                                (< a-rank b-rank)))))))
-        (dolist (issue sorted)
-          (let* ((id (alist-get 'id issue))
-                 (title (alist-get 'title issue))
-                 (status (alist-get 'status issue))
-                 (priority (alist-get 'priority issue))
-                 (itype (alist-get 'issue_type issue))
-                 (readyp (and ready-ids (gethash id ready-ids))))
-            (magit-insert-section (beads-issue id)
-              (magit-insert-heading
-                (format "%s  %s %s %s %s  %s"
-                        indent
-                        (claude-gravity--beads-issue-status-indicator status readyp)
-                        (claude-gravity--beads-priority-label priority)
-                        (propertize (format "[%s]" (or itype "task"))
-                                    'face 'claude-gravity-detail-label)
-                        (or title "")
-                        (propertize (or id "") 'face 'claude-gravity-detail-label)))))))
-      (insert "\n"))))
+                  all-issues))
+         (sorted (sort (copy-sequence issues)
+                       (lambda (a b)
+                         (let* ((a-ready (and ready-ids (gethash (alist-get 'id a) ready-ids)))
+                                (b-ready (and ready-ids (gethash (alist-get 'id b) ready-ids)))
+                                (a-status (alist-get 'status a))
+                                (b-status (alist-get 'status b))
+                                (a-rank (cond ((equal a-status "in_progress") 0)
+                                              (a-ready 1)
+                                              ((equal a-status "open") 2)
+                                              ((equal a-status "blocked") 3)
+                                              (t 4)))
+                                (b-rank (cond ((equal b-status "in_progress") 0)
+                                              (b-ready 1)
+                                              ((equal b-status "open") 2)
+                                              ((equal b-status "blocked") 3)
+                                              (t 4))))
+                           (if (= a-rank b-rank)
+                               (< (or (alist-get 'priority a) 4)
+                                  (or (alist-get 'priority b) 4))
+                             (< a-rank b-rank)))))))
+    (dolist (issue sorted)
+      (let* ((id (alist-get 'id issue))
+             (title (alist-get 'title issue))
+             (status (alist-get 'status issue))
+             (priority (alist-get 'priority issue))
+             (itype (alist-get 'issue_type issue))
+             (readyp (and ready-ids (gethash id ready-ids))))
+        (magit-insert-section (beads-issue id)
+          (magit-insert-heading
+            (format "%s  %s %s %s %s  %s"
+                    indent
+                    (claude-gravity--beads-issue-status-indicator status readyp)
+                    (claude-gravity--beads-priority-label priority)
+                    (propertize (format "[%s]" (or itype "task"))
+                                'face 'claude-gravity-detail-label)
+                    (or title "")
+                    (propertize (or id "") 'face 'claude-gravity-detail-label))))))
+    (insert "\n")))
+
+(defun claude-gravity--insert-beads-status-full (project-dir cached indent heading)
+  "Insert full beads section with individual issue lines.
+PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
+  (magit-insert-section (beads-status project-dir t)
+    (magit-insert-heading heading)
+    (claude-gravity--insert-beads-issue-list cached indent)))
 
 
 (defun claude-gravity--render-overview ()
@@ -2840,7 +2803,8 @@ Avoids full buffer rebuild for streaming text updates."
       (with-current-buffer buf
         (let ((inhibit-read-only t)
               (buffer-undo-list t)
-              (inhibit-modification-hooks t))
+              (inhibit-modification-hooks t)
+              (inhibit-redisplay t))
           ;; Find the streaming-text section in the existing magit section tree
           (let ((section (and magit-root-section
                              (magit-get-section '((streaming-text))))))
@@ -2851,7 +2815,21 @@ Avoids full buffer rebuild for streaming text updates."
                     (end (oref section end)))
                 (goto-char start)
                 (delete-region start end)
-                (claude-gravity-insert-streaming-text session)
+                ;; Bind parent context so magit-insert-section registers the
+                ;; new streaming-text section as a child of root.
+                (let ((magit-insert-section--parent magit-root-section)
+                      (magit-insert-section--current magit-root-section))
+                  (claude-gravity-insert-streaming-text session))
+                ;; Replace the old section with the new one in-place,
+                ;; preserving the original position in the children list.
+                ;; magit-insert-section--finish appended the new section
+                ;; at the end; we swap it into the old slot and remove
+                ;; the trailing duplicate.
+                (let* ((children (oref magit-root-section children))
+                       (new-section (car (last children))))
+                  (setcar (memq section children) new-section)
+                  (oset magit-root-section children
+                        (butlast children)))
                 ;; Re-apply margin indicators for the newly inserted content
                 (save-excursion
                   (goto-char start)
