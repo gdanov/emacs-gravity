@@ -36,6 +36,10 @@
 Suppresses `magit-section-set-visibility-hook' side effects that
 would otherwise schedule redundant re-renders.")
 
+(defvar claude-gravity--render-times (make-hash-table :test 'equal)
+  "Hash of buffer-type -> list of recent render times in ms.
+Keys: \"overview\" and session-id strings.")
+
 
 ;;; Window Navigation Helpers
 
@@ -805,6 +809,9 @@ PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
       (with-current-buffer buf
         (let ((inhibit-read-only t)
               (claude-gravity--rendering-p t)
+              (buffer-undo-list t)
+              (inhibit-modification-hooks t)
+              (inhibit-redisplay t)
               (section-ident (when (magit-current-section)
                                (magit-section-ident (magit-current-section))))
               (pos-in-section (when (magit-current-section)
@@ -818,8 +825,9 @@ PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
                                 (cons session (gethash proj projects nil))
                                 projects)))
                    claude-gravity--sessions)
-          (erase-buffer)
-          (magit-insert-section (root)
+          (let ((start-time (float-time)))
+            (erase-buffer)
+            (magit-insert-section (root)
             (let* ((total-count (hash-table-count claude-gravity--sessions))
                    (width (max 40 (- (or (window-width) 80) 2)))
                    (top-line (make-string width ?━)))
@@ -916,14 +924,23 @@ PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
                        (claude-gravity--insert-project-capabilities proj-cwd)
                        (claude-gravity--insert-beads-status proj-cwd)))))
                projects)))
-          ;; Restore semantic position
-          (if-let* ((ident section-ident)
-                    (target (magit-get-section ident)))
-              (goto-char (max (oref target start)
-                              (min (+ (oref target start) pos-in-section)
-                                   (oref target end))))
-            (goto-char (point-min)))
-          (claude-gravity--apply-visibility))))))
+            ;; Restore semantic position
+            (if-let* ((ident section-ident)
+                      (target (magit-get-section ident)))
+                (goto-char (max (oref target start)
+                                (min (+ (oref target start) pos-in-section)
+                                     (oref target end))))
+              (goto-char (point-min)))
+            (claude-gravity--apply-visibility)
+            ;; Render timing
+            (let ((elapsed-ms (* 1000.0 (- (float-time) start-time))))
+              (push elapsed-ms (gethash "overview" claude-gravity--render-times))
+              (let ((times (gethash "overview" claude-gravity--render-times)))
+                (when (> (length times) 50)
+                  (puthash "overview" (seq-take times 50) claude-gravity--render-times)))
+              (when (> elapsed-ms 50)
+                (claude-gravity--log 'warn "Slow overview render: %.1fms" elapsed-ms))))
+          (set-buffer-modified-p nil))))))
 
 
 (defun claude-gravity--insert-inbox-item (item)
@@ -1268,32 +1285,46 @@ Only shows permission, question, and plan-review items (not idle)."
       (with-current-buffer buf
         (let ((inhibit-read-only t)
               (claude-gravity--rendering-p t)
+              (buffer-undo-list t)
+              (inhibit-modification-hooks t)
+              (inhibit-redisplay t)
               (section-ident (when (magit-current-section)
                                (magit-section-ident (magit-current-section))))
               (pos-in-section (when (magit-current-section)
                                 (- (point) (oref (magit-current-section) start)))))
-          (erase-buffer)
-          (magit-insert-section (root)
-            (claude-gravity-insert-header session)
-            (claude-gravity-insert-plan session)
-            (claude-gravity-insert-streaming-text session)
-            (claude-gravity-insert-turns session)
-            (claude-gravity--insert-session-inbox session)
-            (claude-gravity-insert-files session)
-            (claude-gravity-insert-allow-patterns session))
-          ;; Move ▎ indicators from inline text to left display margin
-          (claude-gravity--margins-to-gutter)
-          (dolist (win (get-buffer-window-list buf nil t))
-            (set-window-margins win left-margin-width))
-          ;; Restore semantic position
-          (if-let* ((ident section-ident)
-                    (target (magit-get-section ident)))
-              (goto-char (max (oref target start)
-                              (min (+ (oref target start) pos-in-section)
-                                   (oref target end))))
-            (goto-char (point-min)))
-          (claude-gravity--apply-visibility)))
-      )))
+          (let ((start-time (float-time)))
+            (erase-buffer)
+            (magit-insert-section (root)
+              (claude-gravity-insert-header session)
+              (claude-gravity-insert-plan session)
+              (claude-gravity-insert-streaming-text session)
+              (claude-gravity-insert-turns session)
+              (claude-gravity--insert-session-inbox session)
+              (claude-gravity-insert-files session)
+              (claude-gravity-insert-allow-patterns session))
+            ;; Move ▎ indicators from inline text to left display margin
+            (claude-gravity--margins-to-gutter)
+            (dolist (win (get-buffer-window-list buf nil t))
+              (set-window-margins win left-margin-width))
+            ;; Restore semantic position
+            (if-let* ((ident section-ident)
+                      (target (magit-get-section ident)))
+                (goto-char (max (oref target start)
+                                (min (+ (oref target start) pos-in-section)
+                                     (oref target end))))
+              (goto-char (point-min)))
+            (claude-gravity--apply-visibility)
+            ;; Render timing
+            (let* ((sid (plist-get session :session-id))
+                   (elapsed-ms (* 1000.0 (- (float-time) start-time))))
+              (push elapsed-ms (gethash sid claude-gravity--render-times))
+              (let ((times (gethash sid claude-gravity--render-times)))
+                (when (> (length times) 50)
+                  (puthash sid (seq-take times 50) claude-gravity--render-times)))
+              (when (> elapsed-ms 50)
+                (claude-gravity--log 'warn "Slow session render: %.1fms (%s)"
+                                     elapsed-ms (plist-get session :slug)))))
+          (set-buffer-modified-p nil))))))
 
 
 ;;; Section Navigation
@@ -2777,6 +2808,26 @@ NAME, INPUT used for context. STATUS for error display."
                        (insert "### File written\n\n```\n" content "\n```\n\n")
                      (insert "### File written\n\n*(content not available)*\n\n")))))))
           (buffer-string))))))
+
+(defun claude-gravity-render-stats ()
+  "Display render timing statistics."
+  (interactive)
+  (let ((stats nil))
+    (maphash
+     (lambda (key times)
+       (when times
+         (let* ((sorted (sort (copy-sequence times) #'<))
+                (n (length sorted))
+                (p50 (nth (/ n 2) sorted))
+                (p95 (nth (min (1- n) (round (* n 0.95))) sorted))
+                (max-t (car (last sorted))))
+           (push (format "%-30s n=%-4d P50=%.1fms P95=%.1fms max=%.1fms"
+                         key n p50 p95 max-t)
+                 stats))))
+     claude-gravity--render-times)
+    (if stats
+        (message "Render stats:\n%s" (string-join (sort stats #'string<) "\n"))
+      (message "No render timing data collected yet."))))
 
 (provide 'claude-gravity-ui)
 ;;; claude-gravity-ui.el ends here

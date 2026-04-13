@@ -41,10 +41,14 @@
                                 (claude-gravity--tlist-append
                                  tl (claude-gravity--make-turn-node 0))
                                 tl)
+                       :turn-index (make-hash-table :test 'eql)
                        :tool-index (make-hash-table :test 'equal)
                        :agent-index (make-hash-table :test 'equal)
                        :files (make-hash-table :test 'equal)
                        :tasks (make-hash-table :test 'equal))))
+    ;; Index turn 0 in the turn-index
+    (puthash 0 (claude-gravity--tlist-last-item (plist-get session :turns))
+             (plist-get session :turn-index))
     (puthash "test-sess" session claude-gravity--sessions)
     session))
 
