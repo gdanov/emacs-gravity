@@ -7,6 +7,7 @@
 ; Forward declarations for functions defined in other modules
 (declare-function claude-gravity--make-turn-node "claude-gravity-state")
 (declare-function claude-gravity--current-turn-node "claude-gravity-state")
+(declare-function claude-gravity--index-turn "claude-gravity-state")
 (declare-function vc-git-root "vc-git")
 
 
@@ -94,11 +95,16 @@ Ensures :tool-index, :agent-index, and :turns exist. Idempotent."
     ;; Ensure tool-index exists
     (unless (hash-table-p (plist-get session :tool-index))
       (plist-put session :tool-index (make-hash-table :test 'equal)))
+    ;; Ensure :turn-index exists
+    (unless (hash-table-p (plist-get session :turn-index))
+      (plist-put session :turn-index (make-hash-table :test 'eql)))
     ;; Ensure :turns tlist exists
     (unless (plist-get session :turns)
-      (let ((tl (claude-gravity--tlist-new)))
-        (claude-gravity--tlist-append tl (claude-gravity--make-turn-node 0))
-        (plist-put session :turns tl))))
+      (let ((tl (claude-gravity--tlist-new))
+            (turn0 (claude-gravity--make-turn-node 0)))
+        (claude-gravity--tlist-append tl turn0)
+        (plist-put session :turns tl)
+        (claude-gravity--index-turn session turn0))))
   session)
 
 
@@ -126,6 +132,7 @@ Ensures :tool-index, :agent-index, and :turns exist. Idempotent."
                                     (claude-gravity--tlist-append
                                      tl (claude-gravity--make-turn-node 0))
                                     tl)
+                           :turn-index (make-hash-table :test 'eql)
                            :current-turn 0
                            :total-tool-count 0
                            :header-line-cache nil
@@ -137,6 +144,9 @@ Ensures :tool-index, :agent-index, and :turns exist. Idempotent."
                            :token-usage nil
                            :ignored nil)))
         (puthash session-id session claude-gravity--sessions)
+        ;; Index the pre-allocated turn 0 in the turn index
+        (claude-gravity--index-turn
+         session (claude-gravity--tlist-last-item (plist-get session :turns)))
         (claude-gravity--load-allow-patterns session)
         session)))
 
@@ -152,9 +162,13 @@ Called when a session is restarted (e.g. via /reset or /clear)."
   (plist-put session :tasks (make-hash-table :test 'equal))
   (plist-put session :tool-index (make-hash-table :test 'equal))
   (plist-put session :agent-index (make-hash-table :test 'equal))
-  (let ((tl (claude-gravity--tlist-new)))
-    (claude-gravity--tlist-append tl (claude-gravity--make-turn-node 0))
-    (plist-put session :turns tl))
+  (let ((tl (claude-gravity--tlist-new))
+        (turn0 (claude-gravity--make-turn-node 0)))
+    (claude-gravity--tlist-append tl turn0)
+    (plist-put session :turns tl)
+    (let ((idx (make-hash-table :test 'eql)))
+      (puthash 0 turn0 idx)
+      (plist-put session :turn-index idx)))
   (plist-put session :current-turn 0)
   (plist-put session :total-tool-count 0)
   (plist-put session :header-line-cache nil)
@@ -196,6 +210,7 @@ divider turn so the user sees where the context boundary fell."
                        (cons 'stop_thinking nil))))
     (setf (alist-get 'prompt turn) prompt)
     (claude-gravity--tlist-append (plist-get session :turns) turn)
+    (claude-gravity--index-turn session turn)
     (plist-put session :current-turn next-idx))
   ;; Clear the awaiting-clear flag and timeout timer
   (let ((timer (plist-get session :clear-timeout)))

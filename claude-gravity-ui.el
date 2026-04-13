@@ -36,6 +36,10 @@
 Suppresses `magit-section-set-visibility-hook' side effects that
 would otherwise schedule redundant re-renders.")
 
+(defvar claude-gravity--render-times (make-hash-table :test 'equal)
+  "Hash of buffer-type -> list of recent render times in ms.
+Keys: \"overview\" and session-id strings.")
+
 
 ;;; Window Navigation Helpers
 
@@ -429,44 +433,57 @@ instructions, settings, mcp-servers, hooks, base-dir."
 (defun claude-gravity--insert-configuration-section (project-dir)
   "Insert Configuration section for PROJECT-DIR.
 When capability data has not changed since last render, inserts
-only a summary heading to avoid expensive magit-section tree construction."
+a washer-equipped section that populates children on first expansion."
   (let* ((key (expand-file-name project-dir))
          (cache-cell (gethash key claude-gravity--capabilities-by-scope-cache))
          (prev-cell (gethash key claude-gravity--config-render-data))
          (unchanged (and cache-cell prev-cell (eq cache-cell prev-cell))))
     (if unchanged
-        (claude-gravity--insert-configuration-summary key cache-cell)
+        (claude-gravity--insert-configuration-washer key)
       (claude-gravity--insert-configuration-full project-dir)
-      ;; Record the cache cell used for this render
       (puthash key (gethash key claude-gravity--capabilities-by-scope-cache)
                claude-gravity--config-render-data))))
 
-(defun claude-gravity--insert-configuration-summary (key cache-cell)
-  "Insert a summary-only Configuration section (no sub-tree).
-KEY is the expanded project dir, CACHE-CELL is (timestamp . scoped-alist)."
-  (let* ((scoped (cdr cache-cell))
-         (count-scope
-          (lambda (scope-data)
-            (+ (length (alist-get 'rules scope-data))
-               (length (alist-get 'skills scope-data))
-               (length (alist-get 'agents scope-data))
-               (length (alist-get 'commands scope-data))
-               (length (alist-get 'hooks scope-data))
-               (length (alist-get 'mcp-servers scope-data)))))
-         (total (+ (funcall count-scope (alist-get 'project scoped))
-                   (funcall count-scope (alist-get 'user scoped))
-                   (cl-reduce #'+ (mapcar (lambda (p) (or (alist-get 'total p) 0))
-                                          (alist-get 'plugins scoped))
-                              :initial-value 0)))
-         (indent (claude-gravity--indent)))
-    (magit-insert-section (configuration key t)
+(defun claude-gravity--insert-configuration-washer (key)
+  "Insert a washer-equipped Configuration section for KEY (expanded project dir).
+Children populated lazily on first expansion via magit's washer mechanism.
+If magit's visibility cache forces the section open during rendering,
+the washer re-attaches itself so it fires on real user TAB."
+  (let* ((indent (claude-gravity--indent))
+         (project-dir key))
+    (magit-insert-section section (configuration key t)
       (magit-insert-heading
-        (format "%s%s  %s"
+        (format "%s%s"
                 indent
                 (propertize "Configuration"
-                            'face 'claude-gravity-section-heading)
-                (propertize (format "(%d items)" total)
-                            'face 'claude-gravity-detail-label))))))
+                            'face 'claude-gravity-section-heading)))
+      (let ((sec section)
+            (washer-fn nil))
+        (setq washer-fn
+              (lambda ()
+                (if claude-gravity--rendering-p
+                    ;; Magit's visibility cache forced us open during render.
+                    ;; Re-attach washer and hide so first TAB expands with content.
+                    (progn (oset sec washer washer-fn)
+                           (oset sec hidden t))
+                  (let* ((scoped (claude-gravity--discover-project-capabilities-by-scope project-dir))
+                         (project-data (alist-get 'project scoped))
+                         (user-data (alist-get 'user scoped))
+                         (plugins (alist-get 'plugins scoped)))
+                    (claude-gravity--insert-scope-section "Project" project-data)
+                    (claude-gravity--insert-scope-section "User" user-data)
+                    (when plugins
+                      (let ((indent (claude-gravity--indent)))
+                        (magit-insert-section (config-plugins "Plugins" t)
+                          (magit-insert-heading
+                            (format "%s%s (%d)  %s"
+                                    indent
+                                    (propertize "Plugins" 'face 'claude-gravity-section-heading)
+                                    (length plugins)
+                                    (propertize "read-only" 'face 'claude-gravity-detail-label)))
+                          (dolist (plugin plugins)
+                            (claude-gravity--insert-plugin-capabilities plugin)))))))))
+        (oset section washer washer-fn)))))
 
 (defun claude-gravity--insert-configuration-full (project-dir)
   "Insert full Configuration section with all sub-trees for PROJECT-DIR."
@@ -498,20 +515,6 @@ KEY is the expanded project dir, CACHE-CELL is (timestamp . scoped-alist)."
               (dolist (plugin plugins)
                 (claude-gravity--insert-plugin-capabilities plugin)))))))))
 
-(defun claude-gravity--config-section-visibility (section)
-  "When a summary Configuration section is expanded, trigger full re-render.
-Added to `magit-section-set-visibility-hook'."
-  (when (and (not claude-gravity--rendering-p)
-             (eq (oref section type) 'configuration)
-             (not (oref section children))
-             (oref section value))
-    (remhash (expand-file-name (oref section value))
-             claude-gravity--config-render-data)
-    (claude-gravity--schedule-refresh)
-    nil))
-
-(add-hook 'magit-section-set-visibility-hook
-          #'claude-gravity--config-section-visibility)
 
 
 ;; Backward compat aliases
@@ -659,7 +662,7 @@ INDENT is the current indentation prefix."
 (defun claude-gravity--insert-beads-status (project-dir)
   "Insert expandable beads issue section for PROJECT-DIR.
 Lazy: triggers async fetch on first call, renders cached data thereafter.
-When data hasn't changed since last render, inserts summary heading only."
+When data hasn't changed since last render, uses magit washer for lazy expansion."
   (let ((cached (gethash project-dir claude-gravity--beads-stats-cache)))
     (cond
      ;; No cache — trigger fetch, render nothing yet
@@ -674,69 +677,92 @@ When data hasn't changed since last render, inserts summary heading only."
         (when (> (float-time (time-subtract (current-time) timestamp))
                  claude-gravity--beads-stats-ttl)
           (claude-gravity--fetch-beads-stats project-dir))
-        ;; Check if data changed since last render
         (let* ((prev (gethash project-dir claude-gravity--beads-render-data))
                (unchanged (and prev (eq cached prev)))
                (indent (claude-gravity--indent))
                (heading (claude-gravity--beads-summary-heading cached indent)))
           (when heading
             (if unchanged
-                ;; Summary only — heading without children
-                (magit-insert-section (beads-status project-dir t)
-                  (magit-insert-heading heading))
+                ;; Washer section — children populated on TAB
+                (claude-gravity--insert-beads-washer
+                 project-dir cached indent heading)
               ;; Full render with issue list
-              (claude-gravity--insert-beads-status-full project-dir cached indent heading)
-              (puthash project-dir cached claude-gravity--beads-render-data)))))))))
+              (claude-gravity--insert-beads-status-full
+               project-dir cached indent heading)
+              (puthash project-dir cached
+                       claude-gravity--beads-render-data)))))))))
 
-(defun claude-gravity--insert-beads-status-full (project-dir cached indent heading)
-  "Insert full beads section with individual issue lines.
-PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
+(defun claude-gravity--insert-beads-washer (project-dir cached indent heading)
+  "Insert a washer-equipped Issues section.
+Children populated lazily on first expansion via magit's washer mechanism.
+If magit's visibility cache forces the section open during rendering,
+the washer re-attaches itself so it fires on real user TAB."
+  (magit-insert-section section (beads-status project-dir t)
+    (magit-insert-heading heading)
+    (let ((sec section)
+          (washer-fn nil))
+      (setq washer-fn
+            (lambda ()
+              (if claude-gravity--rendering-p
+                  (progn (oset sec washer washer-fn)
+                         (oset sec hidden t))
+                (claude-gravity--insert-beads-issue-list cached indent))))
+      (oset section washer washer-fn))))
+
+(defun claude-gravity--insert-beads-issue-list (cached indent)
+  "Insert sorted issue list from CACHED beads data with INDENT prefix.
+Filters closed issues, sorts by status rank then priority, and inserts
+each as a magit section.  Shared by both washer and full render paths."
   (let* ((all-issues (nth 1 cached))
          (ready-ids (nth 2 cached))
          (issues (cl-remove-if
                   (lambda (i) (equal (alist-get 'status i) "closed"))
-                  all-issues)))
-    (magit-insert-section (beads-status project-dir t)
-      (magit-insert-heading heading)
-      ;; Expanded body: sorted by status group (in_progress → ready → open → blocked), then priority
-      (let ((sorted (sort (copy-sequence issues)
-                          (lambda (a b)
-                            (let* ((a-ready (and ready-ids (gethash (alist-get 'id a) ready-ids)))
-                                   (b-ready (and ready-ids (gethash (alist-get 'id b) ready-ids)))
-                                   (a-status (alist-get 'status a))
-                                   (b-status (alist-get 'status b))
-                                   (a-rank (cond ((equal a-status "in_progress") 0)
-                                                 (a-ready 1)
-                                                 ((equal a-status "open") 2)
-                                                 ((equal a-status "blocked") 3)
-                                                 (t 4)))
-                                   (b-rank (cond ((equal b-status "in_progress") 0)
-                                                 (b-ready 1)
-                                                 ((equal b-status "open") 2)
-                                                 ((equal b-status "blocked") 3)
-                                                 (t 4))))
-                              (if (= a-rank b-rank)
-                                  (< (or (alist-get 'priority a) 4)
-                                     (or (alist-get 'priority b) 4))
-                                (< a-rank b-rank)))))))
-        (dolist (issue sorted)
-          (let* ((id (alist-get 'id issue))
-                 (title (alist-get 'title issue))
-                 (status (alist-get 'status issue))
-                 (priority (alist-get 'priority issue))
-                 (itype (alist-get 'issue_type issue))
-                 (readyp (and ready-ids (gethash id ready-ids))))
-            (magit-insert-section (beads-issue id)
-              (magit-insert-heading
-                (format "%s  %s %s %s %s  %s"
-                        indent
-                        (claude-gravity--beads-issue-status-indicator status readyp)
-                        (claude-gravity--beads-priority-label priority)
-                        (propertize (format "[%s]" (or itype "task"))
-                                    'face 'claude-gravity-detail-label)
-                        (or title "")
-                        (propertize (or id "") 'face 'claude-gravity-detail-label)))))))
-      (insert "\n"))))
+                  all-issues))
+         (sorted (sort (copy-sequence issues)
+                       (lambda (a b)
+                         (let* ((a-ready (and ready-ids (gethash (alist-get 'id a) ready-ids)))
+                                (b-ready (and ready-ids (gethash (alist-get 'id b) ready-ids)))
+                                (a-status (alist-get 'status a))
+                                (b-status (alist-get 'status b))
+                                (a-rank (cond ((equal a-status "in_progress") 0)
+                                              (a-ready 1)
+                                              ((equal a-status "open") 2)
+                                              ((equal a-status "blocked") 3)
+                                              (t 4)))
+                                (b-rank (cond ((equal b-status "in_progress") 0)
+                                              (b-ready 1)
+                                              ((equal b-status "open") 2)
+                                              ((equal b-status "blocked") 3)
+                                              (t 4))))
+                           (if (= a-rank b-rank)
+                               (< (or (alist-get 'priority a) 4)
+                                  (or (alist-get 'priority b) 4))
+                             (< a-rank b-rank)))))))
+    (dolist (issue sorted)
+      (let* ((id (alist-get 'id issue))
+             (title (alist-get 'title issue))
+             (status (alist-get 'status issue))
+             (priority (alist-get 'priority issue))
+             (itype (alist-get 'issue_type issue))
+             (readyp (and ready-ids (gethash id ready-ids))))
+        (magit-insert-section (beads-issue id)
+          (magit-insert-heading
+            (format "%s  %s %s %s %s  %s"
+                    indent
+                    (claude-gravity--beads-issue-status-indicator status readyp)
+                    (claude-gravity--beads-priority-label priority)
+                    (propertize (format "[%s]" (or itype "task"))
+                                'face 'claude-gravity-detail-label)
+                    (or title "")
+                    (propertize (or id "") 'face 'claude-gravity-detail-label))))))
+    (insert "\n")))
+
+(defun claude-gravity--insert-beads-status-full (project-dir cached indent heading)
+  "Insert full beads section with individual issue lines.
+PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
+  (magit-insert-section (beads-status project-dir t)
+    (magit-insert-heading heading)
+    (claude-gravity--insert-beads-issue-list cached indent)))
 
 
 (defun claude-gravity--render-overview ()
@@ -746,6 +772,9 @@ PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
       (with-current-buffer buf
         (let ((inhibit-read-only t)
               (claude-gravity--rendering-p t)
+              (buffer-undo-list t)
+              (inhibit-modification-hooks t)
+              (inhibit-redisplay t)
               (section-ident (when (magit-current-section)
                                (magit-section-ident (magit-current-section))))
               (pos-in-section (when (magit-current-section)
@@ -759,8 +788,9 @@ PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
                                 (cons session (gethash proj projects nil))
                                 projects)))
                    claude-gravity--sessions)
-          (erase-buffer)
-          (magit-insert-section (root)
+          (let ((start-time (float-time)))
+            (erase-buffer)
+            (magit-insert-section (root)
             (let* ((total-count (hash-table-count claude-gravity--sessions))
                    (width (max 40 (- (or (window-width) 80) 2)))
                    (top-line (make-string width ?━)))
@@ -857,14 +887,23 @@ PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
                        (claude-gravity--insert-project-capabilities proj-cwd)
                        (claude-gravity--insert-beads-status proj-cwd)))))
                projects)))
-          ;; Restore semantic position
-          (if-let* ((ident section-ident)
-                    (target (magit-get-section ident)))
-              (goto-char (max (oref target start)
-                              (min (+ (oref target start) pos-in-section)
-                                   (oref target end))))
-            (goto-char (point-min)))
-          (claude-gravity--apply-visibility))))))
+            ;; Restore semantic position
+            (if-let* ((ident section-ident)
+                      (target (magit-get-section ident)))
+                (goto-char (max (oref target start)
+                                (min (+ (oref target start) pos-in-section)
+                                     (oref target end))))
+              (goto-char (point-min)))
+            (claude-gravity--apply-visibility)
+            ;; Render timing
+            (let ((elapsed-ms (* 1000.0 (- (float-time) start-time))))
+              (push elapsed-ms (gethash "overview" claude-gravity--render-times))
+              (let ((times (gethash "overview" claude-gravity--render-times)))
+                (when (> (length times) 50)
+                  (puthash "overview" (seq-take times 50) claude-gravity--render-times)))
+              (when (> elapsed-ms 50)
+                (claude-gravity--log 'warn "Slow overview render: %.1fms" elapsed-ms))))
+          (set-buffer-modified-p nil))))))
 
 
 (defun claude-gravity--insert-inbox-item (item)
@@ -1209,32 +1248,46 @@ Only shows permission, question, and plan-review items (not idle)."
       (with-current-buffer buf
         (let ((inhibit-read-only t)
               (claude-gravity--rendering-p t)
+              (buffer-undo-list t)
+              (inhibit-modification-hooks t)
+              (inhibit-redisplay t)
               (section-ident (when (magit-current-section)
                                (magit-section-ident (magit-current-section))))
               (pos-in-section (when (magit-current-section)
                                 (- (point) (oref (magit-current-section) start)))))
-          (erase-buffer)
-          (magit-insert-section (root)
-            (claude-gravity-insert-header session)
-            (claude-gravity-insert-plan session)
-            (claude-gravity-insert-streaming-text session)
-            (claude-gravity-insert-turns session)
-            (claude-gravity--insert-session-inbox session)
-            (claude-gravity-insert-files session)
-            (claude-gravity-insert-allow-patterns session))
-          ;; Move ▎ indicators from inline text to left display margin
-          (claude-gravity--margins-to-gutter)
-          (dolist (win (get-buffer-window-list buf nil t))
-            (set-window-margins win left-margin-width))
-          ;; Restore semantic position
-          (if-let* ((ident section-ident)
-                    (target (magit-get-section ident)))
-              (goto-char (max (oref target start)
-                              (min (+ (oref target start) pos-in-section)
-                                   (oref target end))))
-            (goto-char (point-min)))
-          (claude-gravity--apply-visibility)))
-      )))
+          (let ((start-time (float-time)))
+            (erase-buffer)
+            (magit-insert-section (root)
+              (claude-gravity-insert-header session)
+              (claude-gravity-insert-plan session)
+              (claude-gravity-insert-streaming-text session)
+              (claude-gravity-insert-turns session)
+              (claude-gravity--insert-session-inbox session)
+              (claude-gravity-insert-files session)
+              (claude-gravity-insert-allow-patterns session))
+            ;; Move ▎ indicators from inline text to left display margin
+            (claude-gravity--margins-to-gutter)
+            (dolist (win (get-buffer-window-list buf nil t))
+              (set-window-margins win left-margin-width))
+            ;; Restore semantic position
+            (if-let* ((ident section-ident)
+                      (target (magit-get-section ident)))
+                (goto-char (max (oref target start)
+                                (min (+ (oref target start) pos-in-section)
+                                     (oref target end))))
+              (goto-char (point-min)))
+            (claude-gravity--apply-visibility)
+            ;; Render timing
+            (let* ((sid (plist-get session :session-id))
+                   (elapsed-ms (* 1000.0 (- (float-time) start-time))))
+              (push elapsed-ms (gethash sid claude-gravity--render-times))
+              (let ((times (gethash sid claude-gravity--render-times)))
+                (when (> (length times) 50)
+                  (puthash sid (seq-take times 50) claude-gravity--render-times)))
+              (when (> elapsed-ms 50)
+                (claude-gravity--log 'warn "Slow session render: %.1fms (%s)"
+                                     elapsed-ms (plist-get session :slug)))))
+          (set-buffer-modified-p nil))))))
 
 
 ;;; Section Navigation
@@ -2718,6 +2771,86 @@ NAME, INPUT used for context. STATUS for error display."
                        (insert "### File written\n\n```\n" content "\n```\n\n")
                      (insert "### File written\n\n*(content not available)*\n\n")))))))
           (buffer-string))))))
+
+(defun claude-gravity-render-stats ()
+  "Display render timing statistics."
+  (interactive)
+  (let ((stats nil))
+    (maphash
+     (lambda (key times)
+       (when times
+         (let* ((sorted (sort (copy-sequence times) #'<))
+                (n (length sorted))
+                (p50 (nth (/ n 2) sorted))
+                (p95 (nth (min (1- n) (round (* n 0.95))) sorted))
+                (max-t (car (last sorted))))
+           (push (format "%-30s n=%-4d P50=%.1fms P95=%.1fms max=%.1fms"
+                         key n p50 p95 max-t)
+                 stats))))
+     claude-gravity--render-times)
+    (if stats
+        (message "Render stats:\n%s" (string-join (sort stats #'string<) "\n"))
+      (message "No render timing data collected yet."))))
+
+
+;;; ── Streaming text fast-path update ────────────────────────────────
+
+(defun claude-gravity--update-streaming-text-fast (session)
+  "Fast-path update: only replace the streaming-text section content.
+Avoids full buffer rebuild for streaming text updates."
+  (let ((buf (plist-get session :buffer)))
+    (when (and buf (buffer-live-p buf) (get-buffer-window buf t))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t)
+              (inhibit-modification-hooks t)
+              (inhibit-redisplay t))
+          ;; Find the streaming-text section in the existing magit section tree
+          (let ((section (and magit-root-section
+                             (magit-get-section '((streaming-text))))))
+            (cond
+             ;; Section exists and we have new text — replace contents
+             ((and section (plist-get session :streaming-text))
+              (let ((start (oref section start))
+                    (end (oref section end)))
+                (goto-char start)
+                (delete-region start end)
+                ;; Bind parent context so magit-insert-section registers the
+                ;; new streaming-text section as a child of root.
+                (let ((magit-insert-section--parent magit-root-section)
+                      (magit-insert-section--current magit-root-section))
+                  (claude-gravity-insert-streaming-text session))
+                ;; Replace the old section with the new one in-place,
+                ;; preserving the original position in the children list.
+                ;; magit-insert-section--finish appended the new section
+                ;; at the end; we swap it into the old slot and remove
+                ;; the trailing duplicate.
+                (let* ((children (oref magit-root-section children))
+                       (new-section (car (last children)))
+                       (slot (memq section children)))
+                  (when slot
+                    (setcar slot new-section)
+                    (oset magit-root-section children
+                          (butlast children))))
+                ;; Re-apply margin indicators for the newly inserted content
+                (save-excursion
+                  (goto-char start)
+                  (while (search-forward "▎" nil t)
+                    (let* ((ms (match-beginning 0))
+                           (me (match-end 0))
+                           (face (get-text-property ms 'face)))
+                      (put-text-property ms me 'display
+                        `((margin left-margin)
+                          ,(propertize "▎" 'face
+                                       (or face 'claude-gravity-margin-indicator)))))))))
+             ;; Section exists but streaming text cleared — need full refresh
+             ((and section (not (plist-get session :streaming-text)))
+              (claude-gravity--schedule-session-refresh
+               (plist-get session :session-id)))
+             ;; No section exists but we have streaming text — need full refresh
+             ((and (not section) (plist-get session :streaming-text))
+              (claude-gravity--schedule-session-refresh
+               (plist-get session :session-id))))))))))
 
 (provide 'claude-gravity-ui)
 ;;; claude-gravity-ui.el ends here

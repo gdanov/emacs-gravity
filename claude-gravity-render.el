@@ -9,6 +9,9 @@
 (require 'claude-gravity-text)
 (require 'claude-gravity-diff)
 
+;; Forward reference — defined in claude-gravity-ui.el
+(defvar claude-gravity--rendering-p)
+
 
 ;;; Section renderers (used by per-session buffers)
 
@@ -623,7 +626,10 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                         (put-text-property prompt-start (point)
                                            'claude-gravity-prompt prompt-text)))
                     (if frozen
-                        ;; Frozen turn: collapsed section with children
+                        ;; Frozen turn: washer-deferred children
+                        ;; Only the heading is rendered now; children are
+                        ;; inserted on first user TAB expansion via the
+                        ;; magit washer mechanism.
                         (let* ((stop (alist-get 'stop_text turn-node))
                                (summary (if (and stop (stringp stop)
                                                  (not (string-empty-p stop)))
@@ -632,7 +638,7 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                           ""))
                                (summary-str (if (string-empty-p summary) ""
                                               (concat "  " (propertize summary 'face 'claude-gravity-detail-label)))))
-                          (magit-insert-section (turn turn-num t)
+                          (magit-insert-section section (turn turn-num t)
                             (magit-insert-heading
                               (format "%s%s%s  %s%s%s"
                                       (claude-gravity--indent)
@@ -641,9 +647,25 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                       (propertize elapsed-str 'face 'claude-gravity-detail-label)
                                       (claude-gravity--format-turn-tokens turn-node)
                                       summary-str))
-                            (claude-gravity--insert-turn-children-from-tree turn-node)
-                            (claude-gravity--insert-agent-completions turn-agents))
-                          (claude-gravity--insert-stop-text turn-node))
+                            ;; Attach washer — defers children rendering.
+                            ;; Captures turn-node and turn-agents by reference.  Safe
+                            ;; because frozen turns are immutable — no patches modify
+                            ;; them after freeze.
+                            (let ((sec section)
+                                  (tn turn-node)
+                                  (ta turn-agents)
+                                  (washer-fn nil))
+                              (setq washer-fn
+                                    (lambda ()
+                                      (if claude-gravity--rendering-p
+                                          ;; Visibility cache forced us open during render — re-hide
+                                          (progn (oset sec washer washer-fn)
+                                                 (oset sec hidden t))
+                                        ;; Real user expansion — render children now
+                                        (claude-gravity--insert-turn-children-from-tree tn)
+                                        (claude-gravity--insert-agent-completions ta)
+                                        (claude-gravity--insert-stop-text tn))))
+                              (oset section washer washer-fn))))
                       ;; Active turn: full render
                       (magit-insert-section (turn turn-num (not is-current))
                         (magit-insert-heading
