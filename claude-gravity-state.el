@@ -14,6 +14,7 @@
 (declare-function claude-gravity--tool-signature "claude-gravity-diff")
 (declare-function claude-gravity-tail "claude-gravity-ui")
 (declare-function claude-gravity--plan-review-on-kill "claude-gravity-plan-review")
+(declare-function claude-gravity--update-streaming-text-fast "claude-gravity-ui")
 
 
 ;;; Inbox — Async queue for items needing user attention
@@ -237,12 +238,49 @@ Also invalidates cached header-line so next redisplay recomputes it."
   (let ((existing (gethash session-id claude-gravity--session-refresh-timers))
         (session (gethash session-id claude-gravity--sessions)))
     (when existing (cancel-timer existing))
+    ;; Cancel any pending streaming timer to avoid double-rendering
+    (let ((streaming-timer (gethash session-id claude-gravity--streaming-refresh-timers)))
+      (when streaming-timer
+        (cancel-timer streaming-timer)
+        (remhash session-id claude-gravity--streaming-refresh-timers)))
     ;; Invalidate header-line cache so next redisplay picks up new state
     (when session (plist-put session :header-line-cache nil))
     (puthash session-id
              (run-with-idle-timer claude-gravity-refresh-interval nil
                                   #'claude-gravity--do-session-refresh session-id)
              claude-gravity--session-refresh-timers)))
+
+
+;;; Streaming-text fast-path refresh timers
+
+(defvar claude-gravity--streaming-refresh-timers (make-hash-table :test 'equal)
+  "Per-session fast debounce timers for streaming-text updates.")
+
+
+(defcustom claude-gravity-streaming-refresh-interval 0.08
+  "Debounce interval for streaming-text updates (seconds).
+Faster than `claude-gravity-refresh-interval' since streaming updates
+only touch a small section of the buffer."
+  :type 'number
+  :group 'claude-gravity)
+
+
+(defun claude-gravity--schedule-streaming-refresh (session-id)
+  "Schedule a fast streaming-text-only refresh for SESSION-ID."
+  (let ((existing (gethash session-id claude-gravity--streaming-refresh-timers)))
+    (when existing (cancel-timer existing))
+    (puthash session-id
+             (run-with-idle-timer claude-gravity-streaming-refresh-interval nil
+                                  #'claude-gravity--do-streaming-refresh session-id)
+             claude-gravity--streaming-refresh-timers)))
+
+
+(defun claude-gravity--do-streaming-refresh (session-id)
+  "Fast refresh: only update the streaming-text section for SESSION-ID."
+  (remhash session-id claude-gravity--streaming-refresh-timers)
+  (let ((session (claude-gravity--get-session session-id)))
+    (when session
+      (claude-gravity--update-streaming-text-fast session))))
 
 
 (defun claude-gravity--do-session-refresh (session-id)

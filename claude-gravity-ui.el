@@ -2829,5 +2829,48 @@ NAME, INPUT used for context. STATUS for error display."
         (message "Render stats:\n%s" (string-join (sort stats #'string<) "\n"))
       (message "No render timing data collected yet."))))
 
+
+;;; ── Streaming text fast-path update ────────────────────────────────
+
+(defun claude-gravity--update-streaming-text-fast (session)
+  "Fast-path update: only replace the streaming-text section content.
+Avoids full buffer rebuild for streaming text updates."
+  (let ((buf (plist-get session :buffer)))
+    (when (and buf (buffer-live-p buf) (get-buffer-window buf t))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t)
+              (inhibit-modification-hooks t))
+          ;; Find the streaming-text section in the existing magit section tree
+          (let ((section (and magit-root-section
+                             (magit-get-section '((streaming-text))))))
+            (cond
+             ;; Section exists and we have new text — replace contents
+             ((and section (plist-get session :streaming-text))
+              (let ((start (oref section start))
+                    (end (oref section end)))
+                (goto-char start)
+                (delete-region start end)
+                (claude-gravity-insert-streaming-text session)
+                ;; Re-apply margin indicators for the newly inserted content
+                (save-excursion
+                  (goto-char start)
+                  (while (search-forward "▎" nil t)
+                    (let* ((ms (match-beginning 0))
+                           (me (match-end 0))
+                           (face (get-text-property ms 'face)))
+                      (put-text-property ms me 'display
+                        `((margin left-margin)
+                          ,(propertize "▎" 'face
+                                       (or face 'claude-gravity-margin-indicator)))))))))
+             ;; Section exists but streaming text cleared — need full refresh
+             ((and section (not (plist-get session :streaming-text)))
+              (claude-gravity--schedule-session-refresh
+               (plist-get session :session-id)))
+             ;; No section exists but we have streaming text — need full refresh
+             ((and (not section) (plist-get session :streaming-text))
+              (claude-gravity--schedule-session-refresh
+               (plist-get session :session-id))))))))))
+
 (provide 'claude-gravity-ui)
 ;;; claude-gravity-ui.el ends here
