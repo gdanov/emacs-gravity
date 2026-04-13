@@ -320,9 +320,18 @@ If THINKING or TEXT differ from current step, start a new step."
   (claude-gravity--tlist-last-item (plist-get session :turns)))
 
 (defun claude-gravity--get-turn-node (session turn-number)
-  "Return turn node for TURN-NUMBER from SESSION, or nil."
-  (cl-find turn-number (claude-gravity--tlist-items (plist-get session :turns))
-           :key (lambda (t-node) (alist-get 'turn-number t-node))))
+  "Get turn node for TURN-NUMBER from SESSION, using the turn index."
+  (let ((index (plist-get session :turn-index)))
+    (when index
+      (gethash turn-number index))))
+
+(defun claude-gravity--index-turn (session turn-node)
+  "Add TURN-NODE to SESSION's turn index."
+  (let ((index (plist-get session :turn-index)))
+    (unless index
+      (setq index (make-hash-table :test 'eql))
+      (plist-put session :turn-index index))
+    (puthash (alist-get 'turn-number turn-node) turn-node index)))
 
 (defun claude-gravity--link-agent-to-task-tool (session turn-node agent)
   "Link AGENT to its spawning Task tool in TURN-NODE.
@@ -396,7 +405,8 @@ Creates a new turn node in the :turns tree."
         (setf (alist-get 'frozen prev-turn) t)))
     (let ((turn-node (claude-gravity--make-turn-node new-turn)))
       (setf (alist-get 'prompt turn-node) entry)
-      (claude-gravity--tlist-append (plist-get session :turns) turn-node))))
+      (claude-gravity--tlist-append (plist-get session :turns) turn-node)
+      (claude-gravity--index-turn session turn-node))))
 
 
 (defun claude-gravity-model-update-prompt-answer (session tool-use-id answer)

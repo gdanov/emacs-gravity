@@ -32,8 +32,8 @@
 (defvar claude-gravity--client-process nil
   "Network connection to gravity-server's terminal socket.")
 
-(defvar claude-gravity--client-buffer ""
-  "Accumulation buffer for partial JSON from server.")
+(defvar claude-gravity--client-process-buffer " *gravity-client-accum*"
+  "Name of buffer used to accumulate partial JSON from gravity-server.")
 
 (defvar claude-gravity--client-reconnect-timer nil
   "Timer for reconnection attempts.")
@@ -142,7 +142,8 @@ If server is already running (socket exists), just connect."
              (process-live-p claude-gravity--client-process))
     (delete-process claude-gravity--client-process))
   (setq claude-gravity--client-process nil)
-  (setq claude-gravity--client-buffer "")
+  (let ((buf (get-buffer claude-gravity--client-process-buffer)))
+    (when buf (with-current-buffer buf (erase-buffer))))
   ;; Stop backend — kill entire process group to avoid tsx wrapper zombies
   (claude-gravity--kill-server-processes)
   (claude-gravity--log 'info "Gravity client stopped"))
@@ -227,7 +228,8 @@ PROC is the process, EVENT is the status change."
     (delete-process claude-gravity--client-process))
   (condition-case err
       (progn
-        (setq claude-gravity--client-buffer "")
+        (let ((buf (get-buffer claude-gravity--client-process-buffer)))
+          (when buf (with-current-buffer buf (erase-buffer))))
         (setq claude-gravity--client-process
               (make-network-process
                :name "gravity-client"
@@ -236,6 +238,9 @@ PROC is the process, EVENT is the status change."
                :filter #'claude-gravity--client-filter
                :sentinel #'claude-gravity--client-sentinel
                :noquery t))
+        ;; Allow kernel to batch socket reads (1MB vs default 4-65KB)
+        (when (boundp 'read-process-output-max)
+          (setq read-process-output-max (* 1024 1024)))
         (claude-gravity--log 'info "Connected to gravity-server at %s"
                              claude-gravity-server-terminal-sock)
         ;; Declare capabilities and request overview on connect
@@ -396,20 +401,22 @@ Dispatches to the appropriate server action based on hookEventName."
 
 (defun claude-gravity--client-filter (_proc string)
   "Process incoming messages from gravity-server.
-Accumulates partial data and processes complete newline-delimited JSON."
-  (setq claude-gravity--client-buffer
-        (concat claude-gravity--client-buffer string))
-  (while (string-match "\n" claude-gravity--client-buffer)
-    (let ((line (substring claude-gravity--client-buffer 0 (match-beginning 0))))
-      (setq claude-gravity--client-buffer
-            (substring claude-gravity--client-buffer (match-end 0)))
-      (when (> (length line) 0)
-        (condition-case err
-            (let ((msg (json-parse-string line :object-type 'alist :array-type 'list)))
-              (claude-gravity--debug-capture-incoming line msg)
-              (claude-gravity--handle-server-message msg))
-          (error
-           (claude-gravity--log 'error "Client JSON parse error: %s" err)))))))
+Accumulates partial data in a buffer and processes complete newline-delimited JSON."
+  (let ((buf (get-buffer-create claude-gravity--client-process-buffer)))
+    (with-current-buffer buf
+      (goto-char (point-max))
+      (insert string)
+      (goto-char (point-min))
+      (while (search-forward "\n" nil t)
+        (let ((line (buffer-substring-no-properties (point-min) (1- (point)))))
+          (delete-region (point-min) (point))
+          (when (> (length line) 0)
+            (condition-case err
+                (let ((msg (json-parse-string line :object-type 'alist :array-type 'list)))
+                  (claude-gravity--debug-capture-incoming line msg)
+                  (claude-gravity--handle-server-message msg))
+              (error
+               (claude-gravity--log 'error "Client JSON parse error: %s" err)))))))))
 
 (defun claude-gravity--handle-server-message (msg)
   "Dispatch a server message MSG to the appropriate handler."
@@ -491,40 +498,45 @@ SESSION-JSON is an alist from json-parse-string."
                      (list (cons 'ops (or (funcall jnil (alist-get 'ops entry)) nil))
                            (cons 'last-touched (alist-get 'lastTouched entry)))
                      files-ht)))))
-    ;; Build plist
-    (list :session-id session-id
-          :source "gravity-server"
-          :cwd cwd
-          :project project
-          :status status
-          :claude-status claude-status
-          :slug (funcall jnil (alist-get 'slug session-json))
-          :branch (funcall jnil (alist-get 'branch session-json))
-          :pid (funcall jnil (alist-get 'pid session-json))
-          :start-time (claude-gravity--epoch-to-time
-                       (alist-get 'startTime session-json))
-          :last-event-time (claude-gravity--epoch-to-time
-                            (alist-get 'lastEventTime session-json))
-          :token-usage (claude-gravity--json-token-usage
-                        (funcall jnil (alist-get 'tokenUsage session-json)))
-          :plan (claude-gravity--json-plan
-                 (funcall jnil (alist-get 'plan session-json)))
-          :streaming-text (funcall jnil (alist-get 'streamingText session-json))
-          :permission-mode (funcall jnil (alist-get 'permissionMode session-json))
-          :model-name (funcall jnil (alist-get 'modelName session-json))
-          :tmux-session (funcall jnil (alist-get 'tmuxSession session-json))
-          :turns turns-tl
-          :current-turn (or (alist-get 'currentTurn session-json) 0)
-          :tool-index tool-index
-          :agent-index agent-index
-          :tasks tasks-ht
-          :files files-ht
-          :total-tool-count (or (alist-get 'totalToolCount session-json) 0)
-          :header-line-cache nil
-          :buffer nil
-          :display-name (funcall jnil (alist-get 'displayName session-json))
-          :ignored nil
-          :allow-patterns nil)))
+    ;; Build turn index from the populated turns tlist
+    (let ((turn-index (make-hash-table :test 'eql)))
+      (dolist (turn-node (claude-gravity--tlist-items turns-tl))
+        (puthash (alist-get 'turn-number turn-node) turn-node turn-index))
+      ;; Build plist
+      (list :session-id session-id
+            :source "gravity-server"
+            :cwd cwd
+            :project project
+            :status status
+            :claude-status claude-status
+            :slug (funcall jnil (alist-get 'slug session-json))
+            :branch (funcall jnil (alist-get 'branch session-json))
+            :pid (funcall jnil (alist-get 'pid session-json))
+            :start-time (claude-gravity--epoch-to-time
+                         (alist-get 'startTime session-json))
+            :last-event-time (claude-gravity--epoch-to-time
+                              (alist-get 'lastEventTime session-json))
+            :token-usage (claude-gravity--json-token-usage
+                          (funcall jnil (alist-get 'tokenUsage session-json)))
+            :plan (claude-gravity--json-plan
+                   (funcall jnil (alist-get 'plan session-json)))
+            :streaming-text (funcall jnil (alist-get 'streamingText session-json))
+            :permission-mode (funcall jnil (alist-get 'permissionMode session-json))
+            :model-name (funcall jnil (alist-get 'modelName session-json))
+            :tmux-session (funcall jnil (alist-get 'tmuxSession session-json))
+            :turns turns-tl
+            :turn-index turn-index
+            :current-turn (or (alist-get 'currentTurn session-json) 0)
+            :tool-index tool-index
+            :agent-index agent-index
+            :tasks tasks-ht
+            :files files-ht
+            :total-tool-count (or (alist-get 'totalToolCount session-json) 0)
+            :header-line-cache nil
+            :buffer nil
+            :display-name (funcall jnil (alist-get 'displayName session-json))
+            :ignored nil
+            :allow-patterns nil))))
 
 (defun claude-gravity--json-turn-to-alist (turn-json)
   "Convert a JSON TurnNode to turn alist."
@@ -800,6 +812,7 @@ MSG contains sessionId and patches array."
               (existing (claude-gravity--get-turn-node session turn-num)))
          (unless existing ;; dedup: skip if turn number already exists
            (claude-gravity--tlist-append (plist-get session :turns) turn-node)
+           (claude-gravity--index-turn session turn-node)
            (plist-put session :current-turn turn-num))))
 
       ("freeze_turn"
