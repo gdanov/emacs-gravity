@@ -6831,7 +6831,7 @@ var HOOKS_SILENCE_WARN_MS = 9e4;
 var HOOKS_SILENCE_REARM_MS = 6e5;
 var BIDIRECTIONAL_EVENTS = /* @__PURE__ */ new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 var OVERVIEW_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
-var PULL_MODE = process.env.GRAVITY_PULL_MODE === "true";
+var PULL_MODE = process.env.GRAVITY_PUSH_MODE !== "true";
 function logMsg(message, level = "info") {
   const ts = (/* @__PURE__ */ new Date()).toISOString();
   try {
