@@ -1,6 +1,6 @@
 {
   "name": "emacs-bridge",
-  "version": "4.0.6",
+  "version": "4.0.7",
   "description": "Bridge to Emacs via Unix Socket",
   "hooks": {
     "SessionStart": [

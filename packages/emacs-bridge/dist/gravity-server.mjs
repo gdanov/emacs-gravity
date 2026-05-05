@@ -5472,7 +5472,8 @@ var VALID_TERMINAL_MESSAGE_TYPES = /* @__PURE__ */ new Set([
   "request.session",
   "request.overview",
   "request.resync",
-  "hint.session-dead"
+  "hint.session-dead",
+  "poll"
 ]);
 function isHookMessage(obj) {
   return typeof obj.event === "string" && typeof obj.session_id === "string";
@@ -5519,6 +5520,8 @@ function extractLatestUserPrompt(s) {
 function makeSessionStore() {
   const sessions = /* @__PURE__ */ new Map();
   const purgeTimers = /* @__PURE__ */ new Map();
+  const patchHistories = /* @__PURE__ */ new Map();
+  let globalSeq = 0;
   const cancelPurge = (sessionId) => {
     const timer = purgeTimers.get(sessionId);
     if (timer) {
@@ -5574,7 +5577,40 @@ function makeSessionStore() {
       }
       purgeTimers.clear();
     },
-    all: () => Array.from(sessions.values())
+    all: () => Array.from(sessions.values()),
+    appendPatches: (sessionId, patches) => {
+      const history = patchHistories.get(sessionId) ?? [];
+      const now = Date.now();
+      const stored = patches.map((patch) => ({
+        seq: ++globalSeq,
+        patch,
+        timestamp: now
+      }));
+      history.push(...stored);
+      patchHistories.set(sessionId, history);
+      return stored;
+    },
+    getPatchesSince: (sessionId, since) => {
+      const history = patchHistories.get(sessionId) ?? [];
+      let lo = 0;
+      let hi = history.length;
+      while (lo < hi) {
+        const mid = lo + hi >>> 1;
+        if (history[mid].seq <= since) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      return history.slice(lo);
+    },
+    getSessionSeq: (sessionId) => {
+      const history = patchHistories.get(sessionId) ?? [];
+      return history.length > 0 ? history[history.length - 1].seq : 0;
+    },
+    clearPatches: (sessionId) => {
+      patchHistories.delete(sessionId);
+    }
   };
 }
 var SessionStoreLive = Layer_exports.succeed(SessionStore, makeSessionStore());
@@ -6758,7 +6794,28 @@ function makeTerminal(logFn) {
       }
     },
     hasCapableTerminal: (capability) => connections.some((c) => c.capabilities.has(capability)),
-    connectionCount: () => connections.length
+    connectionCount: () => connections.length,
+    // Pull mode: send lightweight signal (no payload)
+    signalChanged: (what, sessionId, seq) => {
+      const json = JSON.stringify({
+        type: "state-changed",
+        what,
+        ...sessionId ? { sessionId } : {},
+        seq: seq ?? 0
+      }) + "\n";
+      for (const conn of [...connections]) {
+        writeToConnection(conn, json);
+      }
+    },
+    signalChangedTo: (conn, what, sessionId, seq) => {
+      const json = JSON.stringify({
+        type: "state-changed",
+        what,
+        ...sessionId ? { sessionId } : {},
+        seq: seq ?? 0
+      }) + "\n";
+      writeToConnection(conn, json);
+    }
   };
 }
 var TerminalLive = Layer_exports.succeed(Terminal, makeTerminal());
@@ -6774,6 +6831,7 @@ var HOOKS_SILENCE_WARN_MS = 9e4;
 var HOOKS_SILENCE_REARM_MS = 6e5;
 var BIDIRECTIONAL_EVENTS = /* @__PURE__ */ new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 var OVERVIEW_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
+var PULL_MODE = process.env.GRAVITY_PULL_MODE === "true";
 function logMsg(message, level = "info") {
   const ts = (/* @__PURE__ */ new Date()).toISOString();
   try {
@@ -7152,13 +7210,23 @@ var program = Effect_exports.gen(function* () {
       if (isDead) {
         const patches = sessionEnd(session);
         if (patches.length > 0) {
-          terminals.broadcast({ type: "session.update", sessionId, patches });
+          if (PULL_MODE) {
+            const stored = store.appendPatches(sessionId, patches);
+            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+            terminals.signalChanged("session", sessionId, seq);
+          } else {
+            terminals.broadcast({ type: "session.update", sessionId, patches });
+          }
         }
         schedulePurge(sessionId);
-        terminals.broadcast({
-          type: "overview.snapshot",
-          projects: store.getProjectSummaries()
-        });
+        if (PULL_MODE) {
+          terminals.signalChanged("overview");
+        } else {
+          terminals.broadcast({
+            type: "overview.snapshot",
+            projects: store.getProjectSummaries()
+          });
+        }
       }
     }
     if (!hookEventReceived && store.all().length === 0 && terminals.connectionCount() > 0 && now - serverStartedAt > HOOKS_SILENCE_WARN_MS && now - lastHooksSilenceWarn > HOOKS_SILENCE_REARM_MS) {
