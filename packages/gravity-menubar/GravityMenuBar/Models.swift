@@ -110,36 +110,40 @@ public struct InboxInfo: Identifiable {
 
 // MARK: - JSON Protocol Types (server → terminal)
 
-/// Represents any message from gravity-server
+/// Represents any message from gravity-server (both push and pull mode)
 public struct ServerMessage: Decodable {
     public let type: String
 
-    // overview.snapshot
+    // overview.snapshot (push mode)
     public let projects: [ProjectSummaryJSON]?
 
-    // inbox.added
+    // inbox.added (push mode)
     public let item: InboxItemJSON?
 
     // inbox.removed
     public let itemId: Int?
 
-    // inbox.snapshot
+    // inbox.snapshot (push mode) / inbox-items (pull mode)
     public let items: [InboxItemJSON]?
 
-    // session.update / session.removed
+    // session.update (push mode) / session-patches (pull mode)
     public let sessionId: String?
     public let patches: [PatchJSON]?
+    public let seq: Int?
+
+    // state-changed (pull mode signal)
+    public let what: String?
 
     // notice
     public let level: String?
     public let text: String?
 
     enum CodingKeys: String, CodingKey {
-        case type, projects, item, itemId, items, sessionId, patches, level, text
+        case type, projects, item, itemId, items, sessionId, patches, seq, what, level, text
     }
 
     /// Memberwise init for test factories
-    public init(type: String, projects: [ProjectSummaryJSON]? = nil, item: InboxItemJSON? = nil, itemId: Int? = nil, items: [InboxItemJSON]? = nil, sessionId: String? = nil, patches: [PatchJSON]? = nil, level: String? = nil, text: String? = nil) {
+    public init(type: String, projects: [ProjectSummaryJSON]? = nil, item: InboxItemJSON? = nil, itemId: Int? = nil, items: [InboxItemJSON]? = nil, sessionId: String? = nil, patches: [PatchJSON]? = nil, seq: Int? = nil, what: String? = nil, level: String? = nil, text: String? = nil) {
         self.type = type
         self.projects = projects
         self.item = item
@@ -147,6 +151,8 @@ public struct ServerMessage: Decodable {
         self.items = items
         self.sessionId = sessionId
         self.patches = patches
+        self.seq = seq
+        self.what = what
         self.level = level
         self.text = text
     }

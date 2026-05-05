@@ -41,8 +41,8 @@ const BIDIRECTIONAL_EVENTS: ReadonlySet<HookEventName> = new Set(["PermissionReq
 const OVERVIEW_EVENTS: ReadonlySet<HookEventName> = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
 
 // Pull mode: server sends lightweight signals instead of full payloads
-// Set to true via GRAVITY_PULL_MODE=true env var
-const PULL_MODE = process.env.GRAVITY_PULL_MODE === "true";
+// Default: true. Set to false via GRAVITY_PUSH_MODE=true to use push (legacy).
+const PULL_MODE = process.env.GRAVITY_PUSH_MODE !== "true";
 
 // ── Logging helper (simple, no service dependency for socket callbacks) ──
 

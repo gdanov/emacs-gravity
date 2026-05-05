@@ -246,6 +246,90 @@ public class MenuBarStateManager {
             noticeText = msg.text
             updateIconState()
 
+        // Pull mode handlers
+        case "state-changed":
+            // Signal that state changed — queue a poll to fetch actual data
+            guard let what = msg.what else { break }
+            NSLog("gravity-menubar: state-changed what=%@", what)
+            pendingRequests.append(TerminalRequest(type: "poll"))
+
+        case "session-patches":
+            // Pull mode: apply patches to existing session
+            // Same logic as session.update but for pull mode
+            if let sessionId = msg.sessionId, let patches = msg.patches {
+                var hasStatusChange = false
+                var addToolCount = 0
+
+                for patch in patches {
+                    switch patch.op {
+                    case "set_claude_status":
+                        if let newStatus = patch.claudeStatus {
+                            previousStatuses[sessionId] = newStatus
+                            hasStatusChange = true
+                            if !mutateSession(sessionId, { $0.claudeStatus = newStatus }) {
+                                // Session not found — need to request overview
+                                pendingRequests.append(TerminalRequest(type: "request.overview"))
+                            }
+                        }
+                    case "set_status":
+                        if let newStatus = patch.status {
+                            hasStatusChange = true
+                            if !mutateSession(sessionId, { $0.status = newStatus }) {
+                                pendingRequests.append(TerminalRequest(type: "request.overview"))
+                            }
+                        }
+                    case "add_tool":
+                        addToolCount += 1
+                    case "set_meta":
+                        if let slug = patch.slug {
+                            _ = mutateSession(sessionId, { $0.slug = slug })
+                        }
+                        if let dn = patch.displayName {
+                            _ = mutateSession(sessionId, { $0.serverDisplayName = dn })
+                        }
+                    case "set_turn_stop":
+                        if let stopText = patch.stopText {
+                            _ = mutateSession(sessionId, { $0.latestMessage = stopText })
+                        }
+                    case "set_streaming_text":
+                        _ = mutateSession(sessionId, { $0.latestMessage = patch.text })
+                    case "add_prompt":
+                        if let promptText = patch.prompt?.text {
+                            _ = mutateSession(sessionId, { $0.latestUserPrompt = promptText })
+                        }
+                    default:
+                        break
+                    }
+                }
+
+                if addToolCount > 0 {
+                    if !mutateSession(sessionId, { $0.toolCount += addToolCount }) {
+                        pendingRequests.append(TerminalRequest(type: "request.overview"))
+                    }
+                    updateIconState()
+                }
+
+                if hasStatusChange {
+                    updateIconState()
+                    pendingRequests.append(TerminalRequest(type: "request.overview"))
+                }
+            }
+
+        case "inbox-items":
+            // Pull mode: replace inbox with server state
+            guard let items = msg.items else { break }
+            inboxItems = items.filter { $0.type != "idle" }.map { item in
+                InboxInfo(
+                    id: item.id,
+                    type: item.type,
+                    sessionId: item.sessionId,
+                    project: item.project,
+                    label: item.label,
+                    summary: item.summary
+                )
+            }
+            updateIconState()
+
         default:
             break
         }

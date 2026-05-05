@@ -129,7 +129,9 @@ public class GravityMonitor: ObservableObject {
                         return
                     }
                 }
-                self.sendRequest(TerminalRequest(type: "request.overview"))
+                // In pull mode, poll for state. In push mode, request overview.
+                // Pull mode is the default.
+                self.sendRequest(TerminalRequest(type: "poll"))
             }
             RunLoop.main.add(timer, forMode: .common)
             self.healthTimer = timer
