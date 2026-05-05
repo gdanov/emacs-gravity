@@ -44,6 +44,22 @@
 (defvar claude-gravity--client-subscribed-sessions (make-hash-table :test 'equal)
   "Set of session IDs we've requested detail for.")
 
+(defvar claude-gravity--pull-mode nil
+  "Non-nil when using pull-based protocol (GRAVITY_PULL_MODE=true on server).")
+
+(defvar claude-gravity--poll-timer nil
+  "Timer for polling server state when idle (pull mode).")
+
+(defvar claude-gravity--pending-signal nil
+  "Last received state-changed signal, or nil.
+Format: (what . session-id) where what is "session", "inbox", "overview", or "notice".")
+
+(defvar claude-gravity--last-seq (make-hash-table :test 'equal)
+  "Last acknowledged sequence number per session.")
+
+(defconst claude-gravity--idle-poll-delay 0.5
+  "Seconds to wait after idle before fetching server state (pull mode).")
+
 (defvar claude-gravity-server-terminal-sock
   (expand-file-name
    (or (getenv "GRAVITY_TERMINAL_SOCK")
@@ -247,10 +263,9 @@ PROC is the process, EVENT is the status change."
         (claude-gravity--send-to-server
          '((type . "hello")
            (capabilities . ["action.permission" "action.question" "action.plan-review"])))
-        (claude-gravity--send-to-server
-         '((type . "request.overview")))
-        (claude-gravity--send-to-server
-         '((type . "request.resync")))
+        ;; In pull mode, we use request.resync to get initial state
+        ;; In push mode, we request overview and then session details
+        (claude-gravity--send-to-server '((type . "request.resync")))
         ;; Re-subscribe to previously-opened session details
         (maphash (lambda (sid _)
                    (claude-gravity--send-to-server
@@ -426,6 +441,8 @@ Accumulates partial data in a buffer and processes complete newline-delimited JS
        (claude-gravity--handle-session-snapshot msg))
       ("session.update"
        (claude-gravity--handle-session-update msg))
+      ("session-patches"
+       (claude-gravity--handle-session-patches msg))
       ("session.removed"
        (claude-gravity--handle-session-removed msg))
       ("inbox.added"
@@ -434,10 +451,14 @@ Accumulates partial data in a buffer and processes complete newline-delimited JS
        (claude-gravity--handle-inbox-removed msg))
       ("inbox.snapshot"
        (claude-gravity--handle-inbox-snapshot msg))
+      ("inbox-items"
+       (claude-gravity--handle-inbox-items msg))
       ("overview.snapshot"
        (claude-gravity--handle-overview-snapshot msg))
       ("notice"
        (claude-gravity--handle-notice msg))
+      ("state-changed"
+       (claude-gravity--handle-state-changed msg))
       (_
        (claude-gravity--log 'warn "Unknown server message type: %s" type)))))
 
@@ -1180,6 +1201,99 @@ Also prunes orphan sessions that the server no longer knows about."
       (when (not (string-empty-p claude-gravity--notification-indicator))
         (setq claude-gravity--notification-indicator "")
         (force-mode-line-update t)))))
+
+
+;;; ── Pull mode (lightweight signal + fetch on idle) ───────────────────
+;;
+;; In pull mode, the server sends lightweight `state-changed` signals instead
+;; of full payloads. Emacs stores the signal and fetches data when idle,
+;; avoiding UI freezes when the user is doing heavy work.
+
+(defun claude-gravity--handle-state-changed (msg)
+  "Handle state-changed signal — store signal and schedule fetch when idle.
+This is the pull-mode entry point: server signals that something changed,
+Emacs fetches the actual data when it's ready."
+  (let* ((what (alist-get 'what msg))
+         (session-id (alist-get 'sessionId msg))
+         (seq (or (alist-get 'seq msg) 0)))
+    (claude-gravity--log 'debug "Pull: state-changed what=%s sessionId=%s seq=%s"
+                        what session-id seq)
+    (setq claude-gravity--pending-signal (cons what session-id))
+    (when session-id
+      (puthash session-id seq claude-gravity--last-seq))
+    (claude-gravity--schedule-delayed-fetch)))
+
+(defun claude-gravity--handle-session-patches (msg)
+  "Handle session-patches — apply patches and update sequence number.
+Used in pull mode instead of session.update."
+  (let* ((session-id (alist-get 'sessionId msg))
+         (seq (or (alist-get 'seq msg) 0))
+         (patches (alist-get 'patches msg))
+         (session (gethash session-id claude-gravity--sessions)))
+    (claude-gravity--log 'debug "Pull: session-patches sessionId=%s seq=%d patches=%d"
+                        session-id seq (length patches))
+    (when session
+      (dolist (patch patches)
+        (claude-gravity--apply-patch session patch))
+      ;; Update sequence number
+      (puthash session-id seq claude-gravity--last-seq)
+      ;; Refresh UI
+      (claude-gravity--schedule-refresh)
+      (claude-gravity--schedule-session-refresh session-id))))
+
+(defun claude-gravity--handle-inbox-items (msg)
+  "Handle inbox-items — replace local inbox with server state.
+Used in pull mode instead of inbox.snapshot."
+  (let ((items-json (alist-get 'items msg)))
+    (claude-gravity--log 'debug "Pull: inbox-items count=%d" (length items-json))
+    (setq claude-gravity--inbox
+          (mapcar #'claude-gravity--json-inbox-item-to-alist items-json))
+    (claude-gravity--update-inbox-indicator)
+    (claude-gravity--schedule-refresh)))
+
+(defun claude-gravity--schedule-delayed-fetch ()
+  "Schedule a fetch of server state when Emacs is idle.
+In pull mode, we store the signal and fetch actual data when the user
+isn't typing or doing heavy work."
+  (when claude-gravity--poll-timer
+    (cancel-timer claude-gravity--poll-timer))
+  (setq claude-gravity--poll-timer
+        (run-with-idle-timer claude-gravity--idle-poll-delay nil
+                             #'claude-gravity--do-delayed-fetch)))
+
+(defun claude-gravity--do-delayed-fetch ()
+  "Fetch server state based on pending signal.
+Sends poll request to server, which responds with all pending data."
+  (setq claude-gravity--poll-timer nil)
+  (unless claude-gravity--pending-signal
+    (claude-gravity--log 'debug "Pull: no pending signal, skipping fetch")
+    (claude-gravity--send-to-server '((type . "poll")))
+    (return-from 'claude-gravity--do-delayed-fetch nil))
+  (claude-gravity--log 'debug "Pull: fetching state for %s"
+                      claude-gravity--pending-signal)
+  (claude-gravity--send-to-server '((type . "poll")))
+  (setq claude-gravity--pending-signal nil))
+
+(defun claude-gravity--poll-now ()
+  "Immediately poll server for all pending state.
+Useful when user presses a key to refresh or when opening a session."
+  (interactive)
+  (claude-gravity--log 'debug "Pull: immediate poll")
+  (claude-gravity--send-to-server '((type . "poll"))))
+
+
+;;; ── Force refresh (works in both push and pull mode) ───────────────
+
+(defun claude-gravity-refresh (&optional force)
+  "Refresh all session data from gravity-server.
+With FORCE (prefix arg), ignores cached state and does full resync.
+In pull mode, this sends a poll. In push mode, it requests resync."
+  (interactive "P")
+  (if force
+      (progn
+        (claude-gravity--log 'info "Full resync requested")
+        (claude-gravity--send-to-server '((type . "request.resync"))))
+    (claude-gravity--poll-now)))
 
 (provide 'claude-gravity-client)
 ;;; claude-gravity-client.el ends here

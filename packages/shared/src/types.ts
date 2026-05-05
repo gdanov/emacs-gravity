@@ -284,8 +284,11 @@ export type Patch =
 // Newline-delimited JSON over Unix domain socket.
 // WebSocket upgrade path for web terminals later.
 
-/** Messages from server to terminal. */
-export type ServerMessage =
+/** Areas of state that can change on the server. */
+export type ChangedArea = "session" | "inbox" | "overview" | "notice";
+
+/** Messages from server to terminal (push mode). */
+export type ServerPushMessage =
   | { type: "session.snapshot"; sessionId: string; session: Session }
   | { type: "session.update"; sessionId: string; patches: Patch[] }
   | { type: "session.removed"; sessionId: string }
@@ -294,6 +297,16 @@ export type ServerMessage =
   | { type: "inbox.snapshot"; items: InboxItem[] }
   | { type: "overview.snapshot"; projects: ProjectSummary[] }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string };
+
+/** Messages from server to terminal (pull mode — signals only, no payload). */
+export type ServerSignalMessage =
+  | { type: "state-changed"; what: ChangedArea; sessionId?: string; seq: number }
+  | { type: "session-patches"; sessionId: string; seq: number; patches: Patch[] }
+  | { type: "inbox-items"; items: InboxItem[] }
+  | { type: "overview-data"; projects: ProjectSummary[] };
+
+/** Union of all server → terminal messages. */
+export type ServerMessage = ServerPushMessage | ServerSignalMessage;
 
 /** Messages from terminal to server. */
 export type TerminalMessage =
@@ -305,7 +318,8 @@ export type TerminalMessage =
   | { type: "request.session"; sessionId: string }
   | { type: "request.overview" }
   | { type: "request.resync" }
-  | { type: "hint.session-dead"; sessionId: string };
+  | { type: "hint.session-dead"; sessionId: string }
+  | { type: "poll" }
 
 export interface ProjectSummary {
   project: string;

@@ -28,7 +28,10 @@ export type {
 
   // Protocol messages
   ServerMessage,
+  ServerPushMessage,
+  ServerSignalMessage,
   TerminalMessage,
+  ChangedArea,
   ProjectSummary,
   SessionSummary,
   PlanFeedback,

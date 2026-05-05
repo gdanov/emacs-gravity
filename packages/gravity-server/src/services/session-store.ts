@@ -4,7 +4,13 @@
 // Methods are synchronous (in-memory Map ops) — the service boundary provides DI.
 
 import { Effect, Layer, ServiceMap } from "effect";
-import type { Session, ProjectSummary, TurnNode } from "@gravity/shared";
+import type { Patch, Session, ProjectSummary, TurnNode } from "@gravity/shared";
+
+export interface StoredPatch {
+  readonly seq: number;
+  readonly patch: Patch;
+  readonly timestamp: number;
+}
 
 export interface SessionStoreService {
   readonly get: (sessionId: string) => Session | undefined;
@@ -16,6 +22,12 @@ export interface SessionStoreService {
   readonly cancelPurge: (sessionId: string) => void;
   readonly clearAllPurgeTimers: () => void;
   readonly all: () => Session[];
+
+  // Patch store (pull mode): append patches and retrieve since a sequence number
+  readonly appendPatches: (sessionId: string, patches: Patch[]) => StoredPatch[];
+  readonly getPatchesSince: (sessionId: string, since: number) => StoredPatch[];
+  readonly getSessionSeq: (sessionId: string) => number;
+  readonly clearPatches: (sessionId: string) => void;
 }
 
 export const SessionStore = ServiceMap.Service<SessionStoreService>("SessionStore");
@@ -48,6 +60,10 @@ function extractLatestUserPrompt(s: Session): string | null {
 export function makeSessionStore(): SessionStoreService {
   const sessions = new Map<string, Session>();
   const purgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Patch history per session for pull mode
+  const patchHistories = new Map<string, StoredPatch[]>();
+  // Global sequence counter
+  let globalSeq = 0;
 
   const cancelPurge = (sessionId: string): void => {
     const timer = purgeTimers.get(sessionId);
@@ -112,6 +128,44 @@ export function makeSessionStore(): SessionStoreService {
     },
 
     all: () => Array.from(sessions.values()),
+
+    appendPatches: (sessionId, patches) => {
+      const history = patchHistories.get(sessionId) ?? [];
+      const now = Date.now();
+      const stored: StoredPatch[] = patches.map((patch) => ({
+        seq: ++globalSeq,
+        patch,
+        timestamp: now,
+      }));
+      history.push(...stored);
+      patchHistories.set(sessionId, history);
+      return stored;
+    },
+
+    getPatchesSince: (sessionId, since) => {
+      const history = patchHistories.get(sessionId) ?? [];
+      // Binary search for first patch with seq > since
+      let lo = 0;
+      let hi = history.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (history[mid].seq <= since) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      return history.slice(lo);
+    },
+
+    getSessionSeq: (sessionId) => {
+      const history = patchHistories.get(sessionId) ?? [];
+      return history.length > 0 ? history[history.length - 1].seq : 0;
+    },
+
+    clearPatches: (sessionId) => {
+      patchHistories.delete(sessionId);
+    },
   };
 }
 

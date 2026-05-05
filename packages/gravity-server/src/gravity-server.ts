@@ -40,6 +40,10 @@ const HOOKS_SILENCE_REARM_MS = 600_000;
 const BIDIRECTIONAL_EVENTS: ReadonlySet<HookEventName> = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 const OVERVIEW_EVENTS: ReadonlySet<HookEventName> = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
 
+// Pull mode: server sends lightweight signals instead of full payloads
+// Set to true via GRAVITY_PULL_MODE=true env var
+const PULL_MODE = process.env.GRAVITY_PULL_MODE === "true";
+
 // ── Logging helper (simple, no service dependency for socket callbacks) ──
 
 function logMsg(message: string, level: string = "info"): void {
@@ -492,13 +496,23 @@ const program = Effect.gen(function* () {
       if (isDead) {
         const patches = sessionEnd(session);
         if (patches.length > 0) {
-          terminals.broadcast({ type: "session.update", sessionId, patches });
+          if (PULL_MODE) {
+            const stored = store.appendPatches(sessionId, patches);
+            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+            terminals.signalChanged("session", sessionId, seq);
+          } else {
+            terminals.broadcast({ type: "session.update", sessionId, patches });
+          }
         }
         schedulePurge(sessionId);
-        terminals.broadcast({
-          type: "overview.snapshot",
-          projects: store.getProjectSummaries(),
-        });
+        if (PULL_MODE) {
+          terminals.signalChanged("overview");
+        } else {
+          terminals.broadcast({
+            type: "overview.snapshot",
+            projects: store.getProjectSummaries(),
+          });
+        }
       }
     }
 

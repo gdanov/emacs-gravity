@@ -12,6 +12,7 @@ const VALID_TERMINAL_MESSAGE_TYPES = new Set([
   "request.overview",
   "request.resync",
   "hint.session-dead",
+  "poll",
 ]);
 
 /** Check if a parsed JSON object looks like a hook-style message (has `event` field). */

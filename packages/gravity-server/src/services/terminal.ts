@@ -4,7 +4,7 @@
 // Manages long-lived terminal connections with backpressure handling.
 
 import { Layer, ServiceMap } from "effect";
-import type { ServerMessage } from "@gravity/shared";
+import type { ChangedArea, ServerMessage } from "@gravity/shared";
 import type { Socket } from "net";
 
 const MAX_QUEUED_MESSAGES = 200;
@@ -27,6 +27,10 @@ export interface TerminalService {
   readonly unsubscribeAll: (sessionId: string) => void;
   readonly hasCapableTerminal: (capability: string) => boolean;
   readonly connectionCount: () => number;
+
+  // Pull mode: signals (lightweight, no payload)
+  readonly signalChanged: (what: ChangedArea, sessionId?: string, seq?: number) => void;
+  readonly signalChangedTo: (conn: TerminalConnection, what: ChangedArea, sessionId?: string, seq?: number) => void;
 }
 
 export const Terminal = ServiceMap.Service<TerminalService>("Terminal");
@@ -141,6 +145,29 @@ export function makeTerminal(logFn?: (msg: string, level?: string) => void): Ter
       connections.some((c) => c.capabilities.has(capability)),
 
     connectionCount: () => connections.length,
+
+    // Pull mode: send lightweight signal (no payload)
+    signalChanged: (what, sessionId, seq) => {
+      const json = JSON.stringify({
+        type: "state-changed",
+        what,
+        ...(sessionId ? { sessionId } : {}),
+        seq: seq ?? 0,
+      }) + "\n";
+      for (const conn of [...connections]) {
+        writeToConnection(conn, json);
+      }
+    },
+
+    signalChangedTo: (conn, what, sessionId, seq) => {
+      const json = JSON.stringify({
+        type: "state-changed",
+        what,
+        ...(sessionId ? { sessionId } : {}),
+        seq: seq ?? 0,
+      }) + "\n";
+      writeToConnection(conn, json);
+    },
   };
 }
 
