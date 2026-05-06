@@ -57,12 +57,13 @@ Project is being used & developed exclusively on MacOS, so windows & linux users
 1. **Server-driven architecture** — All session state moved from Emacs Lisp hash tables to gravity-server, a long-running TypeScript/Effect backend. Emacs is now a thin terminal client that applies semantic patches and renders via magit-section.
 2. **Multi-client support** — Multiple terminals connect to the same server simultaneously. The macOS menu bar app and Emacs share the same live state. First responder wins for inbox actions.
 3. **Semantic patch protocol** — Typed incremental updates (`add_tool`, `complete_agent`, `set_plan`) replace full state rebuilds. Any client that speaks the protocol can render the full UI — future web or native dashboards included.
-4. **Centralized enrichment** — Transcript parsing, agent attribution, and event enrichment run server-side with full in-memory state. No more file I/O for agent tracking.
-5. **Inbox system** — Permissions, plan reviews, and questions from all sessions funnel into a centralized inbox. Any connected terminal can respond.
-6. **macOS menu bar client** — New lightweight Swift app with colored status dots per session, project-grouped dropdown, health monitoring, and auto-reconnect.
-7. **Two-socket architecture** — Hook socket (bridge shim, one-shot per event) and terminal socket (persistent client connections) are cleanly separated.
-8. **Monorepo with shared types** — `packages/{shared, emacs-bridge, gravity-server}` with npm workspaces and type-safe protocol definitions shared across all components.
-9. **Beads issue tracking integration** — Projects with a `.beads/` directory get a live Issues section in the overview buffer. Open, in-progress, and blocked issues displayed per project with priority labels, status indicators, and async refresh.
+4. **Pull-based terminal protocol** (default) — Server sends lightweight signals instead of broadcasting full payloads. Clients fetch data on demand when idle, preventing UI freezes during heavy editing. Enable legacy push mode with `GRAVITY_PUSH_MODE=true`.
+5. **Centralized enrichment** — Transcript parsing, agent attribution, and event enrichment run server-side with full in-memory state. No more file I/O for agent tracking.
+6. **Inbox system** — Permissions, plan reviews, and questions from all sessions funnel into a centralized inbox. Any connected terminal can respond.
+7. **macOS menu bar client** — New lightweight Swift app with colored status dots per session, project-grouped dropdown, health monitoring, and auto-reconnect.
+8. **Two-socket architecture** — Hook socket (bridge shim, one-shot per event) and terminal socket (persistent client connections) are cleanly separated.
+9. **Monorepo with shared types** — `packages/{shared, emacs-bridge, gravity-server}` with npm workspaces and type-safe protocol definitions shared across all components.
+10. **Beads issue tracking integration** — Projects with a `.beads/` directory get a live Issues section in the overview buffer. Open, in-progress, and blocked issues displayed per project with priority labels, status indicators, and async refresh.
 
 ![Live session detail with inline diffs](<Screenshot 2026-03-29 at 19.54.59.png>)
 
