@@ -160,7 +160,15 @@ const program = Effect.gen(function* () {
     const patches = runEvent(eventName, sessionId, cwd, data, pid, needsResponse ? socket : undefined);
 
     if (patches.length > 0) {
-      terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+      if (PULL_MODE) {
+        // Pull mode: store patches and signal, don't broadcast
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
+      } else {
+        // Push mode (default): broadcast full patches
+        terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+      }
     }
 
     // Schedule purge for ended sessions, cancel if session self-heals
@@ -175,16 +183,24 @@ const program = Effect.gen(function* () {
       p.op === "set_claude_status" || p.op === "set_status"
     );
     if (OVERVIEW_EVENTS.has(eventName) || hasStatusPatch) {
-      terminals.broadcast({
-        type: "overview.snapshot",
-        projects: store.getProjectSummaries(),
-      });
+      if (PULL_MODE) {
+        terminals.signalChanged("overview");
+      } else {
+        terminals.broadcast({
+          type: "overview.snapshot",
+          projects: store.getProjectSummaries(),
+        });
+      }
     }
 
     if (eventName === "SessionStart") {
       const session = store.get(sessionId);
       if (session) {
-        terminals.broadcast({ type: "session.snapshot", sessionId, session });
+        if (PULL_MODE) {
+          terminals.signalChanged("session", sessionId, store.getSessionSeq(sessionId));
+        } else {
+          terminals.broadcast({ type: "session.snapshot", sessionId, session });
+        }
       }
     }
 
@@ -193,9 +209,21 @@ const program = Effect.gen(function* () {
       if (items.length > 0) {
         const item = items[0];
         logMsg(`Inbox broadcast: type=${item.type} tool_name=${(item.data as Record<string, unknown>)?.tool_name} id=${item.id}`);
-        terminals.broadcast({ type: "inbox.added", item });
+        if (PULL_MODE) {
+          terminals.signalChanged("inbox");
+        } else {
+          terminals.broadcast({ type: "inbox.added", item });
+        }
       }
     }
+  };
+
+  /** Send overview data to a connection (used by both push and pull modes). */
+  const sendOverview = (conn: TerminalConnection): void => {
+    terminals.sendTo(conn, {
+      type: "overview.snapshot",
+      projects: store.getProjectSummaries(),
+    });
   };
 
   // ── Terminal message handler ─────────────────────────────────────
@@ -218,6 +246,32 @@ const program = Effect.gen(function* () {
           type: "overview.snapshot",
           projects: store.getProjectSummaries(),
         });
+        break;
+      }
+
+      case "poll": {
+        // Pull mode: client requests current state
+        sendOverview(conn);
+        const items = inbox.all();
+        if (items.length > 0) {
+          terminals.sendTo(conn, { type: "inbox-items", items });
+        }
+        for (const sessionId of conn.subscribedSessions) {
+          const session = store.get(sessionId);
+          if (session) {
+            const patches = store.getPatchesSince(sessionId, 0);
+            const seq = store.getSessionSeq(sessionId);
+            if (patches.length > 0) {
+              terminals.sendTo(conn, {
+                type: "session-patches",
+                sessionId,
+                seq,
+                patches: patches.map(p => p.patch),
+              });
+            }
+          }
+        }
+        logMsg(`Terminal poll: overview sent, ${inbox.all().length} inbox items, ${conn.subscribedSessions.size} subscribed sessions`);
         break;
       }
 
