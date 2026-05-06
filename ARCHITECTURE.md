@@ -100,7 +100,26 @@ Makefile                         -- Build orchestration
 
 ## Terminal Protocol
 
-### Server → Terminal Messages
+The terminal protocol supports two modes:
+- **Pull mode** (default): Server sends lightweight signals, client fetches data on demand
+- **Push mode**: Server broadcasts full payloads immediately
+
+Enable push mode with `GRAVITY_PUSH_MODE=true` (legacy).
+
+### Pull Mode Flow
+
+```
+Hook event → Server → state-changed signal (lightweight) → Terminal
+                                     ↓
+                    Client polls when idle → poll request
+                                     ↓
+                    Server → overview.snapshot + session-patches (full data)
+```
+
+This prevents UI freezes during heavy editing: the server only sends a small
+signal while the client fetches data when it's idle.
+
+### Server → Terminal Messages (Push mode)
 
 ```typescript
 { type: "session.snapshot", sessionId: string, session: Session }
@@ -109,6 +128,18 @@ Makefile                         -- Build orchestration
 { type: "inbox.added", item: InboxItem }
 { type: "inbox.removed", itemId: number }
 { type: "inbox.snapshot", items: InboxItem[] }
+{ type: "overview.snapshot", projects: ProjectSummary[] }
+```
+
+### Server → Terminal Messages (Pull mode)
+
+```typescript
+// Signals (lightweight, no payload)
+{ type: "state-changed", what: "session"|"inbox"|"overview", sessionId?: string, seq: number }
+
+// Responses to poll (full payload)
+{ type: "session-patches", sessionId: string, seq: number, patches: Patch[] }
+{ type: "inbox-items", items: InboxItem[] }
 { type: "overview.snapshot", projects: ProjectSummary[] }
 ```
 
@@ -124,7 +155,22 @@ Makefile                         -- Build orchestration
 { type: "request.overview" }
 { type: "request.resync" }
 { type: "hint.session-dead", sessionId: string }
+{ type: "poll" }  // Pull mode: request current state
 ```
+
+### Patch Store (Pull Mode)
+
+In pull mode, the server stores patches with sequence numbers per session:
+
+```typescript
+interface StoredPatch {
+  seq: number;        // Global sequence number
+  patch: Patch;         // The actual patch
+  timestamp: number;   // When received
+}
+```
+
+Clients can fetch patches since a given sequence number.
 
 ### Semantic Patches
 
