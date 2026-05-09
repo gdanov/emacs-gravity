@@ -158,38 +158,127 @@ const program = Effect.gen(function* () {
     });
   };
 
-  // ── Pi driver mode ────────────────────────────────────────────────
+  // ── Pi driver session management ───────────────────────────────
 
-  if (config.piEnabled) {
-    logMsg(`Pi driver mode enabled (cwd=${config.piCwd ?? process.cwd()}, thinking=${config.piThinkingLevel ?? "medium"})`);
+  // Mutable reference to the active pi driver (null if not running)
+  let activePiDriver: ReturnType<typeof startPiDriver> | null = null;
 
-    // Start the pi driver
-    const piDriver = startPiDriver({
-      cwd: config.piCwd ?? process.cwd(),
-      thinkingLevel: (config.piThinkingLevel as any) ?? "medium",
-      onTranslation: handlePiTranslation,
+  /** Start a new pi session (called via terminal message). */
+  const startPiSession = (options: { cwd?: string; thinkingLevel?: string }): string | null => {
+    if (activePiDriver) {
+      logMsg(`Pi session already running — use pi.abort first`, "warn");
+      return null;
+    }
+
+    const sessionId = generateSessionId();
+    logMsg(`Starting pi session ${sessionId} (cwd=${options.cwd ?? process.cwd()}, thinking=${options.thinkingLevel ?? "medium"})`);
+
+    const driver = startPiDriver({
+      cwd: options.cwd ?? process.cwd(),
+      thinkingLevel: (options.thinkingLevel as any) ?? "medium",
+      onTranslation: (result) => {
+        // Route translation to handlePiTranslation
+        handlePiTranslation(result);
+      },
       onLifecycle: (event, metadata) => {
         if (event === "start") {
           logMsg(`Pi session started: ${metadata?.sessionId}`);
         } else if (event === "stop") {
           logMsg(`Pi session ended: ${metadata?.sessionId}`);
+          activePiDriver = null;
         } else if (event === "error") {
           logMsg(`Pi session error`, "error");
+          activePiDriver = null;
         }
       },
     });
 
-    // Store driver reference for cleanup
-    const piDriverRef = { driver: piDriver };
+    activePiDriver = driver;
+    return sessionId;
+  };
 
-    // For pi mode, we don't start the hook server since pi drives the session
-    // Instead, we start the terminal server and keep the process alive
-    // The pi driver will handle prompting via stdin/CLI wrapper
+  /** Send a prompt to the active pi session. */
+  const piSessionPrompt = (text: string, images?: string[]): void => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session`, "warn");
+      return;
+    }
+    activePiDriver.prompt(text, images).catch((err) => {
+      logMsg(`pi.prompt error: ${err.message}`, "error");
+    });
+  };
 
-    logMsg(`Pi driver ready. Terminal socket: ${config.terminalSocketPath}`);
+  /** Send steering message to active pi session. */
+  const piSessionSteer = (text: string): void => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session`, "warn");
+      return;
+    }
+    activePiDriver.steer(text);
+  };
 
-    // Wait for SIGTERM/SIGINT to shut down
-    return; // Exit the program effect early for pi mode
+  /** Abort the active pi session. */
+  const piSessionAbort = (): void => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session to abort`, "warn");
+      return;
+    }
+    activePiDriver.abort();
+  };
+
+  /** Set thinking level for active pi session. */
+  const piSessionSetThinking = (level: string): void => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session`, "warn");
+      return;
+    }
+    activePiDriver.setEffortLevel(level);
+  };
+
+  /** Stop the active pi session. */
+  const stopPiSession = async (): Promise<void> => {
+    if (!activePiDriver) {
+      return;
+    }
+    await activePiDriver.stop();
+    activePiDriver = null;
+  };
+
+  // ── Terminal message handlers for pi ──────────────────────────────
+
+  // Expose pi session functions to terminal message handler
+  (program as any)._startPiSession = startPiSession;
+  (program as any)._piSessionPrompt = piSessionPrompt;
+  (program as any)._piSessionSteer = piSessionSteer;
+  (program as any)._piSessionAbort = piSessionAbort;
+  (program as any)._piSessionSetThinking = piSessionSetThinking;
+  (program as any)._stopPiSession = stopPiSession;
+
+  // Generate session ID (needed for pi mode)
+  const generateSessionId = (): string => {
+    const now = Date.now().toString(36);
+    const random = Math.random().toString(36).substring(2, 10);
+    return `pi-${now}-${random}`;
+  };
+
+  // ── Pi driver mode (--pi flag starts pi instead of hook socket) ──
+
+  if (config.piEnabled) {
+    logMsg(`Pi driver mode enabled (cwd=${config.piCwd ?? process.cwd()}, thinking=${config.piThinkingLevel ?? "medium"})`);
+
+    // Auto-start a pi session when --pi flag is passed
+    const sessionId = startPiSession({
+      cwd: config.piCwd,
+      thinkingLevel: config.piThinkingLevel,
+    });
+
+    if (sessionId) {
+      logMsg(`Auto-started pi session: ${sessionId}`);
+    }
+
+    // Note: We still want terminal connections, so don't return early
+    // Instead, fall through to start the terminal server below
+    // But skip the hook server since pi drives the session
   }
 
   // ── Hook socket mode (default) ───────────────────────────────────
@@ -500,6 +589,45 @@ const program = Effect.gen(function* () {
             projects: store.getProjectSummaries(),
           });
         }
+        break;
+      }
+
+      // ── Pi driver terminal messages ────────────────────────────────
+
+      case "pi.start": {
+        const m = msg as { cwd?: string; thinkingLevel?: string };
+        const sessionId = startPiSession({
+          cwd: m.cwd,
+          thinkingLevel: m.thinkingLevel,
+        });
+        if (sessionId) {
+          logMsg(`Pi session started via terminal: ${sessionId}`);
+        } else {
+          logMsg(`Pi session start failed — already running?`, "warn");
+        }
+        break;
+      }
+
+      case "pi.prompt": {
+        const m = msg as { text: string; images?: string[] };
+        piSessionPrompt(m.text, m.images);
+        break;
+      }
+
+      case "pi.steer": {
+        const m = msg as { text: string };
+        piSessionSteer(m.text);
+        break;
+      }
+
+      case "pi.abort": {
+        piSessionAbort();
+        break;
+      }
+
+      case "pi.set-thinking": {
+        const m = msg as { level: string };
+        piSessionSetThinking(m.level);
         break;
       }
     }

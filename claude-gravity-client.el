@@ -412,6 +412,77 @@ Dispatches to the appropriate server action based on hookEventName."
      (sessionId . ,session-id))))
 
 
+;;; ── Pi session control ─────────────────────────────────────────────
+
+(defvar claude-gravity--pi-session-id nil
+  "Session ID of the active pi session, or nil if none.")
+
+(defun claude-gravity--pi-start (&optional cwd thinking-level)
+  "Start a new pi session.
+CWD is the working directory (defaults to `default-directory').
+THINKING-LEVEL is the thinking level (off, minimal, low, medium, high, xhigh).
+Returns the session ID if started, nil otherwise."
+  (interactive (list (read-directory-name "Working directory: " default-directory)))
+  (claude-gravity--ensure-server)
+  (claude-gravity--send-to-server
+   `((type . "pi.start")
+     ,@(when cwd `((cwd . ,cwd)))
+     ,@(when thinking-level `((thinkingLevel . ,thinking-level)))))
+  (message "Starting pi session..."))
+
+(defun claude-gravity--pi-prompt (text &optional images)
+  "Send TEXT as a prompt to the active pi session.
+IMAGES is an optional list of image URLs."
+  (interactive "sPrompt: ")
+  (if (null claude-gravity--pi-session-id)
+      (message "No active pi session. Use `claude-gravity--pi-start' first.")
+    (claude-gravity--send-to-server
+     `((type . "pi.prompt")
+       (sessionId . ,claude-gravity--pi-session-id)
+       (text . ,text)
+       ,@(when images `((images . ,images)))))))
+
+(defun claude-gravity--pi-steering (text)
+  "Send TEXT as a steering message to the active pi session.
+Steering interrupts/guides the current response."
+  (interactive "sSteering: ")
+  (if (null claude-gravity--pi-session-id)
+      (message "No active pi session.")
+    (claude-gravity--send-to-server
+     `((type . "pi.steer")
+       (sessionId . ,claude-gravity--pi-session-id)
+       (text . ,text)))))
+
+(defun claude-gravity--pi-abort ()
+  "Abort the active pi session."
+  (interactive)
+  (if (null claude-gravity--pi-session-id)
+      (message "No active pi session.")
+    (claude-gravity--send-to-server
+     `((type . "pi.abort")
+       (sessionId . ,claude-gravity--pi-session-id)))))
+
+(defun claude-gravity--pi-set-thinking (level)
+  "Set the thinking level for the active pi session.
+LEVEL is one of: off, minimal, low, medium, high, xhigh."
+  (interactive (completing-read "Thinking level: "
+                                '("off" "minimal" "low" "medium" "high" "xhigh")
+                                nil t "medium"))
+  (if (null claude-gravity--pi-session-id)
+      (message "No active pi session.")
+    (claude-gravity--send-to-server
+     `((type . "pi.set-thinking")
+       (sessionId . ,claude-gravity--pi-session-id)
+       (level . ,level)))))
+
+(defun claude-gravity--pi-status ()
+  "Show the status of the active pi session."
+  (interactive)
+  (if claude-gravity--pi-session-id
+      (message "Pi session active: %s" claude-gravity--pi-session-id)
+    (message "No active pi session.")))
+
+
 ;;; ── Message receiving ───────────────────────────────────────────────
 
 (defun claude-gravity--client-filter (_proc string)

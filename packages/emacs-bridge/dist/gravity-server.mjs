@@ -7623,25 +7623,92 @@ var program = Effect_exports.gen(function* () {
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
-  if (config.piEnabled) {
-    logMsg(`Pi driver mode enabled (cwd=${config.piCwd ?? process.cwd()}, thinking=${config.piThinkingLevel ?? "medium"})`);
-    const piDriver = startPiDriver({
-      cwd: config.piCwd ?? process.cwd(),
-      thinkingLevel: config.piThinkingLevel ?? "medium",
-      onTranslation: handlePiTranslation,
+  let activePiDriver = null;
+  const startPiSession = (options) => {
+    if (activePiDriver) {
+      logMsg(`Pi session already running \u2014 use pi.abort first`, "warn");
+      return null;
+    }
+    const sessionId = generateSessionId2();
+    logMsg(`Starting pi session ${sessionId} (cwd=${options.cwd ?? process.cwd()}, thinking=${options.thinkingLevel ?? "medium"})`);
+    const driver = startPiDriver({
+      cwd: options.cwd ?? process.cwd(),
+      thinkingLevel: options.thinkingLevel ?? "medium",
+      onTranslation: (result3) => {
+        handlePiTranslation(result3);
+      },
       onLifecycle: (event, metadata) => {
         if (event === "start") {
           logMsg(`Pi session started: ${metadata?.sessionId}`);
         } else if (event === "stop") {
           logMsg(`Pi session ended: ${metadata?.sessionId}`);
+          activePiDriver = null;
         } else if (event === "error") {
           logMsg(`Pi session error`, "error");
+          activePiDriver = null;
         }
       }
     });
-    const piDriverRef = { driver: piDriver };
-    logMsg(`Pi driver ready. Terminal socket: ${config.terminalSocketPath}`);
-    return;
+    activePiDriver = driver;
+    return sessionId;
+  };
+  const piSessionPrompt = (text, images) => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session`, "warn");
+      return;
+    }
+    activePiDriver.prompt(text, images).catch((err) => {
+      logMsg(`pi.prompt error: ${err.message}`, "error");
+    });
+  };
+  const piSessionSteer = (text) => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session`, "warn");
+      return;
+    }
+    activePiDriver.steer(text);
+  };
+  const piSessionAbort = () => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session to abort`, "warn");
+      return;
+    }
+    activePiDriver.abort();
+  };
+  const piSessionSetThinking = (level) => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session`, "warn");
+      return;
+    }
+    activePiDriver.setEffortLevel(level);
+  };
+  const stopPiSession = async () => {
+    if (!activePiDriver) {
+      return;
+    }
+    await activePiDriver.stop();
+    activePiDriver = null;
+  };
+  program._startPiSession = startPiSession;
+  program._piSessionPrompt = piSessionPrompt;
+  program._piSessionSteer = piSessionSteer;
+  program._piSessionAbort = piSessionAbort;
+  program._piSessionSetThinking = piSessionSetThinking;
+  program._stopPiSession = stopPiSession;
+  const generateSessionId2 = () => {
+    const now = Date.now().toString(36);
+    const random2 = Math.random().toString(36).substring(2, 10);
+    return `pi-${now}-${random2}`;
+  };
+  if (config.piEnabled) {
+    logMsg(`Pi driver mode enabled (cwd=${config.piCwd ?? process.cwd()}, thinking=${config.piThinkingLevel ?? "medium"})`);
+    const sessionId = startPiSession({
+      cwd: config.piCwd,
+      thinkingLevel: config.piThinkingLevel
+    });
+    if (sessionId) {
+      logMsg(`Auto-started pi session: ${sessionId}`);
+    }
   }
   const handleHookMessage = async (msg, socket) => {
     const eventName = msg.event;
@@ -7911,6 +7978,39 @@ var program = Effect_exports.gen(function* () {
             projects: store.getProjectSummaries()
           });
         }
+        break;
+      }
+      // ── Pi driver terminal messages ────────────────────────────────
+      case "pi.start": {
+        const m = msg;
+        const sessionId = startPiSession({
+          cwd: m.cwd,
+          thinkingLevel: m.thinkingLevel
+        });
+        if (sessionId) {
+          logMsg(`Pi session started via terminal: ${sessionId}`);
+        } else {
+          logMsg(`Pi session start failed \u2014 already running?`, "warn");
+        }
+        break;
+      }
+      case "pi.prompt": {
+        const m = msg;
+        piSessionPrompt(m.text, m.images);
+        break;
+      }
+      case "pi.steer": {
+        const m = msg;
+        piSessionSteer(m.text);
+        break;
+      }
+      case "pi.abort": {
+        piSessionAbort();
+        break;
+      }
+      case "pi.set-thinking": {
+        const m = msg;
+        piSessionSetThinking(m.level);
         break;
       }
     }

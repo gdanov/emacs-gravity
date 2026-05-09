@@ -320,6 +320,12 @@ export type TerminalMessage =
   | { type: "request.resync" }
   | { type: "hint.session-dead"; sessionId: string }
   | { type: "poll" }
+  // Pi driver messages
+  | { type: "pi.start"; cwd?: string; thinkingLevel?: string }
+  | { type: "pi.prompt"; sessionId: string; text: string; images?: string[] }
+  | { type: "pi.steer"; sessionId: string; text: string }
+  | { type: "pi.abort"; sessionId: string }
+  | { type: "pi.set-thinking"; sessionId: string; level: string }
 
 export interface ProjectSummary {
   project: string;
