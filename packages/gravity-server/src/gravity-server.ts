@@ -2,8 +2,9 @@
 //
 // Long-running process that:
 // 1. Accepts hook events from bridge shims (hook socket)
-// 2. Manages session state (turn tree, indexes, inbox)
-// 3. Pushes view model updates to connected terminals (terminal socket)
+// 2. OR spawns pi driver as an alternative driver
+// 3. Manages session state (turn tree, indexes, inbox)
+// 4. Pushes view model updates to connected terminals (terminal socket)
 
 import { createServer } from "net";
 import type { Server, Socket } from "net";
@@ -25,6 +26,9 @@ import { Terminal, TerminalLive, type TerminalService } from "./services/termina
 import type { TerminalConnection } from "./services/terminal.js";
 import type { FsService } from "@gravity/shared";
 import type { ServerConfigData } from "./services/config.js";
+
+// Pi driver (optional)
+import { startPiDriver, type StartPiDriverOptions } from "./pi-driver/index.js";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -79,6 +83,50 @@ const program = Effect.gen(function* () {
       eventLayer,
     ));
 
+  /** Process a translation result from the pi driver. */
+  const handlePiTranslation = (result: { hookEvent: HookEventName; hookData: HookData }): void => {
+    const sessionId = result.hookData.session_id as string || "pi-session";
+    const cwd = result.hookData.cwd as string || config.piCwd || process.cwd();
+
+    logMsg(`Pi driver event: ${result.hookEvent} session=${sessionId}`);
+    const patches = runEvent(result.hookEvent, sessionId, cwd, result.hookData, null);
+
+    if (patches.length > 0) {
+      if (PULL_MODE) {
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
+      } else {
+        terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+      }
+    }
+
+    // Handle session lifecycle for overview updates
+    const hasStatusPatch = patches.some(p =>
+      p.op === "set_claude_status" || p.op === "set_status"
+    );
+    if (OVERVIEW_EVENTS.has(result.hookEvent) || hasStatusPatch) {
+      if (PULL_MODE) {
+        terminals.signalChanged("overview");
+      } else {
+        terminals.broadcast({
+          type: "overview.snapshot",
+          projects: store.getProjectSummaries(),
+        });
+      }
+    }
+
+    // Schedule purge for ended sessions
+    const session = store.get(sessionId);
+    if (session && session.status === "ended") {
+      schedulePurge(sessionId);
+    } else if (session && session.status === "active") {
+      store.cancelPurge(sessionId);
+    }
+  };
+
+  // Define helper functions before pi driver check
+
   /** Poll until a terminal with `capability` connects, or timeout. */
   const waitForCapableTerminal = (capability: string, timeoutMs: number): Promise<boolean> =>
     new Promise((resolve) => {
@@ -109,6 +157,42 @@ const program = Effect.gen(function* () {
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
+
+  // ── Pi driver mode ────────────────────────────────────────────────
+
+  if (config.piEnabled) {
+    logMsg(`Pi driver mode enabled (cwd=${config.piCwd ?? process.cwd()}, thinking=${config.piThinkingLevel ?? "medium"})`);
+
+    // Start the pi driver
+    const piDriver = startPiDriver({
+      cwd: config.piCwd ?? process.cwd(),
+      thinkingLevel: (config.piThinkingLevel as any) ?? "medium",
+      onTranslation: handlePiTranslation,
+      onLifecycle: (event, metadata) => {
+        if (event === "start") {
+          logMsg(`Pi session started: ${metadata?.sessionId}`);
+        } else if (event === "stop") {
+          logMsg(`Pi session ended: ${metadata?.sessionId}`);
+        } else if (event === "error") {
+          logMsg(`Pi session error`, "error");
+        }
+      },
+    });
+
+    // Store driver reference for cleanup
+    const piDriverRef = { driver: piDriver };
+
+    // For pi mode, we don't start the hook server since pi drives the session
+    // Instead, we start the terminal server and keep the process alive
+    // The pi driver will handle prompting via stdin/CLI wrapper
+
+    logMsg(`Pi driver ready. Terminal socket: ${config.terminalSocketPath}`);
+
+    // Wait for SIGTERM/SIGINT to shut down
+    return; // Exit the program effect early for pi mode
+  }
+
+  // ── Hook socket mode (default) ───────────────────────────────────
 
   // ── Hook message handler ─────────────────────────────────────────
 
