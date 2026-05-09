@@ -138,11 +138,12 @@ export function translatePiEvent(
         e.error,
       );
 
-      // Drain the PreToolUse + PostToolUse events we just created
-      const pending = drainPendingEvents(state);
-
-      if (pending.length > 0) {
-        return { kind: "emit", result: pending[0] };
+      // Don't drain - just access first pending event (don't clear)
+      if (state.pendingToolEvents.length > 0) {
+        const first = state.pendingToolEvents[0];
+        // Remove the first event from pending (without draining all)
+        state.pendingToolEvents.shift();
+        return { kind: "emit", result: first };
       }
 
       return { kind: "noop" };
