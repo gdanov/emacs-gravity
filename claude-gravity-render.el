@@ -627,9 +627,6 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                            'claude-gravity-prompt prompt-text)))
                     (if frozen
                         ;; Frozen turn: washer-deferred children
-                        ;; Only the heading is rendered now; children are
-                        ;; inserted on first user TAB expansion via the
-                        ;; magit washer mechanism.
                         (let* ((stop (alist-get 'stop_text turn-node))
                                (summary (if (and stop (stringp stop)
                                                  (not (string-empty-p stop)))
@@ -647,10 +644,6 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                       (propertize elapsed-str 'face 'claude-gravity-detail-label)
                                       (claude-gravity--format-turn-tokens turn-node)
                                       summary-str))
-                            ;; Attach washer — defers children rendering.
-                            ;; Captures turn-node and turn-agents by reference.  Safe
-                            ;; because frozen turns are immutable — no patches modify
-                            ;; them after freeze.
                             (let ((sec section)
                                   (tn turn-node)
                                   (ta turn-agents)
@@ -658,15 +651,12 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                               (setq washer-fn
                                     (lambda ()
                                       (if claude-gravity--rendering-p
-                                          ;; Visibility cache forced us open during render — re-hide
                                           (progn (oset sec washer washer-fn)
                                                  (oset sec hidden t))
-                                        ;; Real user expansion — render children now
                                         (claude-gravity--insert-turn-children-from-tree tn)
                                         (claude-gravity--insert-agent-completions ta)
                                         (claude-gravity--insert-stop-text tn))))
                               (oset section washer washer-fn))))
-                      ;; Active turn: full render
                       (magit-insert-section (turn turn-num (not is-current))
                         (magit-insert-heading
                           (format "%s%s%s  %s%s"
@@ -675,12 +665,9 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                   (propertize answer-suffix 'face 'claude-gravity-detail-label)
                                   (propertize elapsed-str 'face 'claude-gravity-detail-label)
                                   (claude-gravity--format-turn-tokens turn-node)))
-                        ;; Children from tree
                         (claude-gravity--insert-turn-children-from-tree turn-node)
-                        ;; Agent completions at top level
                         (claude-gravity--insert-agent-completions turn-agents))
-                      ;; Stop message: top-level section (sibling of turn)
-                      (claude-gravity--insert-stop-text turn-node))))))))
+                      (claude-gravity--insert-stop-text turn-node)))))))
         (insert "\n")))))
 
 

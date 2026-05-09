@@ -1239,6 +1239,14 @@ Only shows permission, question, and plan-review items (not idle)."
         (insert "\n")))))
 
 
+(defun claude-gravity--section-timing (name thunk)
+  "Time a render section THUNK, return (NAME . ELAPSED-MS).
+Used to instrument per-section render latency."
+  (let* ((start (float-time))
+         (result (funcall thunk))
+         (elapsed (* 1000.0 (- (float-time) start))))
+    (cons name elapsed)))
+
 (defun claude-gravity--render-session-buffer (session)
   "Render the magit-section UI for SESSION into its buffer."
   (let* ((buf (or (let ((b (plist-get session :buffer)))
@@ -1255,20 +1263,39 @@ Only shows permission, question, and plan-review items (not idle)."
                                (magit-section-ident (magit-current-section))))
               (pos-in-section (when (magit-current-section)
                                 (- (point) (oref (magit-current-section) start)))))
-          (let ((start-time (float-time)))
+          (let ((render-start (float-time))
+                (section-times nil)
+                (margin-start nil)
+                (margin-time 0))
             (erase-buffer)
             (magit-insert-section (root)
-              (claude-gravity-insert-header session)
-              (claude-gravity-insert-plan session)
-              (claude-gravity-insert-streaming-text session)
-              (claude-gravity-insert-turns session)
-              (claude-gravity--insert-session-inbox session)
-              (claude-gravity-insert-files session)
-              (claude-gravity-insert-allow-patterns session))
+              (push (claude-gravity--section-timing "header"
+                     (lambda () (claude-gravity-insert-header session)))
+                    section-times)
+              (push (claude-gravity--section-timing "plan"
+                     (lambda () (claude-gravity-insert-plan session)))
+                    section-times)
+              (push (claude-gravity--section-timing "streaming"
+                     (lambda () (claude-gravity-insert-streaming-text session)))
+                    section-times)
+              (push (claude-gravity--section-timing "turns"
+                     (lambda () (claude-gravity-insert-turns session)))
+                    section-times)
+              (push (claude-gravity--section-timing "inbox"
+                     (lambda () (claude-gravity--insert-session-inbox session)))
+                    section-times)
+              (push (claude-gravity--section-timing "files"
+                     (lambda () (claude-gravity-insert-files session)))
+                    section-times)
+              (push (claude-gravity--section-timing "patterns"
+                     (lambda () (claude-gravity-insert-allow-patterns session)))
+                    section-times)
+              (setq margin-start (float-time)))
             ;; Move ▎ indicators from inline text to left display margin
             (claude-gravity--margins-to-gutter)
             (dolist (win (get-buffer-window-list buf nil t))
               (set-window-margins win left-margin-width))
+            (setq margin-time (* 1000.0 (- (float-time) margin-start)))
             ;; Restore semantic position
             (if-let* ((ident section-ident)
                       (target (magit-get-section ident)))
@@ -1277,16 +1304,27 @@ Only shows permission, question, and plan-review items (not idle)."
                                      (oref target end))))
               (goto-char (point-min)))
             (claude-gravity--apply-visibility)
-            ;; Render timing
+            ;; Render timing — total and per-section
             (let* ((sid (plist-get session :session-id))
-                   (elapsed-ms (* 1000.0 (- (float-time) start-time))))
+                   (elapsed-ms (* 1000.0 (- (float-time) render-start)))
+                   (section-times (nreverse section-times))
+                   (total-named (cl-reduce #'+ section-times :key #'cdr)))
               (push elapsed-ms (gethash sid claude-gravity--render-times))
               (let ((times (gethash sid claude-gravity--render-times)))
                 (when (> (length times) 50)
                   (puthash sid (seq-take times 50) claude-gravity--render-times)))
+              (claude-gravity--log 'debug
+                "Section timings: %s margins=%.1fms total=%.1fms (%s)"
+                (string-join
+                 (mapcar (lambda (p) (format "%s=%.1f" (car p) (cdr p)))
+                         section-times)
+                 ", ")
+                margin-time elapsed-ms
+                (plist-get session :slug))
               (when (> elapsed-ms 50)
-                (claude-gravity--log 'warn "Slow session render: %.1fms (%s)"
-                                     elapsed-ms (plist-get session :slug)))))
+                (claude-gravity--log 'warn
+                  "Slow session render: %.1fms (%s)"
+                  elapsed-ms (plist-get session :slug))))
           (set-buffer-modified-p nil))))))
 
 

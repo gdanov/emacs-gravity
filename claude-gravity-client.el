@@ -719,13 +719,27 @@ Also links agents to their Task tools."
 
 ;;; ── Snapshot handlers ───────────────────────────────────────────────
 
+(defcustom claude-gravity--snapshot-patch-batch-size 100
+  "Number of patches to apply before checking for pending input.
+Higher values reduce yield overhead; lower values improve input responsiveness
+during large session resyncs."
+  :type 'integer
+  :group 'claude-gravity)
+
 (defun claude-gravity--handle-session-snapshot (msg)
   "Handle a session.snapshot message.
 MSG contains sessionId and full session state."
   (let* ((session-id (alist-get 'sessionId msg))
          (session-json (alist-get 'session msg))
-         (session (claude-gravity--json-session-to-plist session-json))
-         (existing (gethash session-id claude-gravity--sessions)))
+         (patches (alist-get 'patches msg))
+         (start-time (float-time))
+         (session nil)
+         (existing nil))
+    ;; Deserialize session in a quit-protected block — deserialization
+    ;; iterates all turns/steps/tools and can take 10-50ms for long sessions.
+    (let ((inhibit-quit t))
+      (setq session (claude-gravity--json-session-to-plist session-json))
+      (setq existing (gethash session-id claude-gravity--sessions)))
     ;; Preserve local-only state from existing session
     (when existing
       (let ((buf (plist-get existing :buffer))
@@ -737,6 +751,19 @@ MSG contains sessionId and full session state."
           (plist-put session :display-name display-name))
         (when ignored
           (plist-put session :ignored ignored))))
+    ;; Apply patches with quit-protection and periodic yields.
+    ;; On a long session resync this can be 100-200 patches.
+    (when patches
+      (let* ((total (length patches))
+             (inhibit-quit t)
+             (i 0))
+        (while (< i total)
+          (claude-gravity--apply-patch session (elt patches i))
+          (cl-incf i)
+          ;; Yield every N patches if there's pending input
+          (when (and (= (mod i claude-gravity--snapshot-patch-batch-size) 0)
+                     (input-pending-p))
+            (accept-process-output nil 0.005)))))
     ;; Store session
     (puthash session-id session claude-gravity--sessions)
     ;; Register tmux mapping if present
@@ -748,8 +775,10 @@ MSG contains sessionId and full session state."
     ;; Refresh UI
     (claude-gravity--schedule-refresh)
     (claude-gravity--schedule-session-refresh session-id)
-    (claude-gravity--log 'info "Session snapshot received: %s (total sessions now: %d)"
-                         session-id (hash-table-count claude-gravity--sessions))))
+    (claude-gravity--log 'info "Session snapshot received: %s (%d patches, %.1fms) (total sessions now: %d)"
+                         session-id (length patches)
+                         (* 1000.0 (- (float-time) start-time))
+                         (hash-table-count claude-gravity--sessions))))
 
 
 ;;; ── Patch application ───────────────────────────────────────────────
