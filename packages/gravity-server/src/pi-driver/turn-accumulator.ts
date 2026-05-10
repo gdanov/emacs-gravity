@@ -320,12 +320,13 @@ export function accModelSelect(state: AccState, model: string, provider: string)
 export function accAgentStart(state: AccState, promptText: string): TranslationResult[] {
   const events: TranslationResult[] = [];
 
-  // SessionStart event
+  // SessionStart event (with pi source so Emacs can identify it)
   events.push({
     hookEvent: "SessionStart",
     hookData: {
       session_id: state.sessionId,
       cwd: state.cwd,
+      source: "pi",
       model: state.modelName ?? undefined,
       effort_level: state.effortLevel,
     },

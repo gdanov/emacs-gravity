@@ -5814,7 +5814,7 @@ function stripBloatedFields(result3) {
   }
   return cleaned;
 }
-function createSession(sessionId, cwd) {
+function createSession(sessionId, cwd, source) {
   const project = cwd.split("/").pop() || cwd;
   return {
     sessionId,
@@ -5828,6 +5828,7 @@ function createSession(sessionId, cwd) {
     pid: null,
     modelName: null,
     tmuxSession: null,
+    source: source ?? null,
     startTime: Date.now(),
     lastEventTime: Date.now(),
     tokenUsage: null,
@@ -6323,11 +6324,12 @@ var lookupDisplayName = (cwd, sessionId) => Effect_exports.gen(function* () {
     Effect_exports.catch(() => Effect_exports.succeed(null))
   );
 });
-var ensureSession = (store, sessionId, cwd, tmuxSession) => {
+var ensureSession = (store, sessionId, cwd, tmuxSession, source) => {
   let session = store.get(sessionId);
   if (!session) {
     session = createSession(sessionId, cwd);
     if (tmuxSession) session.tmuxSession = tmuxSession;
+    if (source) session.source = source;
     store.set(sessionId, session);
   }
   return session;
@@ -6339,7 +6341,7 @@ var handleSessionStart = (ctx) => Effect_exports.gen(function* () {
   if (existing) {
     patches.push(...resetSession(existing));
   }
-  const s = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session);
+  const s = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session, ctx.data.source);
   const displayName = s.displayName ? void 0 : (yield* lookupDisplayName(ctx.cwd, ctx.sessionId)) ?? void 0;
   patches.push(...updateMeta(s, {
     pid: ctx.pid ?? void 0,
@@ -7240,6 +7242,7 @@ function accAgentStart(state, promptText) {
     hookData: {
       session_id: state.sessionId,
       cwd: state.cwd,
+      source: "pi",
       model: state.modelName ?? void 0,
       effort_level: state.effortLevel
     }
@@ -7631,6 +7634,12 @@ var program = Effect_exports.gen(function* () {
     }
     const sessionId = generateSessionId2();
     logMsg(`Starting pi session ${sessionId} (cwd=${options.cwd ?? process.cwd()}, thinking=${options.thinkingLevel ?? "medium"})`);
+    terminals.broadcast({
+      type: "pi.session",
+      sessionId,
+      event: "started",
+      cwd: options.cwd ?? process.cwd()
+    });
     const driver = startPiDriver({
       cwd: options.cwd ?? process.cwd(),
       thinkingLevel: options.thinkingLevel ?? "medium",
@@ -7642,9 +7651,19 @@ var program = Effect_exports.gen(function* () {
           logMsg(`Pi session started: ${metadata?.sessionId}`);
         } else if (event === "stop") {
           logMsg(`Pi session ended: ${metadata?.sessionId}`);
+          terminals.broadcast({
+            type: "pi.session",
+            sessionId: metadata?.sessionId ?? sessionId,
+            event: "stopped"
+          });
           activePiDriver = null;
         } else if (event === "error") {
           logMsg(`Pi session error`, "error");
+          terminals.broadcast({
+            type: "pi.session",
+            sessionId: metadata?.sessionId ?? sessionId,
+            event: "stopped"
+          });
           activePiDriver = null;
         }
       }

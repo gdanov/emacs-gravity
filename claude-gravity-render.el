@@ -667,7 +667,7 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                   (claude-gravity--format-turn-tokens turn-node)))
                         (claude-gravity--insert-turn-children-from-tree turn-node)
                         (claude-gravity--insert-agent-completions turn-agents))
-                      (claude-gravity--insert-stop-text turn-node)))))))
+                      (claude-gravity--insert-stop-text turn-node))))))))
         (insert "\n")))))
 
 

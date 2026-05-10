@@ -428,7 +428,7 @@ Returns the session ID if started, nil otherwise."
    `((type . "pi.start")
      ,@(when cwd `((cwd . ,cwd)))
      ,@(when thinking-level `((thinkingLevel . ,thinking-level)))))
-  (message "Starting pi session..."))
+  (claude-gravity--log 'info "Pi: starting session (cwd=%s)" (or cwd default-directory)))
 
 (defun claude-gravity--pi-prompt (text &optional images)
   "Send TEXT as a prompt to the active pi session.
@@ -436,6 +436,7 @@ IMAGES is an optional list of image URLs."
   (interactive "sPrompt: ")
   (if (null claude-gravity--pi-session-id)
       (message "No active pi session. Use `claude-gravity--pi-start' first.")
+    (claude-gravity--log 'info "Pi: sending prompt (%d chars)" (length text))
     (claude-gravity--send-to-server
      `((type . "pi.prompt")
        (sessionId . ,claude-gravity--pi-session-id)
@@ -448,6 +449,7 @@ Steering interrupts/guides the current response."
   (interactive "sSteering: ")
   (if (null claude-gravity--pi-session-id)
       (message "No active pi session.")
+    (claude-gravity--log 'info "Pi: sending steering (%d chars)" (length text))
     (claude-gravity--send-to-server
      `((type . "pi.steer")
        (sessionId . ,claude-gravity--pi-session-id)
@@ -458,6 +460,7 @@ Steering interrupts/guides the current response."
   (interactive)
   (if (null claude-gravity--pi-session-id)
       (message "No active pi session.")
+    (claude-gravity--log 'info "Pi: aborting session")
     (claude-gravity--send-to-server
      `((type . "pi.abort")
        (sessionId . ,claude-gravity--pi-session-id)))))
@@ -470,6 +473,7 @@ LEVEL is one of: off, minimal, low, medium, high, xhigh."
                                 nil t "medium"))
   (if (null claude-gravity--pi-session-id)
       (message "No active pi session.")
+    (claude-gravity--log 'info "Pi: setting thinking level to %s" level)
     (claude-gravity--send-to-server
      `((type . "pi.set-thinking")
        (sessionId . ,claude-gravity--pi-session-id)
@@ -530,6 +534,8 @@ Accumulates partial data in a buffer and processes complete newline-delimited JS
        (claude-gravity--handle-notice msg))
       ("state-changed"
        (claude-gravity--handle-state-changed msg))
+      ("pi.session"
+       (claude-gravity--handle-pi-session msg))
       (_
        (claude-gravity--log 'warn "Unknown server message type: %s" type)))))
 
@@ -596,7 +602,9 @@ SESSION-JSON is an alist from json-parse-string."
         (puthash (alist-get 'turn-number turn-node) turn-node turn-index))
       ;; Build plist
       (list :session-id session-id
-            :source "gravity-server"
+            :source (or (funcall jnil (alist-get 'source session-json)) "gravity-server")
+            :managed-by (if (equal (funcall jnil (alist-get 'source session-json)) "pi")
+                            'daemon nil)
             :cwd cwd
             :project project
             :status status
@@ -1308,6 +1316,30 @@ Also prunes orphan sessions that the server no longer knows about."
 ;; In pull mode, the server sends lightweight `state-changed` signals instead
 ;; of full payloads. Emacs stores the signal and fetches data when idle,
 ;; avoiding UI freezes when the user is doing heavy work.
+
+(defun claude-gravity--handle-pi-session (msg)
+  "Handle pi.session messages from gravity-server.
+MSG contains session state updates for pi sessions.
+Updates `claude-gravity--pi-session-id' and triggers UI refresh."
+  (let* ((session-id (alist-get 'sessionId msg))
+         (event (alist-get 'event msg))
+         (cwd (alist-get 'cwd msg)))
+    (cond
+     ((equal event "started")
+      (setq claude-gravity--pi-session-id session-id)
+      (claude-gravity--log 'info "Pi: session started: %s (cwd=%s)" session-id cwd)
+      (claude-gravity--schedule-refresh))
+     ((equal event "stopped")
+      (claude-gravity--log 'info "Pi: session stopped: %s" session-id)
+      (when (equal claude-gravity--pi-session-id session-id)
+        (setq claude-gravity--pi-session-id nil))
+      (claude-gravity--schedule-refresh))
+     ((equal event "update")
+      (claude-gravity--log 'debug "Pi: session update: %s" session-id)
+      (claude-gravity--schedule-refresh))
+     (t
+      (claude-gravity--log 'debug "Pi: session message: %s" event)))))
+
 
 (defun claude-gravity--handle-state-changed (msg)
   "Handle state-changed signal — store signal and schedule fetch when idle.

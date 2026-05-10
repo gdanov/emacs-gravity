@@ -181,7 +181,7 @@ Groups non-idle items by session and shows badge counts."
                (when (> plans 0)
                  (push (propertize (format "P%d" plans) 'face 'claude-gravity-question) badges))
                (push (concat (propertize label 'face 'claude-gravity-detail-label)
-                              " " (string-join badges " "))
+                             " " (string-join badges " "))
                      parts))))
          by-session)
         (magit-insert-section (inbox-summary)
@@ -452,38 +452,38 @@ the washer re-attaches itself so it fires on real user TAB."
   (let* ((indent (claude-gravity--indent))
          (project-dir key))
     (magit-insert-section section (configuration key t)
-      (magit-insert-heading
-        (format "%s%s"
-                indent
-                (propertize "Configuration"
-                            'face 'claude-gravity-section-heading)))
-      (let ((sec section)
-            (washer-fn nil))
-        (setq washer-fn
-              (lambda ()
-                (if claude-gravity--rendering-p
-                    ;; Magit's visibility cache forced us open during render.
-                    ;; Re-attach washer and hide so first TAB expands with content.
-                    (progn (oset sec washer washer-fn)
-                           (oset sec hidden t))
-                  (let* ((scoped (claude-gravity--discover-project-capabilities-by-scope project-dir))
-                         (project-data (alist-get 'project scoped))
-                         (user-data (alist-get 'user scoped))
-                         (plugins (alist-get 'plugins scoped)))
-                    (claude-gravity--insert-scope-section "Project" project-data)
-                    (claude-gravity--insert-scope-section "User" user-data)
-                    (when plugins
-                      (let ((indent (claude-gravity--indent)))
-                        (magit-insert-section (config-plugins "Plugins" t)
-                          (magit-insert-heading
-                            (format "%s%s (%d)  %s"
-                                    indent
-                                    (propertize "Plugins" 'face 'claude-gravity-section-heading)
-                                    (length plugins)
-                                    (propertize "read-only" 'face 'claude-gravity-detail-label)))
-                          (dolist (plugin plugins)
-                            (claude-gravity--insert-plugin-capabilities plugin)))))))))
-        (oset section washer washer-fn)))))
+													(magit-insert-heading
+														(format "%s%s"
+																		indent
+																		(propertize "Configuration"
+																								'face 'claude-gravity-section-heading)))
+													(let ((sec section)
+																(washer-fn nil))
+														(setq washer-fn
+																	(lambda ()
+																		(if claude-gravity--rendering-p
+																				;; Magit's visibility cache forced us open during render.
+																				;; Re-attach washer and hide so first TAB expands with content.
+																				(progn (oset sec washer washer-fn)
+																							 (oset sec hidden t))
+																			(let* ((scoped (claude-gravity--discover-project-capabilities-by-scope project-dir))
+																						 (project-data (alist-get 'project scoped))
+																						 (user-data (alist-get 'user scoped))
+																						 (plugins (alist-get 'plugins scoped)))
+																				(claude-gravity--insert-scope-section "Project" project-data)
+																				(claude-gravity--insert-scope-section "User" user-data)
+																				(when plugins
+																					(let ((indent (claude-gravity--indent)))
+																						(magit-insert-section (config-plugins "Plugins" t)
+																							(magit-insert-heading
+																								(format "%s%s (%d)  %s"
+																												indent
+																												(propertize "Plugins" 'face 'claude-gravity-section-heading)
+																												(length plugins)
+																												(propertize "read-only" 'face 'claude-gravity-detail-label)))
+																							(dolist (plugin plugins)
+																								(claude-gravity--insert-plugin-capabilities plugin)))))))))
+														(oset section washer washer-fn)))))
 
 (defun claude-gravity--insert-configuration-full (project-dir)
   "Insert full Configuration section with all sub-trees for PROJECT-DIR."
@@ -698,16 +698,16 @@ Children populated lazily on first expansion via magit's washer mechanism.
 If magit's visibility cache forces the section open during rendering,
 the washer re-attaches itself so it fires on real user TAB."
   (magit-insert-section section (beads-status project-dir t)
-    (magit-insert-heading heading)
-    (let ((sec section)
-          (washer-fn nil))
-      (setq washer-fn
-            (lambda ()
-              (if claude-gravity--rendering-p
-                  (progn (oset sec washer washer-fn)
-                         (oset sec hidden t))
-                (claude-gravity--insert-beads-issue-list cached indent))))
-      (oset section washer washer-fn))))
+												(magit-insert-heading heading)
+												(let ((sec section)
+															(washer-fn nil))
+													(setq washer-fn
+																(lambda ()
+																	(if claude-gravity--rendering-p
+																			(progn (oset sec washer washer-fn)
+																						 (oset sec hidden t))
+																		(claude-gravity--insert-beads-issue-list cached indent))))
+													(oset section washer washer-fn))))
 
 (defun claude-gravity--insert-beads-issue-list (cached indent)
   "Insert sorted issue list from CACHED beads data with INDENT prefix.
@@ -791,102 +791,102 @@ PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
           (let ((start-time (float-time)))
             (erase-buffer)
             (magit-insert-section (root)
-            (let* ((total-count (hash-table-count claude-gravity--sessions))
-                   (width (max 40 (- (or (window-width) 80) 2)))
-                   (top-line (make-string width ?━)))
-              (magit-insert-section (header)
-                (insert (propertize top-line 'face 'claude-gravity-divider) "\n")
-                (magit-insert-heading
-                  (format "%s%s"
-                          (propertize "Structured Claude Sessions" 'face 'claude-gravity-header-title)
-                          (propertize (format "  ◆ %d sessions" total-count) 'face 'claude-gravity-detail-label)))
-                (insert (propertize top-line 'face 'claude-gravity-divider) "\n\n")))
-            ;; Inbox: summary strip at top
-            (claude-gravity--insert-inbox-summary)
-            ;; Server notice banner (hooks-silence warning, etc.)
-            (when claude-gravity--notice-text
-              (magit-insert-section (notice)
-                (insert (propertize (concat "  ⚠ " claude-gravity--notice-text "\n")
-                                   'face 'claude-gravity-warning-face))
-                (insert "\n")))
-            (if (= (hash-table-count claude-gravity--sessions) 0)
-                (insert (propertize "  No sessions.\n" 'face 'claude-gravity-detail-label))  ;; static text, not a section
-              (maphash
-               (lambda (proj-name sessions)
-                 (magit-insert-section (project proj-name t)
-                   (magit-insert-heading
-                     (format "%s (%d)" proj-name (length sessions)))
-                   (dolist (session (sort sessions
-                                         (lambda (a b)
-                                           (time-less-p (plist-get b :start-time)
-                                                        (plist-get a :start-time)))))
-                     (let* ((sid (plist-get session :session-id))
-                            (label (claude-gravity--session-label session))
-                            (status (plist-get session :status))
-                            (claude-st (plist-get session :claude-status))
-                            (n-tools (claude-gravity--tree-total-tool-count session))
-                            (indicator (if (eq status 'active)
-                                           (propertize "●" 'face 'claude-gravity-tool-running)
-                                         (propertize "○" 'face 'claude-gravity-session-ended)))
-                            (last-event (plist-get session :last-event-time))
-                            (idle-time (when (and last-event (eq claude-st 'idle))
-                                         (float-time (time-subtract (current-time) last-event))))
-                            (idle-str (when idle-time
-                                        (cond
-                                         ((< idle-time 60) "")
-                                         ((< idle-time 3600) (format " %dm" (truncate (/ idle-time 60))))
-                                         (t (format " %dh" (truncate (/ idle-time 3600)))))))
-                            (status-label
-                             (when (eq status 'active)
-                               (if (eq claude-st 'responding)
-                                   (propertize "responding" 'face 'claude-gravity-status-responding)
-                                 (propertize (concat "idle" (or idle-str ""))
-                                             'face 'claude-gravity-status-idle))))
-                            (perm-mode (plist-get session :permission-mode))
-                            (mode-badge
-                             (if perm-mode
-                                 (propertize (format " [%s]" perm-mode)
-                                             'face 'claude-gravity-detail-label)
-                               "")))
-                        (let* ((tmux-name (gethash sid claude-gravity--tmux-sessions))
-                               (tmux-badge (if tmux-name
-                                               (propertize (format " [%s]" tmux-name)
-                                                           'face 'claude-gravity-detail-label)
-                                             ""))
-                               (branch-str (or (claude-gravity--branch-or-cwd session) ""))
-                               (source-str (or (claude-gravity--source-indicator session) ""))
-                               (uuid-prefix (propertize
-                                            (format " %s" (claude-gravity--short-id sid))
-                                            'face 'claude-gravity-detail-label))
-                               (inbox-badge (claude-gravity--inbox-badges sid))
-                               (ignored-badge
-                                (if (plist-get session :ignored)
-                                    (propertize " [ignored]"
-                                                'face 'claude-gravity-detail-label)
-                                  "")))
-                          (magit-insert-section (session-entry sid)
-                            (magit-insert-heading
-                              (format "%s%s %s %s %s%s %s  %s%s%s  [%d tools]%s"
-                                      (claude-gravity--indent)
-                                      indicator branch-str source-str label
-                                      uuid-prefix tmux-badge
-                                      (or status-label "")
-                                      mode-badge ignored-badge
-                                      n-tools inbox-badge))
-                           ;; Inline inbox items for this session
-                           (let ((session-items
-                                  (cl-remove-if-not
-                                   (lambda (item)
-                                     (equal (alist-get 'session-id item) sid))
-                                   claude-gravity--inbox)))
-                             (dolist (item session-items)
-                               (claude-gravity--insert-inbox-item item)))))))
-                   ;; Project capabilities (skills, agents, commands) — after sessions
-                   (let ((proj-cwd (plist-get (car sessions) :cwd)))
-                     (when proj-cwd
-                       (claude-gravity--insert-project-capabilities proj-cwd)
-                       (claude-gravity--insert-beads-status proj-cwd)))))
-               projects)))
+							(let* ((total-count (hash-table-count claude-gravity--sessions))
+										 (width (max 40 (- (or (window-width) 80) 2)))
+										 (top-line (make-string width ?━)))
+								(magit-insert-section (header)
+									(insert (propertize top-line 'face 'claude-gravity-divider) "\n")
+									(magit-insert-heading
+										(format "%s%s"
+														(propertize "Structured Claude Sessions" 'face 'claude-gravity-header-title)
+														(propertize (format "  ◆ %d sessions" total-count) 'face 'claude-gravity-detail-label)))
+									(insert (propertize top-line 'face 'claude-gravity-divider) "\n\n")))
+							;; Inbox: summary strip at top
+							(claude-gravity--insert-inbox-summary)
+							;; Server notice banner (hooks-silence warning, etc.)
+							(when claude-gravity--notice-text
+								(magit-insert-section (notice)
+									(insert (propertize (concat "  ⚠ " claude-gravity--notice-text "\n")
+																			'face 'claude-gravity-warning-face))
+									(insert "\n")))
+							(if (= (hash-table-count claude-gravity--sessions) 0)
+									(insert (propertize "  No sessions.\n" 'face 'claude-gravity-detail-label))  ;; static text, not a section
+								(maphash
+								 (lambda (proj-name sessions)
+									 (magit-insert-section (project proj-name t)
+										 (magit-insert-heading
+											 (format "%s (%d)" proj-name (length sessions)))
+										 (dolist (session (sort sessions
+																						(lambda (a b)
+																							(time-less-p (plist-get b :start-time)
+																													 (plist-get a :start-time)))))
+											 (let* ((sid (plist-get session :session-id))
+															(label (claude-gravity--session-label session))
+															(status (plist-get session :status))
+															(claude-st (plist-get session :claude-status))
+															(n-tools (claude-gravity--tree-total-tool-count session))
+															(indicator (if (eq status 'active)
+																						 (propertize "●" 'face 'claude-gravity-tool-running)
+																					 (propertize "○" 'face 'claude-gravity-session-ended)))
+															(last-event (plist-get session :last-event-time))
+															(idle-time (when (and last-event (eq claude-st 'idle))
+																					 (float-time (time-subtract (current-time) last-event))))
+															(idle-str (when idle-time
+																					(cond
+																					 ((< idle-time 60) "")
+																					 ((< idle-time 3600) (format " %dm" (truncate (/ idle-time 60))))
+																					 (t (format " %dh" (truncate (/ idle-time 3600)))))))
+															(status-label
+															 (when (eq status 'active)
+																 (if (eq claude-st 'responding)
+																		 (propertize "responding" 'face 'claude-gravity-status-responding)
+																	 (propertize (concat "idle" (or idle-str ""))
+																							 'face 'claude-gravity-status-idle))))
+															(perm-mode (plist-get session :permission-mode))
+															(mode-badge
+															 (if perm-mode
+																	 (propertize (format " [%s]" perm-mode)
+																							 'face 'claude-gravity-detail-label)
+																 "")))
+                         (let* ((tmux-name (gethash sid claude-gravity--tmux-sessions))
+																(tmux-badge (if tmux-name
+																								(propertize (format " [%s]" tmux-name)
+																														'face 'claude-gravity-detail-label)
+																							""))
+																(branch-str (or (claude-gravity--branch-or-cwd session) ""))
+																(source-str (or (claude-gravity--source-indicator session) ""))
+																(uuid-prefix (propertize
+																							(format " %s" (claude-gravity--short-id sid))
+																							'face 'claude-gravity-detail-label))
+																(inbox-badge (claude-gravity--inbox-badges sid))
+																(ignored-badge
+                                 (if (plist-get session :ignored)
+                                     (propertize " [ignored]"
+                                                 'face 'claude-gravity-detail-label)
+                                   "")))
+                           (magit-insert-section (session-entry sid)
+                             (magit-insert-heading
+                               (format "%s%s %s %s %s%s %s  %s%s%s  [%d tools]%s"
+                                       (claude-gravity--indent)
+                                       indicator branch-str source-str label
+                                       uuid-prefix tmux-badge
+                                       (or status-label "")
+                                       mode-badge ignored-badge
+                                       n-tools inbox-badge))
+														 ;; Inline inbox items for this session
+														 (let ((session-items
+																		(cl-remove-if-not
+																		 (lambda (item)
+																			 (equal (alist-get 'session-id item) sid))
+																		 claude-gravity--inbox)))
+															 (dolist (item session-items)
+																 (claude-gravity--insert-inbox-item item)))))))
+										 ;; Project capabilities (skills, agents, commands) — after sessions
+										 (let ((proj-cwd (plist-get (car sessions) :cwd)))
+											 (when proj-cwd
+												 (claude-gravity--insert-project-capabilities proj-cwd)
+												 (claude-gravity--insert-beads-status proj-cwd)))))
+								 projects)))
             ;; Restore semantic position
             (if-let* ((ident section-ident)
                       (target (magit-get-section ident)))
@@ -913,7 +913,7 @@ PROJECT-DIR, CACHED data, INDENT prefix, and HEADING string provided by caller."
          (project (or (alist-get 'project item) "?"))
          (summary (truncate-string-to-width
                    (replace-regexp-in-string "[\n\r\t]+" " "
-                     (or (alist-get 'summary item) ""))
+																						 (or (alist-get 'summary item) ""))
                    60))
          (timestamp (alist-get 'timestamp item))
          (icon (pcase type
@@ -1270,25 +1270,25 @@ Used to instrument per-section render latency."
             (erase-buffer)
             (magit-insert-section (root)
               (push (claude-gravity--section-timing "header"
-                     (lambda () (claude-gravity-insert-header session)))
+																										(lambda () (claude-gravity-insert-header session)))
                     section-times)
               (push (claude-gravity--section-timing "plan"
-                     (lambda () (claude-gravity-insert-plan session)))
+																										(lambda () (claude-gravity-insert-plan session)))
                     section-times)
               (push (claude-gravity--section-timing "streaming"
-                     (lambda () (claude-gravity-insert-streaming-text session)))
+																										(lambda () (claude-gravity-insert-streaming-text session)))
                     section-times)
               (push (claude-gravity--section-timing "turns"
-                     (lambda () (claude-gravity-insert-turns session)))
+																										(lambda () (claude-gravity-insert-turns session)))
                     section-times)
               (push (claude-gravity--section-timing "inbox"
-                     (lambda () (claude-gravity--insert-session-inbox session)))
+																										(lambda () (claude-gravity--insert-session-inbox session)))
                     section-times)
               (push (claude-gravity--section-timing "files"
-                     (lambda () (claude-gravity-insert-files session)))
+																										(lambda () (claude-gravity-insert-files session)))
                     section-times)
               (push (claude-gravity--section-timing "patterns"
-                     (lambda () (claude-gravity-insert-allow-patterns session)))
+																										(lambda () (claude-gravity-insert-allow-patterns session)))
                     section-times)
               (setq margin-start (float-time)))
             ;; Move ▎ indicators from inline text to left display margin
@@ -1314,17 +1314,17 @@ Used to instrument per-section render latency."
                 (when (> (length times) 50)
                   (puthash sid (seq-take times 50) claude-gravity--render-times)))
               (claude-gravity--log 'debug
-                "Section timings: %s margins=%.1fms total=%.1fms (%s)"
-                (string-join
-                 (mapcar (lambda (p) (format "%s=%.1f" (car p) (cdr p)))
-                         section-times)
-                 ", ")
-                margin-time elapsed-ms
-                (plist-get session :slug))
+																	 "Section timings: %s margins=%.1fms total=%.1fms (%s)"
+																	 (string-join
+																		(mapcar (lambda (p) (format "%s=%.1f" (car p) (cdr p)))
+																						section-times)
+																		", ")
+																	 margin-time elapsed-ms
+																	 (plist-get session :slug))
               (when (> elapsed-ms 50)
                 (claude-gravity--log 'warn
-                  "Slow session render: %.1fms (%s)"
-                  elapsed-ms (plist-get session :slug))))
+																		 "Slow session render: %.1fms (%s)"
+																		 elapsed-ms (plist-get session :slug)))))
           (set-buffer-modified-p nil))))))
 
 
@@ -1366,12 +1366,12 @@ Used to instrument per-section render latency."
 (define-key claude-gravity-mode-map (kbd "TAB") 'magit-section-toggle)
 
 (define-key claude-gravity-mode-map (kbd "<return>")
-  (lambda ()
-    "Visit or toggle section, but only when on a valid section."
-    (interactive)
-    (let ((section (magit-current-section)))
-      (when section
-        (claude-gravity-visit-or-toggle)))))
+						(lambda ()
+							"Visit or toggle section, but only when on a valid section."
+							(interactive)
+							(let ((section (magit-current-section)))
+								(when section
+									(claude-gravity-visit-or-toggle)))))
 
 (define-key claude-gravity-mode-map (kbd "+") 'claude-gravity-config-new)
 
@@ -1534,12 +1534,12 @@ Returns (LINE1 . LINE2-OR-NIL) via `claude-gravity--layout-header-segments'."
                         (propertize "responding" 'face 'claude-gravity-status-responding))
                        (t
                         (propertize (concat "idle" (or idle-str ""))
-                                   'face 'claude-gravity-status-idle))))
-          (slug (propertize (claude-gravity--session-label session)
-                            'face 'claude-gravity-slug))
-          (branch-str (claude-gravity--branch-or-cwd session))
-          (source-str (claude-gravity--source-indicator session))
-          (tool-count (claude-gravity--tree-total-tool-count session))
+																		'face 'claude-gravity-status-idle))))
+         (slug (propertize (claude-gravity--session-label session)
+                           'face 'claude-gravity-slug))
+         (branch-str (claude-gravity--branch-or-cwd session))
+         (source-str (claude-gravity--source-indicator session))
+         (tool-count (claude-gravity--tree-total-tool-count session))
          (elapsed (claude-gravity--session-total-elapsed session))
          (usage (plist-get session :token-usage))
          (in-tokens (when usage
@@ -2009,6 +2009,15 @@ prompts to confirm the directory before starting."
      :inapt-if-not claude-gravity--current-session-tmux-p)
     ("S c" "Reset/clear" claude-gravity-reset-session
      :inapt-if-not claude-gravity--current-session-tmux-p)]
+   ["Pi Sessions"
+    ("P s" "Start pi session" claude-gravity--pi-start)
+    ("P p" "Send prompt" claude-gravity--pi-prompt
+     :inapt-if-not (lambda () (null claude-gravity--pi-session-id)))
+    ("P t" "Set thinking level" claude-gravity--pi-set-thinking
+     :inapt-if-not (lambda () (null claude-gravity--pi-session-id)))
+    ("P a" "Abort" claude-gravity--pi-abort
+     :inapt-if-not (lambda () (null claude-gravity--pi-session-id)))
+    ("P ?" "Status" claude-gravity--pi-status)]
    ["Permissions"
     ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
     ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]
@@ -2161,12 +2170,12 @@ Disables when you manually scroll or navigate."
   "Disable follow mode when user scrolls or navigates manually."
   (when (and claude-gravity--follow-mode
              (memq this-command '(scroll-up-command scroll-down-command
-                                  scroll-up scroll-down
-                                  beginning-of-buffer end-of-buffer
-                                  previous-line next-line
-                                  magit-section-forward magit-section-backward
-                                  claude-gravity--section-forward claude-gravity--section-backward
-                                  magit-section-toggle)))
+																										scroll-up scroll-down
+																										beginning-of-buffer end-of-buffer
+																										previous-line next-line
+																										magit-section-forward magit-section-backward
+																										claude-gravity--section-forward claude-gravity--section-backward
+																										magit-section-toggle)))
     (setq claude-gravity--follow-mode nil)
     (remove-hook 'post-command-hook #'claude-gravity--follow-detect-manual t)
     (force-mode-line-update)
@@ -2845,7 +2854,7 @@ Avoids full buffer rebuild for streaming text updates."
               (inhibit-redisplay t))
           ;; Find the streaming-text section in the existing magit section tree
           (let ((section (and magit-root-section
-                             (magit-get-section '((streaming-text))))))
+															(magit-get-section '((streaming-text))))))
             (cond
              ;; Section exists and we have new text — replace contents
              ((and section (plist-get session :streaming-text))
@@ -2878,9 +2887,9 @@ Avoids full buffer rebuild for streaming text updates."
                            (me (match-end 0))
                            (face (get-text-property ms 'face)))
                       (put-text-property ms me 'display
-                        `((margin left-margin)
-                          ,(propertize "▎" 'face
-                                       (or face 'claude-gravity-margin-indicator)))))))))
+																				 `((margin left-margin)
+																					 ,(propertize "▎" 'face
+																												(or face 'claude-gravity-margin-indicator)))))))))
              ;; Section exists but streaming text cleared — need full refresh
              ((and section (not (plist-get session :streaming-text)))
               (claude-gravity--schedule-session-refresh

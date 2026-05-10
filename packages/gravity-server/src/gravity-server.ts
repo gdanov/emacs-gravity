@@ -173,6 +173,15 @@ const program = Effect.gen(function* () {
     const sessionId = generateSessionId();
     logMsg(`Starting pi session ${sessionId} (cwd=${options.cwd ?? process.cwd()}, thinking=${options.thinkingLevel ?? "medium"})`);
 
+    // Broadcast pi.session.started for Emacs
+    terminals.broadcast({
+      type: "pi.session",
+      sessionId,
+      event: "started",
+      cwd: options.cwd ?? process.cwd(),
+    } as ServerMessage);
+
+
     const driver = startPiDriver({
       cwd: options.cwd ?? process.cwd(),
       thinkingLevel: (options.thinkingLevel as any) ?? "medium",
@@ -185,9 +194,21 @@ const program = Effect.gen(function* () {
           logMsg(`Pi session started: ${metadata?.sessionId}`);
         } else if (event === "stop") {
           logMsg(`Pi session ended: ${metadata?.sessionId}`);
+          // Broadcast pi.session.stopped for Emacs
+          terminals.broadcast({
+            type: "pi.session",
+            sessionId: metadata?.sessionId ?? sessionId,
+            event: "stopped",
+          } as ServerMessage);
           activePiDriver = null;
         } else if (event === "error") {
           logMsg(`Pi session error`, "error");
+          // Broadcast pi.session.stopped on error too
+          terminals.broadcast({
+            type: "pi.session",
+            sessionId: metadata?.sessionId ?? sessionId,
+            event: "stopped",
+          } as ServerMessage);
           activePiDriver = null;
         }
       },

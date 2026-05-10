@@ -109,6 +109,7 @@ export interface Session {
   pid: number | null;
   modelName: string | null;
   tmuxSession: string | null;
+  source: string | null;  // "claude-code", "pi", "opencode", etc.
   startTime: number;
   lastEventTime: number;
   tokenUsage: TokenUsage | null;

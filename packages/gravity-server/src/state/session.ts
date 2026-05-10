@@ -40,7 +40,7 @@ function stripBloatedFields(result: unknown): unknown {
 // ── Factory ──────────────────────────────────────────────────────────
 
 /** Create a new empty session. */
-export function createSession(sessionId: string, cwd: string): Session {
+export function createSession(sessionId: string, cwd: string, source?: string): Session {
   const project = cwd.split("/").pop() || cwd;
   return {
     sessionId,
@@ -54,6 +54,7 @@ export function createSession(sessionId: string, cwd: string): Session {
     pid: null,
     modelName: null,
     tmuxSession: null,
+    source: source ?? null,
     startTime: Date.now(),
     lastEventTime: Date.now(),
     tokenUsage: null,

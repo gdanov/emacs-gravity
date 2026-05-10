@@ -138,11 +138,13 @@ const ensureSession = (
   sessionId: string,
   cwd: string,
   tmuxSession?: string,
+  source?: string,
 ): Session => {
   let session = store.get(sessionId);
   if (!session) {
     session = createSession(sessionId, cwd);
     if (tmuxSession) session.tmuxSession = tmuxSession;
+    if (source) session.source = source;
     store.set(sessionId, session);
   }
   return session;
@@ -167,7 +169,7 @@ const handleSessionStart = (ctx: EventContext) =>
     if (existing) {
       patches.push(...resetSession(existing));
     }
-    const s = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session);
+    const s = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session, ctx.data.source);
     const displayName = s.displayName ? undefined : (yield* lookupDisplayName(ctx.cwd, ctx.sessionId)) ?? undefined;
     patches.push(...updateMeta(s, {
       pid: ctx.pid ?? undefined,
