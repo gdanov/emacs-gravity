@@ -944,7 +944,7 @@ const program = Effect.gen(function* () {
             type: "pi.session",
             sessionId: "",
             event: "rejected",
-            reason: "Pi session already running. Abort it first (p a).",
+            reason: "Pi session already running. Stop it first (S k) or use claude-gravity--pi-start-replacing.",
           } as ServerMessage);
         }
         break;

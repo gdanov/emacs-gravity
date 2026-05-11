@@ -421,14 +421,62 @@ Dispatches to the appropriate server action based on hookEventName."
   "Start a new pi session.
 CWD is the working directory (defaults to `default-directory').
 THINKING-LEVEL is the thinking level (off, minimal, low, medium, high, xhigh).
-Returns the session ID if started, nil otherwise."
+
+If a pi session is already running (gravity-server enforces a singleton),
+prompts whether to stop it and start a new one in CWD. Picking no aborts
+the start. Returns nil — the new session id arrives asynchronously via
+the pi.session \"started\" broadcast and is stored in
+`claude-gravity--pi-session-id'."
   (interactive (list (read-directory-name "Working directory: " default-directory)))
   (claude-gravity--ensure-server)
+  (cond
+   ;; No singleton conflict — start directly.
+   ((null claude-gravity--pi-session-id)
+    (claude-gravity--pi-start-send cwd thinking-level))
+   ;; Singleton busy. Offer to replace.
+   ((let* ((existing-id claude-gravity--pi-session-id)
+           (existing (gethash existing-id claude-gravity--sessions))
+           (existing-cwd (and existing (plist-get existing :cwd)))
+           (existing-project (and existing (plist-get existing :project))))
+      (yes-or-no-p
+       (format "Pi already running%s. Stop it and start new in %s? "
+               (cond (existing-project (format " in %s" existing-project))
+                     (existing-cwd (format " in %s" existing-cwd))
+                     (t ""))
+               (file-name-nondirectory
+                (directory-file-name (or cwd default-directory))))))
+    ;; Stop the existing pi process; the new start fires after pi.session
+    ;; "stopped" arrives (which clears claude-gravity--pi-session-id).
+    (claude-gravity--pi-start-after-stop cwd thinking-level))
+   (t
+    (message "Pi: start cancelled (existing session left alone)"))))
+
+(defun claude-gravity--pi-start-send (cwd thinking-level)
+  "Internal: send the pi.start message without any singleton checks."
   (claude-gravity--send-to-server
    `((type . "pi.start")
      ,@(when cwd `((cwd . ,cwd)))
      ,@(when thinking-level `((thinkingLevel . ,thinking-level)))))
   (claude-gravity--log 'info "Pi: starting session (cwd=%s)" (or cwd default-directory)))
+
+(defun claude-gravity--pi-start-after-stop (cwd thinking-level)
+  "Internal: send pi.stop, then pi.start once the singleton is freed.
+Waits up to 5s for `claude-gravity--pi-session-id' to clear before
+issuing pi.start. Falls back to a direct start if the clear doesn't
+arrive — the server's singleton guard will reject it cleanly."
+  (claude-gravity--log 'info "Pi: stopping current session before starting in %s"
+                       (or cwd default-directory))
+  (claude-gravity--pi-stop)
+  ;; Poll briefly for the singleton to clear.
+  (let ((deadline (time-add (current-time) 5.0)))
+    (while (and claude-gravity--pi-session-id
+                (time-less-p (current-time) deadline))
+      (sleep-for 0.1))
+    (if claude-gravity--pi-session-id
+        (claude-gravity--log 'warn
+                             "Pi: previous session did not stop within 5s; attempting start anyway")
+      (claude-gravity--log 'info "Pi: previous session stopped, proceeding"))
+    (claude-gravity--pi-start-send cwd thinking-level)))
 
 (defun claude-gravity--pi-prompt (text &optional images)
   "Send TEXT as a prompt to the active pi session.
