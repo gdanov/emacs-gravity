@@ -603,8 +603,6 @@ SESSION-JSON is an alist from json-parse-string."
       ;; Build plist
       (list :session-id session-id
             :source (or (funcall jnil (alist-get 'source session-json)) "gravity-server")
-            :managed-by (if (equal (funcall jnil (alist-get 'source session-json)) "pi")
-                            'daemon nil)
             :cwd cwd
             :project project
             :status status

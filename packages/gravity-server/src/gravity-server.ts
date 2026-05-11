@@ -286,15 +286,12 @@ const program = Effect.gen(function* () {
     activePiDriver = null;
   };
 
-  // ── Terminal message handlers for pi ──────────────────────────────
-
-  // Expose pi session functions to terminal message handler
-  (program as any)._startPiSession = startPiSession;
-  (program as any)._piSessionPrompt = piSessionPrompt;
-  (program as any)._piSessionSteer = piSessionSteer;
-  (program as any)._piSessionAbort = piSessionAbort;
-  (program as any)._piSessionSetThinking = piSessionSetThinking;
-  (program as any)._stopPiSession = stopPiSession;
+  // ── Pi session control ────────────────────────────────────────────
+  //
+  // The terminal message handler below references startPiSession,
+  // piSessionPrompt, etc. directly by their closure-captured names — no
+  // dispatch table needed. (An older draft stashed these on `program` via
+  // `as any` casts; that indirection was unused and has been removed.)
 
   // Generate session ID (needed for pi mode)
   const generateSessionId = (): string => {

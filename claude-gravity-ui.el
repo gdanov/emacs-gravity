@@ -109,7 +109,10 @@ Shows bridge type: Pi (pi-agent), CC (Claude Code), CCT (Claude Code+tmux), OC (
         (sid (plist-get session :session-id))
         (managed-by (plist-get session :managed-by)))
     (cond
-     ;; Pi-agent bridge (daemon-managed sessions)
+     ;; Pi-agent bridge — server stamps :source "pi" on the session.
+     ((equal source "pi")
+      (propertize "[Pi]" 'face 'claude-gravity-detail-label))
+     ;; Agent SDK daemon (on hold — see claude-gravity-daemon.el).
      ((eq managed-by 'daemon)
       (propertize "[Pi]" 'face 'claude-gravity-detail-label))
      ;; OpenCode
