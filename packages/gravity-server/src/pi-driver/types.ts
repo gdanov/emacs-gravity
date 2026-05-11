@@ -52,16 +52,16 @@ export interface TurnEndEvent extends PiBaseEvent {
   turn_id: string;
 }
 
-/** Agent started (after user prompt submitted). */
+/**
+ * Pi 0.74 sends a bare `{type: "agent_start"}`. Older drafts of this type
+ * declared a `message` field — pi never actually emitted that shape; the
+ * user prompt arrives in a subsequent `message_start` with role "user".
+ */
 export interface AgentStartEvent extends PiBaseEvent {
   type: "agent_start";
-  message: {
-    role: "user";
-    content: Array<{ type: "text"; text: string } | { type: "input_image"; source: { type: "url"; url: string } }>;
-  };
 }
 
-/** Agent finished (all turns complete). */
+/** Agent finished one prompt cycle (not the whole session). */
 export interface AgentEndEvent extends PiBaseEvent {
   type: "agent_end";
   result: {
@@ -76,22 +76,57 @@ export interface AgentEndEvent extends PiBaseEvent {
   };
 }
 
-/** Tool execution started. */
+/**
+ * Tool execution started.
+ *
+ * Pi 0.74 emits camelCase fields (`toolCallId`, `toolName`, `args`). The
+ * snake_case variants are kept as optional for defensive parsing if pi
+ * ever changes back — translator code reads both.
+ *
+ * `needs_response` is a forward-compat placeholder; pi 0.74 does not emit
+ * it and the adapter does not currently consume it. See design/pi-adapter.md
+ * "Feature Parity with Claude Code".
+ */
 export interface ToolExecutionStartEvent extends PiBaseEvent {
   type: "tool_execution_start";
-  tool_call_id: string;
-  tool_name: string;
-  tool_input: Record<string, unknown>;
-  needs_response?: boolean; // true for permission/request tools
+  toolCallId?: string;
+  toolName?: string;
+  args?: Record<string, unknown>;
+  // Legacy / defensive
+  tool_call_id?: string;
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  needs_response?: boolean;
 }
 
-/** Tool execution completed. */
+/**
+ * Tool execution completed.
+ *
+ * Pi 0.74 emits `{toolCallId, toolName, result, isError, error?}`. The
+ * snake_case variants are kept as optional for defensive parsing.
+ */
 export interface ToolExecutionEndEvent extends PiBaseEvent {
   type: "tool_execution_end";
-  tool_call_id: string;
-  tool_name: string;
-  tool_result: unknown;
+  toolCallId?: string;
+  toolName?: string;
+  result?: unknown;
+  isError?: boolean;
   error?: string;
+  // Legacy / defensive
+  tool_call_id?: string;
+  tool_name?: string;
+  tool_result?: unknown;
+}
+
+/**
+ * Pi emits this between `tool_execution_start` and `tool_execution_end`
+ * for streaming partial results. The adapter ignores it currently.
+ */
+export interface ToolExecutionUpdateEvent extends PiBaseEvent {
+  type: "tool_execution_update";
+  toolCallId?: string;
+  // pi may attach partial result fragments here — shape varies, kept loose.
+  partial?: unknown;
 }
 
 /** Model selected (logged on startup). */
@@ -101,10 +136,44 @@ export interface ModelSelectEvent extends PiBaseEvent {
   provider: string;
 }
 
-/** Message update (text or thinking delta, or status change). */
+/**
+ * Pi 0.74 emits `message_start` as a full snapshot of one message. For
+ * `role: "user"` it carries the prompt text. For `role: "assistant"` the
+ * text streams in via `message_update` events and this snapshot is a
+ * no-op for our purposes.
+ */
+export interface MessageStartEvent extends PiBaseEvent {
+  type: "message_start";
+  message?: {
+    role?: "user" | "assistant" | "system";
+    content?: Array<{ type?: string; text?: string }>;
+  };
+}
+
+/** Counterpart to `message_start`; we don't act on it. */
+export interface MessageEndEvent extends PiBaseEvent {
+  type: "message_end";
+  message?: unknown;
+}
+
+/**
+ * Streaming update inside an assistant message.
+ *
+ * Pi 0.74 uses `assistantMessageEvent`; older drafts of these types used
+ * the inner field name `message_update`. Both shapes are accepted by the
+ * translator.
+ */
 export interface MessageUpdateEvent extends PiBaseEvent {
   type: "message_update";
-  message_update: {
+  assistantMessageEvent?: {
+    type?: "text_delta" | "thinking_delta" | "status" | string;
+    delta?: string;
+    contentIndex?: number;
+    partial?: unknown;
+    status?: "in_progress" | "done" | "error";
+  };
+  // Legacy / defensive
+  message_update?: {
     type: "text_delta" | "thinking_delta" | "status";
     delta?: string;
     status?: "in_progress" | "done" | "error";
@@ -128,7 +197,10 @@ export type PiEvent =
   | AgentEndEvent
   | ToolExecutionStartEvent
   | ToolExecutionEndEvent
+  | ToolExecutionUpdateEvent
   | ModelSelectEvent
+  | MessageStartEvent
+  | MessageEndEvent
   | MessageUpdateEvent
   | ErrorEvent
   | PiBaseEvent; // fallback for unknown events

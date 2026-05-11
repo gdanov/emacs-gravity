@@ -13,13 +13,12 @@ import type {
   AccState,
   TranslationResult,
   TranslateEventResult,
-  AccTool,
-  AgentStartEvent,
   AgentEndEvent,
   TurnStartEvent,
   TurnEndEvent,
   ToolExecutionStartEvent,
   ToolExecutionEndEvent,
+  MessageStartEvent,
   MessageUpdateEvent,
   ModelSelectEvent,
   ErrorEvent,
@@ -99,24 +98,23 @@ export function translatePiEvent(
       // Pi 0.74 wire format: { toolCallId, toolName, args }. Older drafts of
       // our types used snake_case; pi never emitted that shape. Read both
       // forms defensively in case pi changes back.
-      const e = event as Record<string, unknown>;
-      const id = (e.toolCallId ?? e.tool_call_id) as string;
-      const name = (e.toolName ?? e.tool_name) as string;
-      const input = (e.args ?? e.tool_input ?? {}) as Record<string, unknown>;
+      const e = event as ToolExecutionStartEvent;
+      const id = e.toolCallId ?? e.tool_call_id ?? "";
+      const name = e.toolName ?? e.tool_name ?? "";
+      const input = e.args ?? e.tool_input ?? {};
       accToolStart(state, id, name, input);
       return { kind: "noop" };
     }
 
     case "tool_execution_end": {
       // Pi 0.74 wire format: { toolCallId, toolName, result, isError }.
-      const e = event as Record<string, unknown>;
-      const id = (e.toolCallId ?? e.tool_call_id) as string;
-      const name = (e.toolName ?? e.tool_name) as string;
+      const e = event as ToolExecutionEndEvent;
+      const id = e.toolCallId ?? e.tool_call_id ?? "";
+      const name = e.toolName ?? e.tool_name ?? "";
       const toolResult = e.result ?? e.tool_result;
-      const isError = e.isError === true;
-      const errorMsg = isError
-        ? (typeof e.error === "string" ? e.error : "tool execution failed")
-        : (typeof e.error === "string" ? e.error : undefined);
+      const errorMsg = e.isError === true
+        ? (e.error ?? "tool execution failed")
+        : e.error;
       const results = accToolEnd(state, id, name, toolResult, errorMsg);
       if (results.length === 0) return { kind: "noop" };
       return { kind: "emit", results };
@@ -132,10 +130,8 @@ export function translatePiEvent(
     // it once (on message_start) and emit UserPromptSubmit. Assistant-role
     // messages are streamed via message_update and surfaced elsewhere.
     case "message_start": {
-      const e = event as Record<string, unknown>;
-      const msg = e.message as
-        | { role?: string; content?: Array<{ type?: string; text?: string }> }
-        | undefined;
+      const e = event as MessageStartEvent;
+      const msg = e.message;
       if (msg?.role === "user" && Array.isArray(msg.content)) {
         const text = msg.content
           .filter((c) => c?.type === "text" && typeof c.text === "string")
@@ -155,10 +151,8 @@ export function translatePiEvent(
     case "message_update": {
       // Pi 0.74: { assistantMessageEvent: { type, contentIndex, partial, ... } }
       // Also accept the legacy {message_update: {...}} shape for safety.
-      const e = event as Record<string, unknown>;
-      const update = (e.assistantMessageEvent ?? e.message_update) as
-        | { type?: string; delta?: string }
-        | undefined;
+      const e = event as MessageUpdateEvent;
+      const update = e.assistantMessageEvent ?? e.message_update;
       if (!update) return { kind: "noop" };
       if (update.type === "text_delta" && update.delta) {
         accTextDelta(state, update.delta);
