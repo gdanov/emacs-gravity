@@ -18,6 +18,7 @@ import type {
   ThinkingLevel,
   PiProtocolEvent,
   PiSessionStats,
+  ExtensionUIResponsePayload,
 } from "./types.js";
 
 /** Path to the pi binary (default: "pi"). */
@@ -202,6 +203,13 @@ export function spawnPiSync(
       // response carries `data: { cancelled: bool }`.
       const data = (response.data ?? {}) as { cancelled?: boolean };
       return data.cancelled !== true;
+    },
+
+    sendExtensionUIResponse: (payload: ExtensionUIResponsePayload): void => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      // Fire-and-forget. Pi correlates by the embedded `id` field, not by
+      // RPC request/response — so we use sendCommand instead of request.
+      proto.sendCommand({ type: "extension_ui_response", ...payload });
     },
 
     stop: async (): Promise<void> => {

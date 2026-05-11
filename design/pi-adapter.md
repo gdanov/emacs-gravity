@@ -269,21 +269,29 @@ All core functionality is implemented and tested:
 
 ## Feature Parity with Claude Code
 
-Pi as a coding agent does not expose the interactive review surfaces that gravity-server's UI is built around for Claude Code. This is **not a wiring gap** — these capabilities do not exist on the pi side:
+Pi differs from Claude Code in *how* it surfaces interactive review:
 
 | gravity feature (Claude Code) | pi equivalent |
 |---|---|
 | `ExitPlanMode` / plan review buffer | none — pi has no plan-mode concept |
-| `PermissionRequest` (tool gating) | none — pi runs tools without out-of-band approval; tool gating is whatever pi enforces internally |
-| `AskUserQuestion` tool | none — pi has no structured question/answer tool |
-| Allow-pattern management / `settings.local.json` | n/a — no permission protocol to derive patterns from |
+| `PermissionRequest` (tool gating) | **via extensions** — pi extensions use `ctx.ui.confirm` to gate; routed through gravity's permission inbox (see Extension UI bridge below) |
+| `AskUserQuestion` tool | **via extensions** — pi extensions use `ctx.ui.select`; routed through gravity's question inbox |
+| Free-text input dialogs | pi `ctx.ui.input` / `ctx.ui.editor` — auto-cancelled by the adapter for now (no matching gravity surface yet) |
+| Allow-pattern management / `settings.local.json` | n/a — pi extensions decide on a per-call basis; no equivalent of CC's pattern protocol |
 | `SubagentStart` / `SubagentStop` | none — pi 0.74 has no sub-agent event vocabulary |
 
-The `needs_response?: boolean` field on `ToolExecutionStartEvent` is a placeholder kept for forward-compatibility but is never set by pi 0.74 and is not currently consumed by the adapter.
+### Extension UI bridge
 
-**Practical consequence:** with pi as the driver, gravity's *feedback features* (plan review, inline plan comments, `@claude:` markers, permission inbox, question buffer, allow-pattern generation) are inert. The pi session shows up in the overview, renders turns/tools/streaming text/token usage, and supports prompt / steer / abort / thinking-level control — but there is nothing to approve, deny, annotate, or answer.
+Pi extensions that need user input emit `extension_ui_request` events on stdout with a `method` and a unique `id`; for dialog methods the client must reply with `extension_ui_response` on stdin keyed by the same `id`. The adapter routes the dialog methods into gravity's existing inbox:
 
-If pi grows analogous concepts later, the translator is the right place to map them: emit `PermissionRequest` from a pi `permission_request` event, `PreToolUse` for `AskUserQuestion`-like tools, etc. Until then, pi sessions are a *driving + observation* surface, not a *review* surface.
+- **`confirm`** (`{title, message}`) → `permission` inbox item. Allow/deny → `{confirmed: true|false}` to pi.
+- **`select`** (`{title, options[]}`) → `question` inbox item. First answer → `{value: <choice>}` to pi.
+- **`input` / `editor`** → auto-cancelled today (TODO — needs a text-entry surface in Emacs).
+- Fire-and-forget methods (**`notify`**, **`setStatus`**, **`setWidget`**, **`setTitle`**, **`set_editor_text`**) are logged on the server for now; UI integration (status bar, transient notifications, window title) is a follow-up.
+
+When pi exits, any pending UI dialogs are dropped from the inbox (pi is gone, there's no one to respond to).
+
+This means **pi extensions that use `ctx.ui.confirm` / `ctx.ui.select` get the same gravity allow/deny + multiple-choice flow as Claude Code's `PermissionRequest` / `AskUserQuestion`.** What's "inert by capability" is narrower than before — primarily plan review and the pattern-allowlist machinery.
 
 ## Non-Goals (Deferred)
 

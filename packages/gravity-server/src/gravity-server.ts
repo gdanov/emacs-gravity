@@ -29,6 +29,7 @@ import type { ServerConfigData } from "./services/config.js";
 
 // Pi driver (optional)
 import { startPiDriver, type StartPiDriverOptions, type PiSessionStats } from "./pi-driver/index.js";
+import type { ExtensionUIRequestEvent } from "./pi-driver/types.js";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -131,6 +132,109 @@ const program = Effect.gen(function* () {
   };
 
   /**
+   * Handle a pi `extension_ui_request`. Dialog methods create an inbox
+   * item and stash the pi request id in `pendingPiUIResponses` so the
+   * subsequent `action.permission` / `action.question` from a terminal
+   * can be routed back to pi. Fire-and-forget methods are logged and
+   * dropped (UI integration TBD).
+   *
+   * Method mapping:
+   * - confirm → permission inbox; allow → {confirmed:true}, deny → {confirmed:false}
+   * - select  → question inbox; answer[0] → {value:<choice>}
+   * - input / editor → auto-cancel (no matching inbox surface yet)
+   * - notify / setStatus / setWidget / setTitle / set_editor_text → log only
+   */
+  const handlePiExtensionUIRequest = (
+    sessionId: string,
+    request: ExtensionUIRequestEvent,
+  ): void => {
+    const session = store.get(sessionId);
+    if (!session) {
+      logMsg(`pi extension_ui_request for unknown session ${sessionId}`, "warn");
+      return;
+    }
+    const method = request.method;
+    const sendResponse = (payload: { value?: string; confirmed?: boolean; cancelled?: boolean }): void => {
+      if (!activePiDriver) {
+        logMsg(`pi extension_ui_response: no active driver to send to (request id=${request.id})`, "warn");
+        return;
+      }
+      activePiDriver.sendExtensionUIResponse({ id: request.id, ...payload });
+    };
+
+    switch (method) {
+      case "confirm": {
+        const summary = request.title ?? request.message ?? "Pi confirm";
+        const item = inbox.add(
+          "permission",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          {
+            // Shape the action.permission handler expects: tool_name +
+            // tool_input. We use a synthetic tool name so the UI label
+            // makes sense.
+            tool_name: "pi:confirm",
+            tool_input: { title: request.title, message: request.message },
+            // Pi-specific fields for renderers that want them:
+            pi_ui: { method, id: request.id, options: ["Allow", "Block"] },
+          },
+        );
+        pendingPiUIResponses.set(item.id, { piRequestId: request.id, method });
+        terminals.broadcast({ type: "inbox.added", item });
+        break;
+      }
+      case "select": {
+        const options = request.options ?? [];
+        const summary = request.title ?? "Pi select";
+        const item = inbox.add(
+          "question",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          {
+            tool_name: "pi:select",
+            tool_input: {
+              // action.question's handler reads tool_input.questions[] —
+              // synthesize a single question entry with the option list.
+              questions: [{ question: summary, options }],
+            },
+            pi_ui: { method, id: request.id, options },
+          },
+        );
+        pendingPiUIResponses.set(item.id, { piRequestId: request.id, method });
+        terminals.broadcast({ type: "inbox.added", item });
+        break;
+      }
+      case "input":
+      case "editor": {
+        // TODO: surface a multi-line text-entry buffer in Emacs. For now,
+        // cancel so pi's extension can fall through to a default.
+        logMsg(`pi extension_ui_request ${method} not yet supported — cancelling`, "warn");
+        sendResponse({ cancelled: true });
+        break;
+      }
+      // Fire-and-forget: pi doesn't expect a response. Log for visibility;
+      // wiring these into the UI (status bar, transient notifications,
+      // window title) is a follow-up.
+      case "notify":
+      case "setStatus":
+      case "setWidget":
+      case "setTitle":
+      case "set_editor_text":
+        logMsg(`pi UI notice ${method}: ${JSON.stringify({
+          text: request.text, message: request.message, statusText: request.statusText, title: request.title,
+        })}`);
+        break;
+      default:
+        logMsg(`pi extension_ui_request unknown method ${method} — cancelling`, "warn");
+        sendResponse({ cancelled: true });
+    }
+  };
+
+  /**
    * Apply a `get_session_stats` response from pi to the session. Emits
    * `set_cost` and `set_context_usage` patches as needed. Token usage is
    * already covered by Stop's hookData.token_usage; we don't overwrite it
@@ -198,6 +302,18 @@ const program = Effect.gen(function* () {
   // Mutable reference to the active pi driver (null if not running)
   let activePiDriver: ReturnType<typeof startPiDriver> | null = null;
 
+  /**
+   * Maps gravity inbox item id → pi extension_ui_request id + method.
+   * Populated when pi emits an `extension_ui_request`; consumed by the
+   * `action.permission` / `action.question` handlers to format and send
+   * the `extension_ui_response` back to pi (instead of writing to a
+   * hook socket like Claude Code's bidirectional flow does).
+   */
+  const pendingPiUIResponses = new Map<number, {
+    piRequestId: string;
+    method: string;
+  }>();
+
   /** Start a new pi session (called via terminal message). */
   const startPiSession = (options: { cwd?: string; thinkingLevel?: string; resumeSession?: string }): string | null => {
     if (activePiDriver) {
@@ -237,6 +353,9 @@ const program = Effect.gen(function* () {
       thinkingLevel: (options.thinkingLevel as any) ?? "medium",
       sessionId,
       resumeSession: options.resumeSession,
+      onExtensionUIRequest: (request) => {
+        handlePiExtensionUIRequest(sessionId, request);
+      },
       onTranslation: (result) => {
         // Route using the outer sessionId from startPiSession
         handlePiTranslation(sessionId, result);
@@ -257,18 +376,17 @@ const program = Effect.gen(function* () {
       onLifecycle: (event, _metadata) => {
         if (event === "start") {
           logMsg(`Pi session started: ${sessionId}`);
-        } else if (event === "stop") {
-          logMsg(`Pi session ended: ${sessionId}`);
-          // Broadcast pi.session.stopped for Emacs — always use outer sessionId
-          terminals.broadcast({
-            type: "pi.session",
-            sessionId,
-            event: "stopped",
-          } as ServerMessage);
-          activePiDriver = null;
-        } else if (event === "error") {
-          logMsg(`Pi session error`, "error");
-          // Broadcast pi.session.stopped on error too
+        } else if (event === "stop" || event === "error") {
+          if (event === "error") logMsg(`Pi session error`, "error");
+          else logMsg(`Pi session ended: ${sessionId}`);
+          // Cancel any pending pi UI dialogs — pi is gone, so no one to
+          // answer to. Drop the inbox items so the user isn't stuck
+          // staring at allow/deny buttons that go nowhere.
+          for (const [itemId] of pendingPiUIResponses) {
+            inbox.remove(itemId);
+            terminals.broadcast({ type: "inbox.removed", itemId });
+          }
+          pendingPiUIResponses.clear();
           terminals.broadcast({
             type: "pi.session",
             sessionId,
@@ -627,6 +745,23 @@ const program = Effect.gen(function* () {
 
       case "action.permission": {
         const { itemId, decision, message, updatedPermissions } = msg;
+        // Pi extension_ui_request items: route the decision back to pi as
+        // an extension_ui_response instead of writing to a hook socket.
+        const piUi = pendingPiUIResponses.get(itemId);
+        if (piUi) {
+          if (!activePiDriver) {
+            logMsg(`action.permission for pi UI ${piUi.piRequestId}: no active driver`, "warn");
+          } else {
+            activePiDriver.sendExtensionUIResponse({
+              id: piUi.piRequestId,
+              confirmed: decision === "allow",
+            });
+          }
+          pendingPiUIResponses.delete(itemId);
+          inbox.remove(itemId);
+          terminals.broadcast({ type: "inbox.removed", itemId });
+          break;
+        }
         Effect.runSync(inbox.respond(itemId, {
           hookSpecificOutput: {
             hookEventName: "PermissionRequest",
@@ -639,6 +774,24 @@ const program = Effect.gen(function* () {
 
       case "action.question": {
         const { itemId, answers } = msg;
+        // Pi extension_ui_request items: send the first answer as
+        // {value: <choice>} (pi's select dialog uses string values).
+        const piUi = pendingPiUIResponses.get(itemId);
+        if (piUi) {
+          if (!activePiDriver) {
+            logMsg(`action.question for pi UI ${piUi.piRequestId}: no active driver`, "warn");
+          } else {
+            const value = answers[0];
+            activePiDriver.sendExtensionUIResponse({
+              id: piUi.piRequestId,
+              ...(value !== undefined ? { value } : { cancelled: true }),
+            });
+          }
+          pendingPiUIResponses.delete(itemId);
+          inbox.remove(itemId);
+          terminals.broadcast({ type: "inbox.removed", itemId });
+          break;
+        }
         const pending = inbox.getPending(itemId);
         const toolInput = (pending?.inboxItem.data?.tool_input as Record<string, unknown>) || {};
         const questions = (toolInput.questions as Array<Record<string, unknown>>) || [];

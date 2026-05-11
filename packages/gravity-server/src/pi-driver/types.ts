@@ -187,6 +187,50 @@ export interface ErrorEvent extends PiBaseEvent {
   code?: string;
 }
 
+/**
+ * Pi extension UI request — extensions can call `ctx.ui.select`,
+ * `ctx.ui.confirm`, `ctx.ui.input`, `ctx.ui.editor`, etc. Dialog methods
+ * (select / confirm / input / editor) expect an `extension_ui_response`
+ * on stdin keyed by `id`. Fire-and-forget methods (notify / setStatus /
+ * setWidget / setTitle / set_editor_text) expect no response.
+ *
+ * See pi docs/rpc.md "Extension UI Protocol" for the canonical fields
+ * per method.
+ */
+export interface ExtensionUIRequestEvent extends PiBaseEvent {
+  type: "extension_ui_request";
+  id: string;
+  method:
+    | "select"
+    | "confirm"
+    | "input"
+    | "editor"
+    | "notify"
+    | "setStatus"
+    | "setWidget"
+    | "setTitle"
+    | "set_editor_text"
+    | string; // future-proofing against new pi methods
+  // dialog fields (select / confirm / input / editor)
+  title?: string;
+  message?: string;
+  options?: string[];
+  timeout?: number;
+  placeholder?: string;
+  prefill?: string;
+  // notify
+  notifyType?: "info" | "warning" | "error";
+  // setStatus
+  statusKey?: string;
+  statusText?: string;
+  // setWidget
+  widgetKey?: string;
+  widgetLines?: string[];
+  widgetPlacement?: "aboveEditor" | "belowEditor";
+  // setTitle / set_editor_text
+  text?: string;
+}
+
 /** Union of all pi event types. */
 export type PiEvent =
   | TextDeltaEvent
@@ -202,6 +246,7 @@ export type PiEvent =
   | MessageStartEvent
   | MessageEndEvent
   | MessageUpdateEvent
+  | ExtensionUIRequestEvent
   | ErrorEvent
   | PiBaseEvent; // fallback for unknown events
 
@@ -296,6 +341,18 @@ export interface AccTool {
 
 // ── RPC command types ───────────────────────────────────────────────
 
+/**
+ * Response delivered back to pi for a dialog `extension_ui_request`. Pi
+ * matches by `id`. Exactly one of `value` / `confirmed` / `cancelled`
+ * should be set, depending on the originating method.
+ */
+export interface ExtensionUIResponsePayload {
+  id: string;
+  value?: string;
+  confirmed?: boolean;
+  cancelled?: boolean;
+}
+
 /** Commands sent to pi via stdin (JSONL). */
 export type PiCommand =
   | { type: "prompt"; message: string; images?: string[] }
@@ -305,7 +362,8 @@ export type PiCommand =
   | { type: "set_model"; provider: string; modelId: string }
   | { type: "get_session_stats" }
   | { type: "get_state" }
-  | { type: "switch_session"; sessionPath: string };
+  | { type: "switch_session"; sessionPath: string }
+  | ({ type: "extension_ui_response" } & ExtensionUIResponsePayload);
 
 /** Event emitted by protocol.ts for parsed pi events. */
 export type PiProtocolEvent = {
@@ -424,6 +482,11 @@ export interface PiDriver {
    * `session_before_switch` extension event handler).
    */
   switchSession(sessionPath: string): Promise<boolean>;
+  /**
+   * Reply to a dialog `extension_ui_request` by pi's request id.
+   * Fire-and-forget — pi does not acknowledge the response.
+   */
+  sendExtensionUIResponse(payload: ExtensionUIResponsePayload): void;
   /**
    * Stop the pi subprocess and clean up resources.
    * Returns a promise that resolves when the subprocess exits.

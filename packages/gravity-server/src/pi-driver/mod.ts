@@ -28,6 +28,8 @@ import type {
   TranslationResult,
   ThinkingLevel,
   PiSessionStats,
+  ExtensionUIRequestEvent,
+  ExtensionUIResponsePayload,
 } from "./types.js";
 
 /** Generate a unique session ID for the pi driver. */
@@ -49,6 +51,16 @@ export type TranslationCallback = (result: TranslationResult) => void;
 export type SessionLifecycleCallback = (event: "start" | "stop" | "error", metadata?: SessionMetadata) => void;
 
 /**
+ * Callback fired when pi emits an `extension_ui_request`. The handler is
+ * responsible for surfacing the dialog to the user and calling the driver's
+ * `sendExtensionUIResponse` with the matching id when the user responds.
+ * Fire-and-forget methods (notify / setStatus / setWidget / setTitle /
+ * set_editor_text) also flow through this callback; the handler may
+ * choose to ignore them or surface them as session notifications.
+ */
+export type ExtensionUIRequestCallback = (request: ExtensionUIRequestEvent) => void;
+
+/**
  * Options for startPiDriver.
  */
 export interface StartPiDriverOptions extends PiDriverOptions {
@@ -67,6 +79,13 @@ export interface StartPiDriverOptions extends PiDriverOptions {
    * Defaults to no-op.
    */
   onLifecycle?: SessionLifecycleCallback;
+  /**
+   * Called when pi emits an `extension_ui_request`. The handler should
+   * eventually call the driver's `sendExtensionUIResponse` for dialog
+   * methods (select / confirm / input / editor). Defaults to no-op
+   * (dialog methods will hang from pi's perspective until timeout).
+   */
+  onExtensionUIRequest?: ExtensionUIRequestCallback;
 }
 
 /**
@@ -91,6 +110,8 @@ export interface PiDriverInstance {
   getState(): Promise<Record<string, unknown>>;
   /** Load a different session file into the running pi process. */
   switchSession(sessionPath: string): Promise<boolean>;
+  /** Send an `extension_ui_response` back to pi for a dialog request id. */
+  sendExtensionUIResponse(payload: ExtensionUIResponsePayload): void;
   /** Stop the pi subprocess and clean up. */
   stop(): Promise<void>;
   /** Get current session metadata. */
@@ -136,6 +157,7 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
 
   // Callback for session lifecycle
   const onLifecycle = options.onLifecycle ?? (() => {});
+  const onExtensionUIRequest = options.onExtensionUIRequest ?? (() => {});
 
   // Spawn pi subprocess
   const { driver, process: childProcess } = spawnPiSync({
@@ -151,6 +173,13 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
   // Set up event handler
   let lifecycleStarted = false;
   driver.setEventHandler((evt: PiProtocolEvent) => {
+    // extension_ui_request bypasses the translator — it's a dialog call,
+    // not a session event. The host (gravity-server) owns the inbox flow.
+    if (evt.event.type === "extension_ui_request") {
+      onExtensionUIRequest(evt.event as ExtensionUIRequestEvent);
+      return;
+    }
+
     // Translate pi event into zero or more gravity events.
     const result = translatePiEvent(evt.event, state);
     if (result.kind === "emit") {
@@ -231,6 +260,9 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
     getState: () => driver.getState(),
 
     switchSession: (sessionPath: string) => driver.switchSession(sessionPath),
+
+    sendExtensionUIResponse: (payload: ExtensionUIResponsePayload) =>
+      driver.sendExtensionUIResponse(payload),
 
     stop: () => {
       return driver.stop();
