@@ -310,6 +310,11 @@ export interface AccState {
   currentToolName: string | null;
   currentToolInput: Record<string, unknown> | null;
   currentToolStartTime: number | null;
+  /** Snapshot of pendingAssistantText taken at tool_execution_start. The
+   * pending accumulator is cleared after the snapshot so the next tool's
+   * preceding text starts fresh. accToolEnd consumes this. */
+  currentToolAssistantText: string | undefined;
+  currentToolAssistantThinking: string | undefined;
 
   // Turn tracking
   turns: AccTurn[];

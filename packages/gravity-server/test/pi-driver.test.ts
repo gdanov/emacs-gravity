@@ -696,3 +696,86 @@ describe("issue #4: multi-tool turn — no duplicates, no drops", () => {
     expect(postCount).toBe(1);
   });
 });
+
+// ── Regression: thinking / text / result on tool hookData ──────────────
+//
+// Earlier `accToolStart` flushed pendingAssistantText/Thinking but
+// THREW AWAY the result, so every emitted PreToolUse got null
+// assistant_text/assistant_thinking and the renderer never had
+// thinking or pre-tool text to show. Separately, `accToolEnd` never
+// included `tool_response` in the hookData, so the server's
+// handlePostToolUse stored undefined as the tool result.
+//
+// This test pins both fixes in one realistic event flow.
+describe("regression: thinking/text/result reach the emitted hookData", () => {
+  it("thinking_delta and text_delta before tool_start land on PreToolUse hookData", () => {
+    const state = createAccState("test-thinking", "/test", thinkingToEffort("medium"));
+    const emitted: TranslationResult[] = [];
+
+    const events: PiEvent[] = [
+      { type: "agent_start" } as unknown as PiEvent,
+      { type: "message_start", message: { role: "user", content: [{ type: "text", text: "do it" }] } } as unknown as PiEvent,
+      { type: "turn_start", turn_id: "t1" },
+      // Pi streams thinking + text BEFORE the tool call. assistantMessageEvent
+      // is pi 0.74's actual envelope; we also accept the legacy message_update.
+      { type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "Need to ls first." } } as unknown as PiEvent,
+      { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Listing files now." } } as unknown as PiEvent,
+      { type: "tool_execution_start", tool_call_id: "c1", tool_name: "bash", tool_input: { command: "ls" } },
+      { type: "tool_execution_end",   tool_call_id: "c1", tool_name: "bash", tool_result: { stdout: "file.txt" } },
+      { type: "turn_end", turn_id: "t1" },
+      { type: "agent_end", result: { type: "success" } },
+    ];
+
+    for (const evt of events) {
+      const r = translatePiEvent(evt, state);
+      if (r.kind === "emit") for (const x of r.results) emitted.push(x);
+    }
+
+    const pre = emitted.find((e) => e.hookEvent === "PreToolUse");
+    expect(pre).toBeDefined();
+    const data = pre!.hookData as Record<string, unknown>;
+    expect(data.assistant_text).toBe("Listing files now.");
+    expect(data.assistant_thinking).toBe("Need to ls first.");
+
+    const post = emitted.find((e) => e.hookEvent === "PostToolUse");
+    expect(post).toBeDefined();
+    const postData = post!.hookData as Record<string, unknown>;
+    expect(postData.tool_response).toEqual({ stdout: "file.txt" });
+  });
+
+  it("between-tool text/thinking attach to the NEXT tool, not the previous one", () => {
+    // Three tools in one turn with text between them. Each tool should
+    // get exactly the text/thinking that came BEFORE its tool_execution_start.
+    const state = createAccState("test-between", "/test", thinkingToEffort("medium"));
+    const emitted: TranslationResult[] = [];
+
+    const events: PiEvent[] = [
+      { type: "agent_start" } as unknown as PiEvent,
+      { type: "message_start", message: { role: "user", content: [{ type: "text", text: "go" }] } } as unknown as PiEvent,
+      { type: "turn_start", turn_id: "t1" },
+      { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "First, ls." } } as unknown as PiEvent,
+      { type: "tool_execution_start", tool_call_id: "c1", tool_name: "bash", tool_input: { command: "ls" } },
+      { type: "tool_execution_end",   tool_call_id: "c1", tool_name: "bash", tool_result: { stdout: "ok1" } },
+      { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Now pwd." } } as unknown as PiEvent,
+      { type: "tool_execution_start", tool_call_id: "c2", tool_name: "bash", tool_input: { command: "pwd" } },
+      { type: "tool_execution_end",   tool_call_id: "c2", tool_name: "bash", tool_result: { stdout: "/" } },
+      { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Finally echo." } } as unknown as PiEvent,
+      { type: "tool_execution_start", tool_call_id: "c3", tool_name: "bash", tool_input: { command: "echo hi" } },
+      { type: "tool_execution_end",   tool_call_id: "c3", tool_name: "bash", tool_result: { stdout: "hi" } },
+      { type: "turn_end", turn_id: "t1" },
+      { type: "agent_end", result: { type: "success" } },
+    ];
+
+    for (const evt of events) {
+      const r = translatePiEvent(evt, state);
+      if (r.kind === "emit") for (const x of r.results) emitted.push(x);
+    }
+
+    const pres = emitted.filter((e) => e.hookEvent === "PreToolUse");
+    expect(pres).toHaveLength(3);
+    const text = (i: number) => (pres[i].hookData as Record<string, unknown>).assistant_text;
+    expect(text(0)).toBe("First, ls.");
+    expect(text(1)).toBe("Now pwd.");
+    expect(text(2)).toBe("Finally echo.");
+  });
+});

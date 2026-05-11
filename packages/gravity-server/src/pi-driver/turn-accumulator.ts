@@ -34,6 +34,8 @@ export function createAccState(sessionId: string, cwd: string, effortLevel: stri
     currentToolName: null,
     currentToolInput: null,
     currentToolStartTime: null,
+    currentToolAssistantText: undefined,
+    currentToolAssistantThinking: undefined,
     turns: [],
     currentTurn: -1,
     inTurn: false,
@@ -131,8 +133,15 @@ export function accToolStart(
   state.currentToolInput = toolInput;
   state.currentToolStartTime = Date.now();
 
-  // Flush pending text before starting tool (this text precedes the tool)
-  flushPendingAssistantContext(state);
+  // Snapshot whatever assistant text/thinking pi streamed BEFORE this tool
+  // into per-tool slots. accToolEnd reads from these slots to populate the
+  // emitted PreToolUse hookData. The flush also clears the pending
+  // accumulator so the next tool's preceding-text window starts fresh.
+  // (Earlier this just discarded the flushed values, which is why every
+  // tool's assistantText/assistantThinking ended up null.)
+  const flushed = flushPendingAssistantContext(state);
+  state.currentToolAssistantText = flushed.assistantText;
+  state.currentToolAssistantThinking = flushed.assistantThinking;
 
   return state;
 }
@@ -161,13 +170,23 @@ export function accToolEnd(
   const toolUseId = state.currentToolUseId;
   const toolInput = state.currentToolInput ?? {};
 
-  // Flush any remaining assistant context
-  const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
+  // Use the assistant text/thinking that accToolStart snapshotted from the
+  // pending accumulator. The pending accumulator may have received MORE
+  // text after the tool started (rare for pi — usually streaming pauses
+  // during tool execution) but for our purposes the pre-tool snapshot is
+  // the canonical "text shown before this tool" value.
+  const assistantText = state.currentToolAssistantText;
+  const assistantThinking = state.currentToolAssistantThinking;
 
+  // The server's handlePostToolUse reads `tool_response` (not tool_result)
+  // from the hookData and stores it on the Tool object via completeTool.
+  // Without this field every tool ended up with result=undefined and the
+  // UI couldn't render results.
   const hookData: HookData = {
     tool_name: toolName,
     tool_use_id: toolUseId,
     tool_input: toolInput,
+    tool_response: toolResult,
     assistant_text: assistantText,
     assistant_thinking: assistantThinking,
     post_tool_text: postText,
@@ -205,6 +224,8 @@ export function accToolEnd(
   state.currentToolName = null;
   state.currentToolInput = null;
   state.currentToolStartTime = null;
+  state.currentToolAssistantText = undefined;
+  state.currentToolAssistantThinking = undefined;
 
   return results;
 }

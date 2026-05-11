@@ -7280,6 +7280,8 @@ function createAccState(sessionId, cwd, effortLevel = "medium") {
     currentToolName: null,
     currentToolInput: null,
     currentToolStartTime: null,
+    currentToolAssistantText: void 0,
+    currentToolAssistantThinking: void 0,
     turns: [],
     currentTurn: -1,
     inTurn: false
@@ -7328,7 +7330,9 @@ function accToolStart(state, toolCallId, toolName, toolInput) {
   state.currentToolName = toolName;
   state.currentToolInput = toolInput;
   state.currentToolStartTime = Date.now();
-  flushPendingAssistantContext(state);
+  const flushed = flushPendingAssistantContext(state);
+  state.currentToolAssistantText = flushed.assistantText;
+  state.currentToolAssistantThinking = flushed.assistantThinking;
   return state;
 }
 function accToolEnd(state, toolCallId, toolName, toolResult, error) {
@@ -7338,11 +7342,13 @@ function accToolEnd(state, toolCallId, toolName, toolResult, error) {
   }
   const toolUseId = state.currentToolUseId;
   const toolInput = state.currentToolInput ?? {};
-  const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
+  const assistantText = state.currentToolAssistantText;
+  const assistantThinking = state.currentToolAssistantThinking;
   const hookData = {
     tool_name: toolName,
     tool_use_id: toolUseId,
     tool_input: toolInput,
+    tool_response: toolResult,
     assistant_text: assistantText,
     assistant_thinking: assistantThinking,
     post_tool_text: postText,
@@ -7375,6 +7381,8 @@ function accToolEnd(state, toolCallId, toolName, toolResult, error) {
   state.currentToolName = null;
   state.currentToolInput = null;
   state.currentToolStartTime = null;
+  state.currentToolAssistantText = void 0;
+  state.currentToolAssistantThinking = void 0;
   return results;
 }
 function accTextDelta(state, delta) {
