@@ -186,4 +186,98 @@ describe("pi-session-e2e: session ID routing", () => {
     const sessionIds = sessions.map(s => s.sessionId);
     expect(new Set(sessionIds).size).toBe(2); // no key reuse across runs
   });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Phase 1 regressions: pi must survive multiple prompts in one session.
+  //
+  // Pi emits agent_start + agent_end per *prompt*, not per *session*. If the
+  // handler treats either as session lifecycle, every second prompt either
+  // wipes turn state (resetSession on existing) or kills the driver
+  // (lifecycle "stop" clearing activePiDriver). Both pin the user to a
+  // single prompt per pi.start.
+  // ────────────────────────────────────────────────────────────────────
+  describe("multi-prompt stability", () => {
+    it("a second prompt in the same pi session preserves the first prompt's turns", () => {
+      const store = makeSessionStore();
+      const sessionId = `pi-${Date.now().toString(36)}-multiprompt`;
+      const state = createAccState(sessionId, "/test", thinkingToEffort("medium"));
+
+      const promptCycle = (promptText: string, callId: string) => [
+        { type: "agent_start" as const },
+        { type: "message_start" as const, message: { role: "user" as const, content: [{ type: "text" as const, text: promptText }] } },
+        { type: "turn_start" as const, turn_id: callId },
+        { type: "tool_execution_start" as const, tool_call_id: callId, tool_name: "bash", tool_input: { command: "ls" } },
+        { type: "tool_execution_end" as const, tool_call_id: callId, tool_name: "bash", tool_result: { stdout: "ok" } },
+        { type: "turn_end" as const, turn_id: callId },
+        { type: "agent_end" as const, result: { type: "success" as const } },
+      ] as PiEvent[];
+
+      const drive = (events: PiEvent[]) => {
+        for (const evt of events) {
+          const result = translatePiEvent(evt, state);
+          if (result.kind === "emit") {
+            for (const r of result.results) handlePiTranslation(r, store);
+          }
+        }
+      };
+
+      // Eager SessionStart from startPiSession (server-synthesized).
+      handlePiTranslation(
+        { hookEvent: "SessionStart", hookData: { session_id: sessionId, cwd: "/test", source: "pi" }, sessionId },
+        store,
+      );
+
+      drive(promptCycle("first prompt", "c1"));
+      const afterFirst = store.get(sessionId)!;
+      const toolCountAfterFirst = afterFirst.totalToolCount;
+      expect(toolCountAfterFirst).toBeGreaterThan(0);
+
+      drive(promptCycle("second prompt", "c2"));
+      const afterSecond = store.get(sessionId)!;
+
+      // Tool count must accumulate, not reset.
+      expect(afterSecond.totalToolCount).toBeGreaterThan(toolCountAfterFirst);
+      // Both prompts must be present in the turn tree.
+      expect(afterSecond.status).toBe("active");
+    });
+
+    it("SessionStart on an already-active session is a no-op (no resetSession patches)", () => {
+      const store = makeSessionStore();
+      const sessionId = `pi-${Date.now().toString(36)}-noreset`;
+
+      // Initial SessionStart creates the session.
+      handlePiTranslation(
+        { hookEvent: "SessionStart", hookData: { session_id: sessionId, cwd: "/test", source: "pi" }, sessionId },
+        store,
+      );
+      // Add a tool so we can detect a wipe.
+      const state = createAccState(sessionId, "/test", thinkingToEffort("medium"));
+      const setup: PiEvent[] = [
+        { type: "agent_start" } as PiEvent,
+        { type: "message_start", message: { role: "user", content: [{ type: "text", text: "hi" }] } } as unknown as PiEvent,
+        { type: "turn_start", turn_id: "t" },
+        { type: "tool_execution_start", tool_call_id: "tc", tool_name: "bash", tool_input: {} },
+        { type: "tool_execution_end", tool_call_id: "tc", tool_name: "bash", tool_result: {} },
+        { type: "turn_end", turn_id: "t" },
+        { type: "agent_end", result: { type: "success" } },
+      ];
+      for (const evt of setup) {
+        const r = translatePiEvent(evt, state);
+        if (r.kind === "emit") for (const x of r.results) handlePiTranslation(x, store);
+      }
+      const before = store.get(sessionId)!;
+      const turnCountBefore = before.totalToolCount;
+      expect(turnCountBefore).toBeGreaterThan(0);
+
+      // Second SessionStart on the still-active session — must not reset.
+      handlePiTranslation(
+        { hookEvent: "SessionStart", hookData: { session_id: sessionId, cwd: "/test", source: "pi" }, sessionId },
+        store,
+      );
+
+      const after = store.get(sessionId)!;
+      expect(after.totalToolCount).toBe(turnCountBefore);
+      expect(after.plan).toBeNull(); // unchanged
+    });
+  });
 });

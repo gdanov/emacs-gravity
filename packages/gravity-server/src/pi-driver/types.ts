@@ -192,6 +192,7 @@ export interface AccState {
   currentToolUseId: string | null;
   currentToolName: string | null;
   currentToolInput: Record<string, unknown> | null;
+  currentToolStartTime: number | null;
 
   // Turn tracking
   turns: AccTurn[];

@@ -33,6 +33,7 @@ export function createAccState(sessionId: string, cwd: string, effortLevel: stri
     currentToolUseId: null,
     currentToolName: null,
     currentToolInput: null,
+    currentToolStartTime: null,
     turns: [],
     currentTurn: -1,
     inTurn: false,
@@ -68,69 +69,12 @@ function flushPendingPostContext(state: AccState): {
 }
 
 /**
- * Emit a PreToolUse event for the current tool.
- */
-function emitPreToolUse(state: AccState): TranslationResult {
-  const toolUseId = state.currentToolUseId ?? `tool_${Date.now()}`;
-  const toolName = state.currentToolName ?? "unknown";
-  const toolInput = state.currentToolInput ?? {};
-  const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
-
-  const hookData: HookData = {
-    tool_name: toolName,
-    tool_use_id: toolUseId,
-    tool_input: toolInput,
-    assistant_text: assistantText,
-    assistant_thinking: assistantThinking,
-    cwd: state.cwd,
-  };
-
-  return {
-    hookEvent: "PreToolUse",
-    hookData,
-    sessionId: state.sessionId,
-  };
-}
-
-/**
- * Emit a PostToolUse event for the completed tool.
- */
-function emitPostToolUse(state: AccState, result: unknown, error: string | null): TranslationResult {
-  const toolUseId = state.currentToolUseId ?? "";
-  const toolName = state.currentToolName ?? "";
-  const toolInput = state.currentToolInput ?? {};
-  const { postText, postThinking } = flushPendingPostContext(state);
-
-  // Also grab any remaining assistant context (might have arrived after tool started)
-  const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
-
-  const hookData: HookData = {
-    tool_name: toolName,
-    tool_use_id: toolUseId,
-    tool_input: toolInput,
-    assistant_text: assistantText,
-    assistant_thinking: assistantThinking,
-    post_tool_text: postText,
-    post_tool_thinking: postThinking,
-    cwd: state.cwd,
-    ...(error ? { error } : {}),
-  };
-
-  // Reset tool state
-  state.currentToolUseId = null;
-  state.currentToolName = null;
-  state.currentToolInput = null;
-
-  return {
-    hookEvent: error ? "PostToolUseFailure" : "PostToolUse",
-    hookData,
-    sessionId: state.sessionId,
-  };
-}
-
-/**
  * Called on turn_start from pi.
  * Creates a new AccTurn and sets inTurn = true.
+ *
+ * Note: turnNumber is `currentTurn + 1` so pi turn numbering aligns with
+ * gravity's convention (turn 0 = pre-prompt activity, turn 1 = first user
+ * prompt). `state.currentTurn` is the 0-based index into `state.turns`.
  */
 export function accTurnStart(state: AccState, turnId: string): AccState {
   state.inTurn = true;
@@ -185,6 +129,7 @@ export function accToolStart(
   state.currentToolUseId = toolCallId;
   state.currentToolName = toolName;
   state.currentToolInput = toolInput;
+  state.currentToolStartTime = Date.now();
 
   // Flush pending text before starting tool (this text precedes the tool)
   flushPendingAssistantContext(state);
@@ -245,7 +190,7 @@ export function accToolEnd(
       toolInput,
       assistantText: assistantText ?? undefined,
       assistantThinking: assistantThinking ?? undefined,
-      startTime: Date.now() - 100, // approximate
+      startTime: state.currentToolStartTime ?? Date.now(),
       endTime: Date.now(),
       result: toolResult,
       error: error ?? null,
@@ -259,6 +204,7 @@ export function accToolEnd(
   state.currentToolUseId = null;
   state.currentToolName = null;
   state.currentToolInput = null;
+  state.currentToolStartTime = null;
 
   return results;
 }

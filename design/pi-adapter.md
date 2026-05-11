@@ -267,10 +267,27 @@ All core functionality is implemented and tested:
 - [x] **Emacs client functions** — claude-gravity--pi-start, claude-gravity--pi-prompt, etc.
 - [x] **Unit tests** — 40 tests covering all modules
 
+## Feature Parity with Claude Code
+
+Pi as a coding agent does not expose the interactive review surfaces that gravity-server's UI is built around for Claude Code. This is **not a wiring gap** — these capabilities do not exist on the pi side:
+
+| gravity feature (Claude Code) | pi equivalent |
+|---|---|
+| `ExitPlanMode` / plan review buffer | none — pi has no plan-mode concept |
+| `PermissionRequest` (tool gating) | none — pi runs tools without out-of-band approval; tool gating is whatever pi enforces internally |
+| `AskUserQuestion` tool | none — pi has no structured question/answer tool |
+| Allow-pattern management / `settings.local.json` | n/a — no permission protocol to derive patterns from |
+| `SubagentStart` / `SubagentStop` | none — pi 0.74 has no sub-agent event vocabulary |
+
+The `needs_response?: boolean` field on `ToolExecutionStartEvent` is a placeholder kept for forward-compatibility but is never set by pi 0.74 and is not currently consumed by the adapter.
+
+**Practical consequence:** with pi as the driver, gravity's *feedback features* (plan review, inline plan comments, `@claude:` markers, permission inbox, question buffer, allow-pattern generation) are inert. The pi session shows up in the overview, renders turns/tools/streaming text/token usage, and supports prompt / steer / abort / thinking-level control — but there is nothing to approve, deny, annotate, or answer.
+
+If pi grows analogous concepts later, the translator is the right place to map them: emit `PermissionRequest` from a pi `permission_request` event, `PreToolUse` for `AskUserQuestion`-like tools, etc. Until then, pi sessions are a *driving + observation* surface, not a *review* surface.
+
 ## Non-Goals (Deferred)
 
-- Bidirectional flows (permission/question) — pi handles natively
-- Multiple concurrent pi sessions — single session per adapter instance
+- Multiple concurrent pi sessions — single session per adapter instance (singleton `activePiDriver` in `gravity-server.ts`)
 - pi session file compatibility — adapter owns session
 - Explicit provider/model override — pi uses its configured defaults
 

@@ -138,6 +138,7 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
   });
 
   // Set up event handler
+  let lifecycleStarted = false;
   driver.setEventHandler((evt: PiProtocolEvent) => {
     // Translate pi event into zero or more gravity events.
     const result = translatePiEvent(evt.event, state);
@@ -147,17 +148,20 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
       }
     }
 
-    // Handle special events for driver-level metadata + lifecycle callbacks.
+    // Driver-level lifecycle. `start` fires once for the lifetime of the pi
+    // process — agent_start repeats per prompt, so gate with a flag.
+    // `stop` is NOT emitted on agent_end: pi stays alive across prompts. The
+    // session-end signal is process exit (handled below).
     switch (evt.event.type) {
       case "model_select":
         metadata = updateModel(metadata, (evt.event as { model: string; provider: string }).model, (evt.event as { model: string; provider: string }).provider);
         state.modelName = (evt.event as { model: string }).model;
         break;
       case "agent_start":
-        onLifecycle("start", metadata);
-        break;
-      case "agent_end":
-        onLifecycle("stop", metadata);
+        if (!lifecycleStarted) {
+          lifecycleStarted = true;
+          onLifecycle("start", metadata);
+        }
         break;
     }
   });

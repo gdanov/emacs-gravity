@@ -166,7 +166,12 @@ const handleSessionStart = (ctx: EventContext) =>
     const patches: Patch[] = [];
 
     const existing = store.get(ctx.sessionId);
-    if (existing) {
+    // Reset on re-start with the same session id (Claude Code's /clear shape
+    // and resume cases). Skip for pi: pi emits a fresh agent_start (which
+    // becomes a SessionStart) on every prompt — resetting would wipe
+    // accumulated turns/plan/tokens between prompts.
+    const isPi = ctx.data.source === "pi";
+    if (existing && !isPi) {
       patches.push(...resetSession(existing));
     }
     const s = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session, ctx.data.source);
