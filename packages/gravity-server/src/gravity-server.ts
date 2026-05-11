@@ -995,6 +995,14 @@ const program = Effect.gen(function* () {
         piSessionNewSession();
         break;
       }
+
+      case "pi.stop": {
+        // Kill the pi process entirely (vs pi.abort which only interrupts
+        // the current LLM turn). The server-side onLifecycle("stop") path
+        // clears activePiDriver and broadcasts pi.session "stopped".
+        stopPiSession().catch((err) => logMsg(`pi.stop failed: ${err.message}`, "error"));
+        break;
+      }
     }
   };
 

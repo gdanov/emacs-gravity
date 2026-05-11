@@ -456,13 +456,28 @@ Steering interrupts/guides the current response."
        (text . ,text)))))
 
 (defun claude-gravity--pi-abort ()
-  "Abort the active pi session."
+  "Abort the current turn of the active pi session (RPC abort).
+Pi stays alive; only the in-flight LLM operation is interrupted.
+Use `claude-gravity--pi-stop' to terminate pi entirely."
   (interactive)
   (if (null claude-gravity--pi-session-id)
       (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: aborting session")
+    (claude-gravity--log 'info "Pi: aborting current turn")
     (claude-gravity--send-to-server
      `((type . "pi.abort")
+       (sessionId . ,claude-gravity--pi-session-id)))))
+
+(defun claude-gravity--pi-stop ()
+  "Stop the active pi session — kills the pi process.
+This is the unified \"end session\" verb for pi, matching tmux pane
+kill and daemon stop semantics. Use `claude-gravity--pi-abort' to
+just interrupt the current turn while keeping pi alive."
+  (interactive)
+  (if (null claude-gravity--pi-session-id)
+      (message "No active pi session.")
+    (claude-gravity--log 'info "Pi: stopping session (kill process)")
+    (claude-gravity--send-to-server
+     `((type . "pi.stop")
        (sessionId . ,claude-gravity--pi-session-id)))))
 
 (defun claude-gravity--pi-set-thinking (level)

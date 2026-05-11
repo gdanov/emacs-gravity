@@ -23,6 +23,7 @@ const VALID_TERMINAL_MESSAGE_TYPES = new Set([
   "pi.resume",
   "pi.compact",
   "pi.new-session",
+  "pi.stop",
 ]);
 
 /** Check if a parsed JSON object looks like a hook-style message (has `event` field). */

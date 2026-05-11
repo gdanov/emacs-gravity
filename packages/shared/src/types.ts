@@ -345,6 +345,7 @@ export type TerminalMessage =
   | { type: "pi.resume"; sessionId?: string; sessionPath: string }
   | { type: "pi.compact"; sessionId?: string; customInstructions?: string }
   | { type: "pi.new-session"; sessionId?: string }
+  | { type: "pi.stop"; sessionId?: string }
 
 export interface ProjectSummary {
   project: string;

@@ -1425,6 +1425,7 @@ Used to instrument per-section render latency."
 
 (define-key claude-gravity-session-cmd-map (kbd "s") 'claude-gravity-start-menu)
 (define-key claude-gravity-session-cmd-map (kbd "n") 'claude-gravity-daemon-start-session)
+(define-key claude-gravity-session-cmd-map (kbd "p") 'claude-gravity--pi-start)
 (define-key claude-gravity-session-cmd-map (kbd "h") 'claude-gravity-start-session-here)
 (define-key claude-gravity-session-cmd-map (kbd "r") 'claude-gravity-unified-resume)
 (define-key claude-gravity-session-cmd-map (kbd "w") 'claude-gravity-resume-in-tmux)
@@ -1433,7 +1434,9 @@ Used to instrument per-section render latency."
 (define-key claude-gravity-session-cmd-map (kbd "m") 'claude-gravity-set-model)
 (define-key claude-gravity-session-cmd-map (kbd "l") 'claude-gravity-set-permission-mode)
 (define-key claude-gravity-session-cmd-map (kbd "/") 'claude-gravity-slash-command)
-(define-key claude-gravity-session-cmd-map (kbd "c") 'claude-gravity-reset-session)
+(define-key claude-gravity-session-cmd-map (kbd "c") 'claude-gravity-unified-reset)
+(define-key claude-gravity-session-cmd-map (kbd "t") 'claude-gravity--pi-set-thinking)
+(define-key claude-gravity-session-cmd-map (kbd "z") 'claude-gravity--pi-compact)
 (define-key claude-gravity-session-cmd-map (kbd "$") 'claude-gravity-terminal-session)
 (define-key claude-gravity-session-cmd-map (kbd "<backtab>") 'claude-gravity-toggle-permission-mode)
 (define-key claude-gravity-session-cmd-map (kbd ",") 'claude-gravity-rename-session)
@@ -1946,7 +1949,10 @@ prompts to confirm the directory before starting."
 
 ;;;###autoload (autoload 'claude-gravity-overview-menu "claude-gravity" nil t)
 (transient-define-prefix claude-gravity-overview-menu ()
-  "Overview buffer menu: manage sessions and inbox."
+  "Overview buffer menu: manage sessions and inbox.
+Backend-specific operations (thinking level, compact, reset, slash
+commands, etc.) all live under the `S' prefix and grey out via
+`:inapt-if-not' on backends that don't support them."
   [["Actions"
     ("g" "Refresh" claude-gravity-refresh)
     ("G" "Force resync" claude-gravity-force-resync)
@@ -1955,6 +1961,7 @@ prompts to confirm the directory before starting."
    ["Session Lifecycle (S prefix)"
     ("S s" "Start (tmux)" claude-gravity-start-menu)
     ("S n" "Start (Cloud)" claude-gravity-daemon-start-menu)
+    ("S p" "Start (Pi)" claude-gravity--pi-start)
     ("S h" "Start here" claude-gravity-start-session-here)
     ("S r" "Resume session" claude-gravity-unified-resume)
     ("S w" "Resume (picker)" claude-gravity-resume-in-tmux)
@@ -1970,26 +1977,18 @@ prompts to confirm the directory before starting."
     ("+" "New config item" claude-gravity-config-new)
     ("k" "Dismiss inbox" claude-gravity-inbox-dismiss)
     ("y" "Copy issue ID" claude-gravity-copy-issue-id)]
-   ["Pi Sessions"
-    ("p s" "Start pi session" claude-gravity--pi-start)
-    ("p p" "Send prompt" claude-gravity--pi-prompt
-     :inapt-if-not (lambda () claude-gravity--pi-session-id))
-    ("p t" "Set thinking level" claude-gravity--pi-set-thinking
-     :inapt-if-not (lambda () claude-gravity--pi-session-id))
-    ("p a" "Abort" claude-gravity--pi-abort
-     :inapt-if-not (lambda () claude-gravity--pi-session-id))
-    ("p c" "Compact context" claude-gravity--pi-compact
-     :inapt-if-not (lambda () claude-gravity--pi-session-id))
-    ("p n" "New session (clear)" claude-gravity--pi-new-session
-     :inapt-if-not (lambda () claude-gravity--pi-session-id))
-    ("p ?" "Status" claude-gravity--pi-status)]
    ["Debug"
     ("M" "Debug messages" claude-gravity-debug-show)]])
 
 
 ;;;###autoload (autoload 'claude-gravity-session-menu "claude-gravity" nil t)
 (transient-define-prefix claude-gravity-session-menu ()
-  "Session buffer menu: interact with current session."
+  "Session buffer menu: interact with current session.
+
+Common verbs (compose, stop, interrupt, set model, reset/clear,
+resume) dispatch to the right backend based on the session at point.
+Backend-specific operations live in the \"Backend-specific\" group
+and grey out when not applicable."
   [["View & Navigate"
     ("g" "Refresh" claude-gravity-refresh)
     ("G" "Force resync" claude-gravity-force-resync)
@@ -2005,6 +2004,10 @@ prompts to confirm the directory before starting."
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("S e" "Interrupt" claude-gravity-unified-interrupt
      :inapt-if-not claude-gravity--current-session-managed-p)
+    ("S c" "Reset/clear" claude-gravity-unified-reset
+     :inapt-if-not (lambda ()
+                     (or (claude-gravity--current-session-tmux-p)
+                         (claude-gravity--current-session-pi-p))))
     ("S m" "Set model" claude-gravity-set-model
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("S l" "Set permission mode" claude-gravity-set-permission-mode
@@ -2018,23 +2021,15 @@ prompts to confirm the directory before starting."
     ("y" "Copy issue ID" claude-gravity-copy-issue-id)
     ("T" "Parse transcript" claude-gravity-view-agent-transcript)
     ("V" "Open transcript" claude-gravity-open-agent-transcript)]
-   ["Tmux (S prefix)"
-    ("S /" "Slash command" claude-gravity-slash-command
+   ["Backend-specific (S prefix)"
+    ("S /" "Slash command (tmux)" claude-gravity-slash-command
      :inapt-if-not claude-gravity--current-session-tmux-p)
-    ("S $" "Terminal" claude-gravity-terminal-session
+    ("S $" "Terminal (tmux)" claude-gravity-terminal-session
      :inapt-if-not claude-gravity--current-session-tmux-p)
-    ("S c" "Reset/clear" claude-gravity-reset-session
-     :inapt-if-not claude-gravity--current-session-tmux-p)]
-   ["Pi Sessions"
-    ;; `P' is already bound (single-key) to Show Plan, so use `p' as the pi prefix.
-    ("p s" "Start pi session" claude-gravity--pi-start)
-    ("p p" "Send prompt" claude-gravity--pi-prompt
-     :inapt-if-not (lambda () claude-gravity--pi-session-id))
-    ("p t" "Set thinking level" claude-gravity--pi-set-thinking
-     :inapt-if-not (lambda () claude-gravity--pi-session-id))
-    ("p a" "Abort" claude-gravity--pi-abort
-     :inapt-if-not (lambda () claude-gravity--pi-session-id))
-    ("p ?" "Status" claude-gravity--pi-status)]
+    ("S t" "Thinking level (pi)" claude-gravity--pi-set-thinking
+     :inapt-if-not claude-gravity--current-session-pi-p)
+    ("S z" "Compact context (pi)" claude-gravity--pi-compact
+     :inapt-if-not claude-gravity--current-session-pi-p)]
    ["Permissions"
     ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
     ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]

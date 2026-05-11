@@ -1755,7 +1755,7 @@ var Reference = Service;
 var Scheduler = /* @__PURE__ */ Reference("effect/Scheduler", {
   defaultValue: () => new MixedScheduler()
 });
-var setImmediate = "setImmediate" in globalThis ? (f) => {
+var setImmediate2 = "setImmediate" in globalThis ? (f) => {
   const timer = globalThis.setImmediate(f);
   return () => globalThis.clearImmediate(timer);
 } : (f) => {
@@ -1792,7 +1792,7 @@ var MixedScheduler = class {
   running = void 0;
   executionMode;
   setImmediate;
-  constructor(executionMode = "async", setImmediateFn = setImmediate) {
+  constructor(executionMode = "async", setImmediateFn = setImmediate2) {
     this.executionMode = executionMode;
     this.setImmediate = setImmediateFn;
   }
@@ -5479,7 +5479,12 @@ var VALID_TERMINAL_MESSAGE_TYPES = /* @__PURE__ */ new Set([
   "pi.prompt",
   "pi.steer",
   "pi.abort",
-  "pi.set-thinking"
+  "pi.set-thinking",
+  "pi.set-model",
+  "pi.resume",
+  "pi.compact",
+  "pi.new-session",
+  "pi.stop"
 ]);
 function isHookMessage(obj) {
   return typeof obj.event === "string" && typeof obj.session_id === "string";
@@ -5838,6 +5843,9 @@ function createSession(sessionId, cwd, source) {
     startTime: Date.now(),
     lastEventTime: Date.now(),
     tokenUsage: null,
+    cost: null,
+    contextUsage: null,
+    piSessionFile: null,
     plan: null,
     streamingText: null,
     permissionMode: null,
@@ -5892,13 +5900,17 @@ function resetSession(s) {
   s.plan = null;
   s.streamingText = null;
   s.tokenUsage = null;
+  s.cost = null;
+  s.contextUsage = null;
   s.lastEventTime = Date.now();
   return [
     { op: "set_status", status: "active" },
     { op: "set_claude_status", claudeStatus: "idle" },
     { op: "set_plan", plan: null },
     { op: "set_streaming_text", text: null },
-    { op: "set_token_usage", usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }
+    { op: "set_token_usage", usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    { op: "set_cost", cost: null },
+    { op: "set_context_usage", contextUsage: null }
   ];
 }
 function setClaudeStatus(s, status) {
@@ -5914,6 +5926,14 @@ function setTokenUsage(s, usage) {
   s.tokenUsage = usage;
   return [{ op: "set_token_usage", usage }];
 }
+function setCost(s, cost) {
+  s.cost = cost;
+  return [{ op: "set_cost", cost }];
+}
+function setContextUsage(s, contextUsage) {
+  s.contextUsage = contextUsage;
+  return [{ op: "set_context_usage", contextUsage }];
+}
 function setPlan(s, plan) {
   s.plan = plan;
   return [{ op: "set_plan", plan }];
@@ -5926,6 +5946,7 @@ function updateMeta(s, opts) {
   if (opts.branch) s.branch = opts.branch;
   if (opts.modelName) s.modelName = opts.modelName;
   if (opts.tmuxSession && !s.tmuxSession) s.tmuxSession = opts.tmuxSession;
+  if (opts.piSessionFile) s.piSessionFile = opts.piSessionFile;
   return [{ op: "set_meta", ...opts }];
 }
 function currentTurnNode(s) {
@@ -6344,7 +6365,8 @@ var handleSessionStart = (ctx) => Effect_exports.gen(function* () {
   const store = yield* Effect_exports.service(SessionStore);
   const patches = [];
   const existing = store.get(ctx.sessionId);
-  if (existing) {
+  const isPi = ctx.data.source === "pi";
+  if (existing && !isPi) {
     patches.push(...resetSession(existing));
   }
   const s = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session, ctx.data.source);
@@ -6847,25 +6869,36 @@ var TerminalLive = Layer_exports.succeed(Terminal, makeTerminal());
 
 // src/pi-driver/spawn.ts
 import { spawn } from "child_process";
-import { appendFileSync as appendFileSync2 } from "fs";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2 } from "fs";
+import { homedir as homedir3 } from "os";
+import { join as join3 } from "path";
 
 // src/pi-driver/protocol.ts
 function parseJsonLine(line) {
   try {
     const parsed = JSON.parse(line);
     if (parsed && typeof parsed === "object" && "type" in parsed) {
-      return parsed;
+      if (parsed.type === "response" && typeof parsed.command === "string") {
+        return { kind: "response", response: parsed };
+      }
+      return { kind: "event", event: parsed };
     }
-    return { type: "unknown", ...parsed };
+    return { kind: "event", event: { type: "unknown", ...parsed } };
   } catch {
-    return { type: "unknown", raw: line };
+    return { kind: "event", event: { type: "unknown", raw: line } };
   }
+}
+var requestCounter = 0;
+function nextRequestId() {
+  return `gr-${process.pid}-${++requestCounter}`;
 }
 var PiProtocol = class _PiProtocol {
   buffer = "";
   onEvent;
   onStderr;
   commandWriter = null;
+  /** In-flight RPC requests awaiting a matching response (keyed by request id). */
+  pendingRequests = /* @__PURE__ */ new Map();
   constructor(options) {
     this.onEvent = options.onEvent;
     this.onStderr = options.onStderr ?? ((line) => {
@@ -6875,7 +6908,8 @@ var PiProtocol = class _PiProtocol {
   }
   /**
    * Feed a text chunk from pi's stdout into the parser.
-   * Calls onEvent for each complete JSON line.
+   * Dispatches events to onEvent and responses to outstanding request
+   * promises (matched by id when present).
    */
   feed(data) {
     this.buffer += data;
@@ -6884,9 +6918,48 @@ var PiProtocol = class _PiProtocol {
       const line = this.buffer.substring(0, newlineIdx).trim();
       this.buffer = this.buffer.substring(newlineIdx + 1);
       if (line.length === 0) continue;
-      const event = parseJsonLine(line);
-      this.onEvent({ event, raw: line });
+      const parsed = parseJsonLine(line);
+      if (parsed.kind === "response") {
+        this.dispatchResponse(parsed.response);
+      } else {
+        this.onEvent({ event: parsed.event, raw: line });
+      }
     }
+  }
+  /** Route a response to its waiter, or drop it if unmatched. */
+  dispatchResponse(response) {
+    const id = response.id;
+    if (!id) {
+      return;
+    }
+    const pending = this.pendingRequests.get(id);
+    if (!pending) return;
+    this.pendingRequests.delete(id);
+    clearTimeout(pending.timer);
+    pending.resolve(response);
+  }
+  /**
+   * Send an RPC command with request/response correlation. Returns a promise
+   * resolving to pi's response. Times out after `timeoutMs` (default 10s).
+   *
+   * Use for commands where the caller cares about the response: get_state,
+   * get_session_stats, set_model, etc. For fire-and-forget commands use
+   * `sendCommand`.
+   */
+  request(command, timeoutMs = 1e4) {
+    if (!this.commandWriter) {
+      return Promise.reject(new Error("pi command writer not connected"));
+    }
+    const id = nextRequestId();
+    const line = _PiProtocol.formatCommand(command, id);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new Error(`pi RPC ${command.type} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pendingRequests.set(id, { resolve, reject, timer });
+      this.commandWriter(line);
+    });
   }
   /**
    * Feed a text chunk from pi's stderr.
@@ -6924,18 +6997,49 @@ var PiProtocol = class _PiProtocol {
     }
   }
   /**
-   * Format any PiCommand to a JSONL string.
+   * Format any PiCommand to a JSONL string. If `id` is provided, it is
+   * attached for request/response correlation (pi echoes it on the
+   * matching `{type:"response", id}` line).
    */
-  static formatCommand(cmd) {
+  static formatCommand(cmd, id) {
+    const withId = (obj) => id ? { ...obj, id } : obj;
     switch (cmd.type) {
-      case "prompt":
-        return _PiProtocol.formatPrompt(cmd.message, cmd.images);
+      case "prompt": {
+        const base = { type: "prompt", message: cmd.message };
+        if (cmd.images && cmd.images.length > 0) base.images = cmd.images;
+        return JSON.stringify(withId(base)) + "\n";
+      }
       case "steer":
-        return _PiProtocol.formatSteer(cmd.message);
+        return JSON.stringify(withId({ type: "steer", message: cmd.message })) + "\n";
       case "abort":
-        return _PiProtocol.formatAbort();
+        return JSON.stringify(withId({ type: "abort" })) + "\n";
       case "set_thinking_level":
-        return _PiProtocol.formatThinkingLevel(cmd.level);
+        return JSON.stringify(withId({ type: "set_thinking_level", level: cmd.level })) + "\n";
+      case "set_model":
+        return JSON.stringify(withId({ type: "set_model", provider: cmd.provider, modelId: cmd.modelId })) + "\n";
+      case "get_session_stats":
+        return JSON.stringify(withId({ type: "get_session_stats" })) + "\n";
+      case "get_state":
+        return JSON.stringify(withId({ type: "get_state" })) + "\n";
+      case "switch_session":
+        return JSON.stringify(withId({ type: "switch_session", sessionPath: cmd.sessionPath })) + "\n";
+      case "compact": {
+        const body = { type: "compact" };
+        if (cmd.customInstructions) body.customInstructions = cmd.customInstructions;
+        return JSON.stringify(withId(body)) + "\n";
+      }
+      case "new_session": {
+        const body = { type: "new_session" };
+        if (cmd.parentSession) body.parentSession = cmd.parentSession;
+        return JSON.stringify(withId(body)) + "\n";
+      }
+      case "extension_ui_response": {
+        const body = { type: "extension_ui_response", id: cmd.id };
+        if (cmd.value !== void 0) body.value = cmd.value;
+        if (cmd.confirmed !== void 0) body.confirmed = cmd.confirmed;
+        if (cmd.cancelled !== void 0) body.cancelled = cmd.cancelled;
+        return JSON.stringify(body) + "\n";
+      }
     }
   }
   /**
@@ -6967,22 +7071,42 @@ var PiProtocol = class _PiProtocol {
   static formatThinkingLevel(level) {
     return JSON.stringify({ type: "set_thinking_level", level }) + "\n";
   }
+  /**
+   * Format a set_model command for pi's stdin.
+   * Pi expects { type: "set_model", provider, modelId } (verified against
+   * pi 0.74 RPC docs).
+   */
+  static formatSetModel(provider, modelId) {
+    return JSON.stringify({ type: "set_model", provider, modelId }) + "\n";
+  }
 };
 
 // src/pi-driver/spawn.ts
 var RAW_LOG = process.env.GRAVITY_PI_RAW_LOG;
 var PI_BINARY = process.env.PI_BINARY_PATH ?? "pi";
 var DEFAULT_THINKING_LEVEL = "medium";
+var DEFAULT_PI_SESSION_DIR = join3(homedir3(), ".local", "state", "gravity-pi-sessions");
 function spawnPiSync(options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const thinkingLevel = options.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
+  const sessionDir = options.sessionDir ?? DEFAULT_PI_SESSION_DIR;
+  try {
+    mkdirSync2(sessionDir, { recursive: true });
+  } catch (err) {
+    process.stderr.write(`[pi-adapter] could not create session dir ${sessionDir}: ${err.message}
+`);
+  }
   const args2 = [
     "--mode",
     "rpc",
-    "--no-session",
+    "--session-dir",
+    sessionDir,
     "--thinking",
     thinkingLevel
   ];
+  if (options.resumeSession) {
+    args2.push("--session", options.resumeSession);
+  }
   const env = { ...process.env };
   if (options.model) env["PI_MODEL"] = options.model;
   if (options.provider) env["PI_PROVIDER"] = options.provider;
@@ -7067,6 +7191,63 @@ function spawnPiSync(options = {}) {
       if (stopped || !child.stdin || child.stdin.destroyed) return;
       child.stdin.write(PiProtocol.formatThinkingLevel(level));
     },
+    setModel: (provider, modelId) => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      child.stdin.write(PiProtocol.formatSetModel(provider, modelId));
+    },
+    getSessionStats: async () => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_session_stats" });
+      if (!response.success) {
+        throw new Error(`pi get_session_stats failed: ${response.error ?? "unknown error"}`);
+      }
+      return response.data ?? {};
+    },
+    getState: async () => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_state" });
+      if (!response.success) {
+        throw new Error(`pi get_state failed: ${response.error ?? "unknown error"}`);
+      }
+      return response.data ?? {};
+    },
+    switchSession: async (sessionPath) => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "switch_session", sessionPath });
+      if (!response.success) {
+        throw new Error(`pi switch_session failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return data.cancelled !== true;
+    },
+    sendExtensionUIResponse: (payload) => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      proto.sendCommand({ type: "extension_ui_response", ...payload });
+    },
+    compact: async (customInstructions) => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request(
+        customInstructions ? { type: "compact", customInstructions } : { type: "compact" },
+        6e4
+        // compaction can take a while (extra LLM call)
+      );
+      if (!response.success) {
+        throw new Error(`pi compact failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return data;
+    },
+    newSession: async (parentSession) => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request(
+        parentSession ? { type: "new_session", parentSession } : { type: "new_session" }
+      );
+      if (!response.success) {
+        throw new Error(`pi new_session failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return data.cancelled !== true;
+    },
     stop: async () => {
       if (stopped) return;
       stopped = true;
@@ -7098,6 +7279,7 @@ function createAccState(sessionId, cwd, effortLevel = "medium") {
     currentToolUseId: null,
     currentToolName: null,
     currentToolInput: null,
+    currentToolStartTime: null,
     turns: [],
     currentTurn: -1,
     inTurn: false
@@ -7145,6 +7327,7 @@ function accToolStart(state, toolCallId, toolName, toolInput) {
   state.currentToolUseId = toolCallId;
   state.currentToolName = toolName;
   state.currentToolInput = toolInput;
+  state.currentToolStartTime = Date.now();
   flushPendingAssistantContext(state);
   return state;
 }
@@ -7179,8 +7362,7 @@ function accToolEnd(state, toolCallId, toolName, toolResult, error) {
       toolInput,
       assistantText: assistantText ?? void 0,
       assistantThinking: assistantThinking ?? void 0,
-      startTime: Date.now() - 100,
-      // approximate
+      startTime: state.currentToolStartTime ?? Date.now(),
       endTime: Date.now(),
       result: toolResult,
       error: error ?? null,
@@ -7192,6 +7374,7 @@ function accToolEnd(state, toolCallId, toolName, toolResult, error) {
   state.currentToolUseId = null;
   state.currentToolName = null;
   state.currentToolInput = null;
+  state.currentToolStartTime = null;
   return results;
 }
 function accTextDelta(state, delta) {
@@ -7281,19 +7464,18 @@ function translatePiEvent(event, state) {
     }
     case "tool_execution_start": {
       const e = event;
-      const id = e.toolCallId ?? e.tool_call_id;
-      const name = e.toolName ?? e.tool_name;
+      const id = e.toolCallId ?? e.tool_call_id ?? "";
+      const name = e.toolName ?? e.tool_name ?? "";
       const input = e.args ?? e.tool_input ?? {};
       accToolStart(state, id, name, input);
       return { kind: "noop" };
     }
     case "tool_execution_end": {
       const e = event;
-      const id = e.toolCallId ?? e.tool_call_id;
-      const name = e.toolName ?? e.tool_name;
+      const id = e.toolCallId ?? e.tool_call_id ?? "";
+      const name = e.toolName ?? e.tool_name ?? "";
       const toolResult = e.result ?? e.tool_result;
-      const isError = e.isError === true;
-      const errorMsg = isError ? typeof e.error === "string" ? e.error : "tool execution failed" : typeof e.error === "string" ? e.error : void 0;
+      const errorMsg = e.isError === true ? e.error ?? "tool execution failed" : e.error;
       const results = accToolEnd(state, id, name, toolResult, errorMsg);
       if (results.length === 0) return { kind: "noop" };
       return { kind: "emit", results };
@@ -7436,14 +7618,23 @@ function startPiDriver(options) {
   let metadata = createSessionMetadata(sessionId, cwd, thinkingLevel);
   const onLifecycle = options.onLifecycle ?? (() => {
   });
+  const onExtensionUIRequest = options.onExtensionUIRequest ?? (() => {
+  });
   const { driver, process: childProcess } = spawnPiSync({
     cwd,
     thinkingLevel,
     model: options.model,
     provider: options.provider,
-    piBinaryPath: options.piBinaryPath
+    piBinaryPath: options.piBinaryPath,
+    sessionDir: options.sessionDir,
+    resumeSession: options.resumeSession
   });
+  let lifecycleStarted = false;
   driver.setEventHandler((evt) => {
+    if (evt.event.type === "extension_ui_request") {
+      onExtensionUIRequest(evt.event);
+      return;
+    }
     const result3 = translatePiEvent(evt.event, state);
     if (result3.kind === "emit") {
       for (const r of result3.results) {
@@ -7456,10 +7647,10 @@ function startPiDriver(options) {
         state.modelName = evt.event.model;
         break;
       case "agent_start":
-        onLifecycle("start", metadata);
-        break;
-      case "agent_end":
-        onLifecycle("stop", metadata);
+        if (!lifecycleStarted) {
+          lifecycleStarted = true;
+          onLifecycle("start", metadata);
+        }
         break;
     }
   });
@@ -7494,6 +7685,17 @@ function startPiDriver(options) {
       metadata = updateThinkingLevel(metadata, normalized);
       state.effortLevel = thinkingToEffort(normalized);
     },
+    setModel: (provider, modelId) => {
+      driver.setModel(provider, modelId);
+      metadata = updateModel(metadata, modelId, provider);
+      state.modelName = modelId;
+    },
+    getSessionStats: () => driver.getSessionStats(),
+    getState: () => driver.getState(),
+    switchSession: (sessionPath) => driver.switchSession(sessionPath),
+    sendExtensionUIResponse: (payload) => driver.sendExtensionUIResponse(payload),
+    compact: (customInstructions) => driver.compact(customInstructions),
+    newSession: (parentSession) => driver.newSession(parentSession),
     stop: () => {
       return driver.stop();
     },
@@ -7572,6 +7774,115 @@ var program = Effect_exports.gen(function* () {
       store.cancelPurge(sessionId);
     }
   };
+  const handlePiExtensionUIRequest = (sessionId, request3) => {
+    const session = store.get(sessionId);
+    if (!session) {
+      logMsg(`pi extension_ui_request for unknown session ${sessionId}`, "warn");
+      return;
+    }
+    const method = request3.method;
+    const sendResponse = (payload) => {
+      if (!activePiDriver) {
+        logMsg(`pi extension_ui_response: no active driver to send to (request id=${request3.id})`, "warn");
+        return;
+      }
+      activePiDriver.sendExtensionUIResponse({ id: request3.id, ...payload });
+    };
+    switch (method) {
+      case "confirm": {
+        const summary = request3.title ?? request3.message ?? "Pi confirm";
+        const item = inbox.add(
+          "permission",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          {
+            // Shape the action.permission handler expects: tool_name +
+            // tool_input. We use a synthetic tool name so the UI label
+            // makes sense.
+            tool_name: "pi:confirm",
+            tool_input: { title: request3.title, message: request3.message },
+            // Pi-specific fields for renderers that want them:
+            pi_ui: { method, id: request3.id, options: ["Allow", "Block"] }
+          }
+        );
+        pendingPiUIResponses.set(item.id, { piRequestId: request3.id, method });
+        terminals.broadcast({ type: "inbox.added", item });
+        break;
+      }
+      case "select": {
+        const options = request3.options ?? [];
+        const summary = request3.title ?? "Pi select";
+        const item = inbox.add(
+          "question",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          {
+            tool_name: "pi:select",
+            tool_input: {
+              // action.question's handler reads tool_input.questions[] —
+              // synthesize a single question entry with the option list.
+              questions: [{ question: summary, options }]
+            },
+            pi_ui: { method, id: request3.id, options }
+          }
+        );
+        pendingPiUIResponses.set(item.id, { piRequestId: request3.id, method });
+        terminals.broadcast({ type: "inbox.added", item });
+        break;
+      }
+      case "input":
+      case "editor": {
+        logMsg(`pi extension_ui_request ${method} not yet supported \u2014 cancelling`, "warn");
+        sendResponse({ cancelled: true });
+        break;
+      }
+      // Fire-and-forget: pi doesn't expect a response. Log for visibility;
+      // wiring these into the UI (status bar, transient notifications,
+      // window title) is a follow-up.
+      case "notify":
+      case "setStatus":
+      case "setWidget":
+      case "setTitle":
+      case "set_editor_text":
+        logMsg(`pi UI notice ${method}: ${JSON.stringify({
+          text: request3.text,
+          message: request3.message,
+          statusText: request3.statusText,
+          title: request3.title
+        })}`);
+        break;
+      default:
+        logMsg(`pi extension_ui_request unknown method ${method} \u2014 cancelling`, "warn");
+        sendResponse({ cancelled: true });
+    }
+  };
+  const applyPiSessionStats = (sessionId, stats) => {
+    const session = store.get(sessionId);
+    if (!session) return;
+    const patches = [];
+    if (typeof stats.cost === "number") {
+      patches.push(...setCost(session, stats.cost));
+    }
+    if (stats.contextUsage) {
+      patches.push(...setContextUsage(session, {
+        tokens: stats.contextUsage.tokens,
+        contextWindow: stats.contextUsage.contextWindow,
+        percent: stats.contextUsage.percent
+      }));
+    }
+    if (patches.length === 0) return;
+    if (PULL_MODE) {
+      const stored = store.appendPatches(sessionId, patches);
+      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+      terminals.signalChanged("session", sessionId, seq);
+    } else {
+      terminals.broadcast({ type: "session.update", sessionId, patches });
+    }
+  };
   const waitForCapableTerminal = (capability, timeoutMs) => new Promise((resolve) => {
     if (terminals.hasCapableTerminal(capability)) {
       resolve(true);
@@ -7602,6 +7913,7 @@ var program = Effect_exports.gen(function* () {
     });
   };
   let activePiDriver = null;
+  const pendingPiUIResponses = /* @__PURE__ */ new Map();
   const startPiSession = (options) => {
     if (activePiDriver) {
       logMsg(`Pi session already running \u2014 use pi.abort first`, "warn");
@@ -7630,22 +7942,33 @@ var program = Effect_exports.gen(function* () {
       cwd: options.cwd ?? process.cwd(),
       thinkingLevel: options.thinkingLevel ?? "medium",
       sessionId,
+      resumeSession: options.resumeSession,
+      onExtensionUIRequest: (request3) => {
+        handlePiExtensionUIRequest(sessionId, request3);
+      },
       onTranslation: (result3) => {
         handlePiTranslation(sessionId, result3);
+        if (result3.hookEvent === "Stop") {
+          setImmediate(() => {
+            if (!activePiDriver) return;
+            activePiDriver.getSessionStats().then(
+              (stats) => applyPiSessionStats(sessionId, stats),
+              (err) => logMsg(`pi get_session_stats failed: ${err.message}`, "warn")
+            );
+          });
+        }
       },
       onLifecycle: (event, _metadata) => {
         if (event === "start") {
           logMsg(`Pi session started: ${sessionId}`);
-        } else if (event === "stop") {
-          logMsg(`Pi session ended: ${sessionId}`);
-          terminals.broadcast({
-            type: "pi.session",
-            sessionId,
-            event: "stopped"
-          });
-          activePiDriver = null;
-        } else if (event === "error") {
-          logMsg(`Pi session error`, "error");
+        } else if (event === "stop" || event === "error") {
+          if (event === "error") logMsg(`Pi session error`, "error");
+          else logMsg(`Pi session ended: ${sessionId}`);
+          for (const [itemId] of pendingPiUIResponses) {
+            inbox.remove(itemId);
+            terminals.broadcast({ type: "inbox.removed", itemId });
+          }
+          pendingPiUIResponses.clear();
           terminals.broadcast({
             type: "pi.session",
             sessionId,
@@ -7656,6 +7979,34 @@ var program = Effect_exports.gen(function* () {
       }
     });
     activePiDriver = driver;
+    const captureSessionFile = (attempt = 0) => {
+      if (!activePiDriver || activePiDriver !== driver) return;
+      driver.getState().then((state) => {
+        const f = state.sessionFile;
+        if (typeof f === "string" && f.length > 0) {
+          const session = store.get(sessionId);
+          if (session) {
+            const patches = updateMeta(session, { piSessionFile: f });
+            if (PULL_MODE) {
+              const stored = store.appendPatches(sessionId, patches);
+              const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+              terminals.signalChanged("session", sessionId, seq);
+            } else {
+              terminals.broadcast({ type: "session.update", sessionId, patches });
+            }
+          }
+        } else if (attempt < 3) {
+          setTimeout(() => captureSessionFile(attempt + 1), 500 * (attempt + 1));
+        }
+      }, (err) => {
+        if (attempt < 3) {
+          setTimeout(() => captureSessionFile(attempt + 1), 500 * (attempt + 1));
+        } else {
+          logMsg(`pi get_state failed after retries: ${err.message}`, "warn");
+        }
+      });
+    };
+    setImmediate(() => captureSessionFile());
     return sessionId;
   };
   const piSessionPrompt = (text, images) => {
@@ -7688,6 +8039,57 @@ var program = Effect_exports.gen(function* () {
     }
     activePiDriver.setEffortLevel(level);
   };
+  const piSessionSetModel = (provider, modelId) => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session`, "warn");
+      return;
+    }
+    activePiDriver.setModel(provider, modelId);
+  };
+  const piSessionCompact = (customInstructions) => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session to compact`, "warn");
+      return;
+    }
+    activePiDriver.compact(customInstructions).then(
+      (data) => {
+        const summary = data.summary ? ` \u2014 ${data.summary.substring(0, 80)}\u2026` : "";
+        logMsg(`pi compact done (tokensBefore=${data.tokensBefore ?? "?"})${summary}`);
+      },
+      (err) => logMsg(`pi compact failed: ${err.message}`, "error")
+    );
+  };
+  const piSessionNewSession = () => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session for new_session`, "warn");
+      return;
+    }
+    activePiDriver.newSession().then(
+      (ok) => {
+        if (!ok) logMsg(`pi new_session cancelled by extension`, "warn");
+      },
+      (err) => logMsg(`pi new_session failed: ${err.message}`, "error")
+    );
+  };
+  const piSessionResume = (sessionPath) => {
+    if (!sessionPath) {
+      logMsg(`pi.resume called without sessionPath`, "warn");
+      return;
+    }
+    if (activePiDriver) {
+      activePiDriver.switchSession(sessionPath).then(
+        (ok) => {
+          if (!ok) logMsg(`pi switch_session cancelled by extension`, "warn");
+        },
+        (err) => logMsg(`pi switch_session failed: ${err.message}`, "error")
+      );
+    } else {
+      const sessionId = startPiSession({ resumeSession: sessionPath });
+      if (sessionId) {
+        logMsg(`Pi session ${sessionId} spawned resuming ${sessionPath}`);
+      }
+    }
+  };
   const stopPiSession = async () => {
     if (!activePiDriver) {
       return;
@@ -7695,12 +8097,6 @@ var program = Effect_exports.gen(function* () {
     await activePiDriver.stop();
     activePiDriver = null;
   };
-  program._startPiSession = startPiSession;
-  program._piSessionPrompt = piSessionPrompt;
-  program._piSessionSteer = piSessionSteer;
-  program._piSessionAbort = piSessionAbort;
-  program._piSessionSetThinking = piSessionSetThinking;
-  program._stopPiSession = stopPiSession;
   const generateSessionId2 = () => {
     const now = Date.now().toString(36);
     const random2 = Math.random().toString(36).substring(2, 10);
@@ -7880,6 +8276,21 @@ var program = Effect_exports.gen(function* () {
       }
       case "action.permission": {
         const { itemId, decision, message, updatedPermissions } = msg;
+        const piUi = pendingPiUIResponses.get(itemId);
+        if (piUi) {
+          if (!activePiDriver) {
+            logMsg(`action.permission for pi UI ${piUi.piRequestId}: no active driver`, "warn");
+          } else {
+            activePiDriver.sendExtensionUIResponse({
+              id: piUi.piRequestId,
+              confirmed: decision === "allow"
+            });
+          }
+          pendingPiUIResponses.delete(itemId);
+          inbox.remove(itemId);
+          terminals.broadcast({ type: "inbox.removed", itemId });
+          break;
+        }
         Effect_exports.runSync(inbox.respond(itemId, {
           hookSpecificOutput: {
             hookEventName: "PermissionRequest",
@@ -7891,6 +8302,22 @@ var program = Effect_exports.gen(function* () {
       }
       case "action.question": {
         const { itemId, answers } = msg;
+        const piUi = pendingPiUIResponses.get(itemId);
+        if (piUi) {
+          if (!activePiDriver) {
+            logMsg(`action.question for pi UI ${piUi.piRequestId}: no active driver`, "warn");
+          } else {
+            const value = answers[0];
+            activePiDriver.sendExtensionUIResponse({
+              id: piUi.piRequestId,
+              ...value !== void 0 ? { value } : { cancelled: true }
+            });
+          }
+          pendingPiUIResponses.delete(itemId);
+          inbox.remove(itemId);
+          terminals.broadcast({ type: "inbox.removed", itemId });
+          break;
+        }
         const pending = inbox.getPending(itemId);
         const toolInput = pending?.inboxItem.data?.tool_input || {};
         const questions = toolInput.questions || [];
@@ -8023,6 +8450,29 @@ var program = Effect_exports.gen(function* () {
       case "pi.set-thinking": {
         const m = msg;
         piSessionSetThinking(m.level);
+        break;
+      }
+      case "pi.set-model": {
+        const m = msg;
+        piSessionSetModel(m.provider, m.modelId);
+        break;
+      }
+      case "pi.resume": {
+        const m = msg;
+        piSessionResume(m.sessionPath);
+        break;
+      }
+      case "pi.compact": {
+        const m = msg;
+        piSessionCompact(m.customInstructions);
+        break;
+      }
+      case "pi.new-session": {
+        piSessionNewSession();
+        break;
+      }
+      case "pi.stop": {
+        stopPiSession().catch((err) => logMsg(`pi.stop failed: ${err.message}`, "error"));
         break;
       }
     }
