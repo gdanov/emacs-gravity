@@ -363,6 +363,8 @@ export type PiCommand =
   | { type: "get_session_stats" }
   | { type: "get_state" }
   | { type: "switch_session"; sessionPath: string }
+  | { type: "compact"; customInstructions?: string }
+  | { type: "new_session"; parentSession?: string }
   | ({ type: "extension_ui_response" } & ExtensionUIResponsePayload);
 
 /** Event emitted by protocol.ts for parsed pi events. */
@@ -487,6 +489,18 @@ export interface PiDriver {
    * Fire-and-forget — pi does not acknowledge the response.
    */
   sendExtensionUIResponse(payload: ExtensionUIResponsePayload): void;
+  /**
+   * Manually compact pi's conversation context (`compact` RPC). Pi
+   * responds with a summary and token-savings info; the driver awaits
+   * the response so callers can surface the result.
+   */
+  compact(customInstructions?: string): Promise<{ summary?: string; tokensBefore?: number }>;
+  /**
+   * Start a fresh session inside the running pi process (`new_session`
+   * RPC). Returns true unless cancelled by a `session_before_switch`
+   * extension event handler.
+   */
+  newSession(parentSession?: string): Promise<boolean>;
   /**
    * Stop the pi subprocess and clean up resources.
    * Returns a promise that resolves when the subprocess exits.

@@ -212,6 +212,35 @@ export function spawnPiSync(
       proto.sendCommand({ type: "extension_ui_response", ...payload });
     },
 
+    compact: async (customInstructions?: string) => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request(
+        customInstructions
+          ? { type: "compact", customInstructions }
+          : { type: "compact" },
+        60_000, // compaction can take a while (extra LLM call)
+      );
+      if (!response.success) {
+        throw new Error(`pi compact failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = (response.data ?? {}) as { summary?: string; tokensBefore?: number };
+      return data;
+    },
+
+    newSession: async (parentSession?: string) => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request(
+        parentSession
+          ? { type: "new_session", parentSession }
+          : { type: "new_session" },
+      );
+      if (!response.success) {
+        throw new Error(`pi new_session failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = (response.data ?? {}) as { cancelled?: boolean };
+      return data.cancelled !== true;
+    },
+
     stop: async (): Promise<void> => {
       if (stopped) return;
       stopped = true;

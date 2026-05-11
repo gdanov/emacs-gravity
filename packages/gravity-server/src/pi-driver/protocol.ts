@@ -220,6 +220,16 @@ export class PiProtocol {
         return JSON.stringify(withId({ type: "get_state" })) + "\n";
       case "switch_session":
         return JSON.stringify(withId({ type: "switch_session", sessionPath: cmd.sessionPath })) + "\n";
+      case "compact": {
+        const body: Record<string, unknown> = { type: "compact" };
+        if (cmd.customInstructions) body.customInstructions = cmd.customInstructions;
+        return JSON.stringify(withId(body)) + "\n";
+      }
+      case "new_session": {
+        const body: Record<string, unknown> = { type: "new_session" };
+        if (cmd.parentSession) body.parentSession = cmd.parentSession;
+        return JSON.stringify(withId(body)) + "\n";
+      }
       case "extension_ui_response": {
         // extension_ui_response carries pi's own request id (`cmd.id`) — do
         // NOT overwrite it with the optional RPC correlation id. Pi matches

@@ -21,6 +21,8 @@ const VALID_TERMINAL_MESSAGE_TYPES = new Set([
   "pi.set-thinking",
   "pi.set-model",
   "pi.resume",
+  "pi.compact",
+  "pi.new-session",
 ]);
 
 /** Check if a parsed JSON object looks like a hook-style message (has `event` field). */

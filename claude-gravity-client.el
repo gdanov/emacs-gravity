@@ -514,6 +514,36 @@ checks the buffer-local session id first, then the magit section."
       (let ((session (gethash sid claude-gravity--sessions)))
         (and session (equal (plist-get session :source) "pi"))))))
 
+(defun claude-gravity--pi-compact (&optional custom-instructions)
+  "Manually compact pi's conversation context (`compact' RPC).
+Pi runs an LLM-driven summarization to reduce tokens. With prefix arg,
+prompts for custom instructions to guide the summary."
+  (interactive
+   (list (when current-prefix-arg
+           (read-string "Compaction focus (optional): "))))
+  (if (null claude-gravity--pi-session-id)
+      (message "No active pi session.")
+    (claude-gravity--log 'info "Pi: compact%s"
+                         (if custom-instructions (format " (instructions=%s)" custom-instructions) ""))
+    (claude-gravity--send-to-server
+     `((type . "pi.compact")
+       (sessionId . ,claude-gravity--pi-session-id)
+       ,@(when (and custom-instructions (not (string-empty-p custom-instructions)))
+           `((customInstructions . ,custom-instructions)))))))
+
+(defun claude-gravity--pi-new-session ()
+  "Start a fresh session inside the running pi process (`new_session' RPC).
+The pi process is reused; only the conversation state is reset.
+Roughly equivalent to Claude Code's /clear."
+  (interactive)
+  (if (null claude-gravity--pi-session-id)
+      (message "No active pi session.")
+    (when (yes-or-no-p "Pi: start a fresh session (current conversation will be cleared)? ")
+      (claude-gravity--log 'info "Pi: new_session")
+      (claude-gravity--send-to-server
+       `((type . "pi.new-session")
+         (sessionId . ,claude-gravity--pi-session-id))))))
+
 (defun claude-gravity--pi-resume (session-id)
   "Resume a pi session by SESSION-ID.
 Looks up the gravity Session for SESSION-ID, reads `:pi-session-file'

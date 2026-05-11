@@ -112,6 +112,10 @@ export interface PiDriverInstance {
   switchSession(sessionPath: string): Promise<boolean>;
   /** Send an `extension_ui_response` back to pi for a dialog request id. */
   sendExtensionUIResponse(payload: ExtensionUIResponsePayload): void;
+  /** Compact pi's conversation context (`compact` RPC). */
+  compact(customInstructions?: string): Promise<{ summary?: string; tokensBefore?: number }>;
+  /** Start a fresh session inside the running pi process (`new_session` RPC). */
+  newSession(parentSession?: string): Promise<boolean>;
   /** Stop the pi subprocess and clean up. */
   stop(): Promise<void>;
   /** Get current session metadata. */
@@ -263,6 +267,10 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
 
     sendExtensionUIResponse: (payload: ExtensionUIResponsePayload) =>
       driver.sendExtensionUIResponse(payload),
+
+    compact: (customInstructions?: string) => driver.compact(customInstructions),
+
+    newSession: (parentSession?: string) => driver.newSession(parentSession),
 
     stop: () => {
       return driver.stop();

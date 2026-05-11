@@ -1978,6 +1978,10 @@ prompts to confirm the directory before starting."
      :inapt-if-not (lambda () claude-gravity--pi-session-id))
     ("p a" "Abort" claude-gravity--pi-abort
      :inapt-if-not (lambda () claude-gravity--pi-session-id))
+    ("p c" "Compact context" claude-gravity--pi-compact
+     :inapt-if-not (lambda () claude-gravity--pi-session-id))
+    ("p n" "New session (clear)" claude-gravity--pi-new-session
+     :inapt-if-not (lambda () claude-gravity--pi-session-id))
     ("p ?" "Status" claude-gravity--pi-status)]
    ["Debug"
     ("M" "Debug messages" claude-gravity-debug-show)]])

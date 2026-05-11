@@ -343,6 +343,8 @@ export type TerminalMessage =
   | { type: "pi.set-thinking"; sessionId: string; level: string }
   | { type: "pi.set-model"; sessionId: string; provider: string; modelId: string }
   | { type: "pi.resume"; sessionId?: string; sessionPath: string }
+  | { type: "pi.compact"; sessionId?: string; customInstructions?: string }
+  | { type: "pi.new-session"; sessionId?: string }
 
 export interface ProjectSummary {
   project: string;

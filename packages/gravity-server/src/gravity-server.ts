@@ -481,6 +481,35 @@ const program = Effect.gen(function* () {
     activePiDriver.setModel(provider, modelId);
   };
 
+  /** Manually compact pi's context (`compact` RPC). */
+  const piSessionCompact = (customInstructions?: string): void => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session to compact`, "warn");
+      return;
+    }
+    activePiDriver.compact(customInstructions).then(
+      (data) => {
+        const summary = data.summary ? ` — ${data.summary.substring(0, 80)}…` : "";
+        logMsg(`pi compact done (tokensBefore=${data.tokensBefore ?? "?"})${summary}`);
+      },
+      (err) => logMsg(`pi compact failed: ${err.message}`, "error"),
+    );
+  };
+
+  /** Start a fresh pi session in the running process (`new_session` RPC). */
+  const piSessionNewSession = (): void => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session for new_session`, "warn");
+      return;
+    }
+    activePiDriver.newSession().then(
+      (ok) => {
+        if (!ok) logMsg(`pi new_session cancelled by extension`, "warn");
+      },
+      (err) => logMsg(`pi new_session failed: ${err.message}`, "error"),
+    );
+  };
+
   /**
    * Resume a pi session by loading SESSION-PATH into the running pi process
    * via the `switch_session` RPC. If no pi process is running, spawns one
@@ -953,6 +982,17 @@ const program = Effect.gen(function* () {
       case "pi.resume": {
         const m = msg as { sessionPath: string };
         piSessionResume(m.sessionPath);
+        break;
+      }
+
+      case "pi.compact": {
+        const m = msg as { customInstructions?: string };
+        piSessionCompact(m.customInstructions);
+        break;
+      }
+
+      case "pi.new-session": {
+        piSessionNewSession();
         break;
       }
     }
