@@ -4,7 +4,12 @@
 // manages process cleanup on shutdown.
 
 import { spawn, type ChildProcess } from "child_process";
+import { appendFileSync } from "fs";
 import { PiProtocol } from "./protocol.js";
+
+// Optional raw-event capture for debugging. Set GRAVITY_PI_RAW_LOG to a path
+// to dump pi's raw stdout there (newline-delimited JSON, one event per line).
+const RAW_LOG = process.env.GRAVITY_PI_RAW_LOG;
 import type {
   PiDriver,
   PiDriverOptions,
@@ -33,11 +38,11 @@ export function spawnPiSync(
   const cwd = options.cwd ?? process.cwd();
   const thinkingLevel = options.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
 
+  // cwd is set via the spawn() options below; pi inherits it. Pi has no --cwd flag.
   const args = [
     "--mode", "rpc",
     "--no-session",
     "--thinking", thinkingLevel,
-    "--cwd", cwd,
   ];
 
   // Build environment with optional overrides
@@ -67,7 +72,11 @@ export function spawnPiSync(
 
   // Wire stdout -> protocol parser
   child.stdout?.on("data", (chunk: Buffer) => {
-    proto.feed(chunk.toString());
+    const s = chunk.toString();
+    if (RAW_LOG) {
+      try { appendFileSync(RAW_LOG, s); } catch { /* best-effort */ }
+    }
+    proto.feed(s);
   });
 
   // Wire stderr -> protocol parser

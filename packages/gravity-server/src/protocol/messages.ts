@@ -13,6 +13,12 @@ const VALID_TERMINAL_MESSAGE_TYPES = new Set([
   "request.resync",
   "hint.session-dead",
   "poll",
+  // Pi driver control messages (handled in handleTerminalMessage's switch).
+  "pi.start",
+  "pi.prompt",
+  "pi.steer",
+  "pi.abort",
+  "pi.set-thinking",
 ]);
 
 /** Check if a parsed JSON object looks like a hook-style message (has `event` field). */

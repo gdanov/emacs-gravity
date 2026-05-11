@@ -52,7 +52,7 @@
 
 (defvar claude-gravity--pending-signal nil
   "Last received state-changed signal, or nil.
-Format: (what . session-id) where what is "session", "inbox", "overview", or "notice".")
+Format: (what . session-id) where what is \"session\", \"inbox\", \"overview\", or \"notice\".")
 
 (defvar claude-gravity--last-seq (make-hash-table :test 'equal)
   "Last acknowledged sequence number per session.")
@@ -1323,7 +1323,8 @@ MSG contains session state updates for pi sessions.
 Updates `claude-gravity--pi-session-id' and triggers UI refresh."
   (let* ((session-id (alist-get 'sessionId msg))
          (event (alist-get 'event msg))
-         (cwd (alist-get 'cwd msg)))
+         (cwd (alist-get 'cwd msg))
+         (reason (alist-get 'reason msg)))
     (cond
      ((equal event "started")
       (setq claude-gravity--pi-session-id session-id)
@@ -1334,6 +1335,9 @@ Updates `claude-gravity--pi-session-id' and triggers UI refresh."
       (when (equal claude-gravity--pi-session-id session-id)
         (setq claude-gravity--pi-session-id nil))
       (claude-gravity--schedule-refresh))
+     ((equal event "rejected")
+      (claude-gravity--log 'warn "Pi: start rejected: %s" (or reason "no reason given"))
+      (message "Pi: %s" (or reason "session start rejected")))
      ((equal event "update")
       (claude-gravity--log 'debug "Pi: session update: %s" session-id)
       (claude-gravity--schedule-refresh))

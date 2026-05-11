@@ -34,21 +34,23 @@ import {
   accThinkingDelta,
   accModelSelect,
   accAgentStart,
+  accUserPromptMessage,
   accAgentEnd,
   accSetEffortLevel,
-  drainPendingEvents,
 } from "./turn-accumulator.js";
+
+const stamp = (state: AccState, r: TranslationResult): TranslationResult =>
+  ({ ...r, sessionId: state.sessionId });
 
 /**
  * Translate a pi event into gravity events.
  *
- * Returns:
- * - { kind: "emit", result } — emit a gravity event now
- * - { kind: "accumulate" } — update state, don't emit yet
- * - { kind: "noop" } — no action needed
- *
- * After each call, check state.pendingToolEvents for any accumulated
- * tool events that should be emitted.
+ * Returns either { kind: "emit", results } with one or more events to emit
+ * in order, or { kind: "noop" } when only state was mutated (text deltas,
+ * turn boundaries, tool start). Every TranslationResult carries `sessionId`
+ * from `state.sessionId`; callers do not need to stamp it again. The
+ * translator is the single source of truth for emitted events — there is
+ * no shared queue between handlers.
  */
 export function translatePiEvent(
   event: PiEvent,
@@ -56,29 +58,14 @@ export function translatePiEvent(
 ): TranslateEventResult {
   switch (event.type) {
     case "agent_start": {
-      const e = event as AgentStartEvent;
-      // Extract user prompt text from agent_start message
-      let promptText = "";
-      if (e.message?.content) {
-        for (const content of e.message.content) {
-          if (content.type === "text") {
-            promptText += content.text;
-          }
-        }
-      }
-
-      const events = accAgentStart(state, promptText);
-      // Add the UserPromptSubmit and SessionStart events
-      // They will be emitted along with pending events
-      state.pendingToolEvents.push(...events);
-
-      // Emit SessionStart and UserPromptSubmit now
-      return { kind: "emit", result: events[0] };
+      // Pi 0.74's agent_start is bare (no message). The user prompt arrives in
+      // a later message_start event with role "user" — handled below.
+      const events = accAgentStart(state);
+      return { kind: "emit", results: events.map((r) => stamp(state, r)) };
     }
 
     case "agent_end": {
       const e = event as AgentEndEvent;
-      // Build token usage with required fields, optional fields only if present
       const usage: TokenUsage | undefined = e.result?.usage
         ? {
             input_tokens: e.result.usage.input_tokens,
@@ -87,126 +74,142 @@ export function translatePiEvent(
             cache_creation_input_tokens: e.result.usage.cache_creation_input_tokens ?? 0,
           }
         : undefined;
-      const result = accAgentEnd(
+      const stop = accAgentEnd(
         state,
         e.result?.type ?? "success",
         usage,
         e.result?.error,
       );
-
-      // Also drain any remaining pending events
-      const pending = drainPendingEvents(state);
-
-      // Return the Stop event (the pending events should have been drained earlier)
-      return { kind: "emit", result };
+      return { kind: "emit", results: [stamp(state, stop)] };
     }
 
     case "turn_start": {
       const e = event as TurnStartEvent;
       accTurnStart(state, e.turn_id);
-      return { kind: "accumulate", state };
+      return { kind: "noop" };
     }
 
     case "turn_end": {
       const e = event as TurnEndEvent;
       accTurnEnd(state, e.turn_id);
-
-      // Drain any pending tool events created during this turn
-      const pending = drainPendingEvents(state);
-
-      if (pending.length > 0) {
-        // Return the first pending event; the rest are queued in state
-        return { kind: "emit", result: pending[0] };
-      }
-
       return { kind: "noop" };
     }
 
     case "tool_execution_start": {
-      const e = event as ToolExecutionStartEvent;
-      accToolStart(state, e.tool_call_id, e.tool_name, e.tool_input);
-      return { kind: "accumulate", state };
-    }
-
-    case "tool_execution_end": {
-      const e = event as ToolExecutionEndEvent;
-      accToolEnd(
-        state,
-        e.tool_call_id,
-        e.tool_name,
-        e.tool_result,
-        e.error,
-      );
-
-      // Don't drain - just access first pending event (don't clear)
-      if (state.pendingToolEvents.length > 0) {
-        const first = state.pendingToolEvents[0];
-        // Remove the first event from pending (without draining all)
-        state.pendingToolEvents.shift();
-        return { kind: "emit", result: first };
-      }
-
+      // Pi 0.74 wire format: { toolCallId, toolName, args }. Older drafts of
+      // our types used snake_case; pi never emitted that shape. Read both
+      // forms defensively in case pi changes back.
+      const e = event as Record<string, unknown>;
+      const id = (e.toolCallId ?? e.tool_call_id) as string;
+      const name = (e.toolName ?? e.tool_name) as string;
+      const input = (e.args ?? e.tool_input ?? {}) as Record<string, unknown>;
+      accToolStart(state, id, name, input);
       return { kind: "noop" };
     }
 
-    case "message_update": {
-      const e = event as MessageUpdateEvent;
-      const update = e.message_update;
+    case "tool_execution_end": {
+      // Pi 0.74 wire format: { toolCallId, toolName, result, isError }.
+      const e = event as Record<string, unknown>;
+      const id = (e.toolCallId ?? e.tool_call_id) as string;
+      const name = (e.toolName ?? e.tool_name) as string;
+      const toolResult = e.result ?? e.tool_result;
+      const isError = e.isError === true;
+      const errorMsg = isError
+        ? (typeof e.error === "string" ? e.error : "tool execution failed")
+        : (typeof e.error === "string" ? e.error : undefined);
+      const results = accToolEnd(state, id, name, toolResult, errorMsg);
+      if (results.length === 0) return { kind: "noop" };
+      return { kind: "emit", results };
+    }
 
+    // Pi emits streaming partial-result updates between start and end.
+    // No event for us to emit; just ignore.
+    case "tool_execution_update":
+      return { kind: "noop" };
+
+    // Pi 0.74 emits message_start / message_end as full snapshot events.
+    // For user-role messages, this is where the prompt text lives — extract
+    // it once (on message_start) and emit UserPromptSubmit. Assistant-role
+    // messages are streamed via message_update and surfaced elsewhere.
+    case "message_start": {
+      const e = event as Record<string, unknown>;
+      const msg = e.message as
+        | { role?: string; content?: Array<{ type?: string; text?: string }> }
+        | undefined;
+      if (msg?.role === "user" && Array.isArray(msg.content)) {
+        const text = msg.content
+          .filter((c) => c?.type === "text" && typeof c.text === "string")
+          .map((c) => c.text as string)
+          .join("");
+        const results = accUserPromptMessage(state, text);
+        if (results.length > 0) {
+          return { kind: "emit", results: results.map((r) => stamp(state, r)) };
+        }
+      }
+      return { kind: "noop" };
+    }
+
+    case "message_end":
+      return { kind: "noop" };
+
+    case "message_update": {
+      // Pi 0.74: { assistantMessageEvent: { type, contentIndex, partial, ... } }
+      // Also accept the legacy {message_update: {...}} shape for safety.
+      const e = event as Record<string, unknown>;
+      const update = (e.assistantMessageEvent ?? e.message_update) as
+        | { type?: string; delta?: string }
+        | undefined;
+      if (!update) return { kind: "noop" };
       if (update.type === "text_delta" && update.delta) {
         accTextDelta(state, update.delta);
-        return { kind: "accumulate", state };
-      }
-
-      if (update.type === "thinking_delta" && update.delta) {
+      } else if (update.type === "thinking_delta" && update.delta) {
         accThinkingDelta(state, update.delta);
-        return { kind: "accumulate", state };
       }
+      // Snapshot-style updates (thinking_start, content_start, etc.) carry
+      // no incremental delta; ignore.
+      return { kind: "noop" };
+    }
 
-      // Status changes are informational only
+    // Pi emits flat text_delta / thinking_delta events too (in some modes),
+    // not always wrapped in message_update. Handle both.
+    case "text_delta": {
+      const e = event as { delta?: string };
+      if (e.delta) accTextDelta(state, e.delta);
+      return { kind: "noop" };
+    }
+
+    case "thinking_delta": {
+      const e = event as { delta?: string };
+      if (e.delta) accThinkingDelta(state, e.delta);
       return { kind: "noop" };
     }
 
     case "model_select": {
       const e = event as ModelSelectEvent;
       accModelSelect(state, e.model, e.provider);
-      // Also update hookData with model info
       const hookData: HookData = {
         model: e.model,
         cwd: state.cwd,
       };
       return {
         kind: "emit",
-        result: {
-          hookEvent: "SessionStart",
-          hookData,
-        },
+        results: [{ hookEvent: "SessionStart", hookData, sessionId: state.sessionId }],
       };
     }
 
     case "error": {
       const e = event as ErrorEvent;
-      // Log error and treat as noop for now
-      // The error will be visible in stderr
       process.stderr.write(`[pi-adapter] error event: ${e.error}\n`);
       return { kind: "noop" };
     }
 
     default:
-      // Unknown event type — ignore
       return { kind: "noop" };
   }
 }
 
 /**
- * Get all pending events from state (for batch emission).
- */
-export function getPendingEvents(state: AccState): TranslationResult[] {
-  return [...state.pendingToolEvents];
-}
-
-/**
- * Create a SessionEnd translation result.
+ * Create a SessionEnd translation result. Used by mod.ts on subprocess exit.
  */
 export function createSessionEnd(state: AccState): TranslationResult {
   return {
@@ -215,6 +218,7 @@ export function createSessionEnd(state: AccState): TranslationResult {
       session_id: state.sessionId,
       cwd: state.cwd,
     },
+    sessionId: state.sessionId,
   };
 }
 
@@ -230,5 +234,6 @@ export function createSessionStart(state: AccState): TranslationResult {
       model: state.modelName ?? undefined,
       effort_level: state.effortLevel,
     },
+    sessionId: state.sessionId,
   };
 }

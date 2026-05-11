@@ -146,15 +146,19 @@ export interface TranslationResult {
   hookData: HookData;
   /** Optional token usage extracted from this event */
   tokenUsage?: TokenUsage;
+  /** The session ID for routing (set from AccState.sessionId) */
+  sessionId: string;
 }
 
 /**
- * Result of translating a pi event. Either yields a translation,
- * updates accumulator state, or is a no-op.
+ * Result of translating a pi event. Either yields zero or more
+ * gravity events to emit, or is a no-op (state was mutated, no events).
+ *
+ * `results` always has length >= 1 when kind is "emit". State-only
+ * mutations (text_delta, turn_start, tool_execution_start) return "noop".
  */
 export type TranslateEventResult =
-  | { kind: "emit"; result: TranslationResult }
-  | { kind: "accumulate"; state: AccState }
+  | { kind: "emit"; results: TranslationResult[] }
   | { kind: "noop" };
 
 // ── Turn accumulator state ──────────────────────────────────────────
@@ -193,9 +197,6 @@ export interface AccState {
   turns: AccTurn[];
   currentTurn: number; // index into turns[]
   inTurn: boolean; // true between turn_start and turn_end
-
-  // Pending gravity events (emitted after turn_end)
-  pendingToolEvents: TranslationResult[];
 }
 
 export interface AccTurn {
@@ -224,8 +225,8 @@ export interface AccTool {
 
 /** Commands sent to pi via stdin (JSONL). */
 export type PiCommand =
-  | { type: "prompt"; text: string; images?: string[] }
-  | { type: "steer"; text: string }
+  | { type: "prompt"; message: string; images?: string[] }
+  | { type: "steer"; message: string }
   | { type: "abort" }
   | { type: "set_thinking_level"; level: ThinkingLevel };
 

@@ -11,8 +11,8 @@
 // that emits translation results for processing by gravity-server.
 
 import { spawnPiSync } from "./spawn.js";
-import { translatePiEvent, createSessionStart, createSessionEnd, getPendingEvents } from "./hook-translator.js";
-import { createAccState, drainPendingEvents } from "./turn-accumulator.js";
+import { translatePiEvent, createSessionStart, createSessionEnd } from "./hook-translator.js";
+import { createAccState } from "./turn-accumulator.js";
 import {
   createSessionMetadata,
   updateModel,
@@ -51,6 +51,12 @@ export type SessionLifecycleCallback = (event: "start" | "stop" | "error", metad
  * Options for startPiDriver.
  */
 export interface StartPiDriverOptions extends PiDriverOptions {
+  /**
+   * The outer session ID (from startPiSession). Used as the routing key for
+   * all TranslationResult objects emitted by this driver. If not provided,
+   * a new ID is generated internally.
+   */
+  sessionId?: string;
   /**
    * Called with each translation result from pi events.
    */
@@ -109,18 +115,15 @@ export interface PiDriverInstance {
  * ```
  */
 export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
-  const sessionId = generateSessionId();
+  const sessionId = options.sessionId ?? generateSessionId();
   const cwd = options.cwd ?? process.cwd();
   const thinkingLevel = options.thinkingLevel ?? "medium";
 
-  // Create accumulator state
+  // Create accumulator state — uses the outer sessionId for all event routing
   let state = createAccState(sessionId, cwd, thinkingToEffort(thinkingLevel));
 
   // Create session metadata
   let metadata = createSessionMetadata(sessionId, cwd, thinkingLevel);
-
-  // Track pending events queue
-  let pendingQueue: TranslationResult[] = [];
 
   // Callback for session lifecycle
   const onLifecycle = options.onLifecycle ?? (() => {});
@@ -136,39 +139,26 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
 
   // Set up event handler
   driver.setEventHandler((evt: PiProtocolEvent) => {
-    // Translate pi event to gravity event
+    // Translate pi event into zero or more gravity events.
     const result = translatePiEvent(evt.event, state);
-
     if (result.kind === "emit") {
-      // Emit the translation result
-      pendingQueue.push(result.result);
-    } else if (result.kind === "accumulate") {
-      // State was updated, check for pending events
-      const pending = getPendingEvents(state);
-      pendingQueue.push(...pending);
+      for (const r of result.results) {
+        options.onTranslation(r);
+      }
     }
 
-    // Handle special events
+    // Handle special events for driver-level metadata + lifecycle callbacks.
     switch (evt.event.type) {
       case "model_select":
         metadata = updateModel(metadata, (evt.event as { model: string; provider: string }).model, (evt.event as { model: string; provider: string }).provider);
-        // Also update state model
         state.modelName = (evt.event as { model: string }).model;
         break;
-
       case "agent_start":
         onLifecycle("start", metadata);
         break;
-
       case "agent_end":
         onLifecycle("stop", metadata);
         break;
-    }
-
-    // Emit pending events
-    while (pendingQueue.length > 0) {
-      const toEmit = pendingQueue.shift()!;
-      options.onTranslation(toEmit);
     }
   });
 

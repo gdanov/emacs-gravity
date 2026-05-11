@@ -15,3 +15,4 @@
 {"id":"int-226b6d56","kind":"field_change","created_at":"2026-05-09T08:44:43.086764Z","actor":"gdanov","issue_id":"emacs-gravity-gzt","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-5c55b908","kind":"field_change","created_at":"2026-05-09T08:44:43.532422Z","actor":"gdanov","issue_id":"emacs-gravity-450","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-f5b36f8d","kind":"field_change","created_at":"2026-05-09T08:48:27.32443Z","actor":"gdanov","issue_id":"emacs-gravity-5ai","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-b309d8ab","kind":"field_change","created_at":"2026-05-10T17:52:36.50708Z","actor":"gdanov","issue_id":"emacs-gravity-in2","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}

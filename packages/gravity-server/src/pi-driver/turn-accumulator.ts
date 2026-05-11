@@ -36,7 +36,6 @@ export function createAccState(sessionId: string, cwd: string, effortLevel: stri
     turns: [],
     currentTurn: -1,
     inTurn: false,
-    pendingToolEvents: [],
   };
 }
 
@@ -89,6 +88,7 @@ function emitPreToolUse(state: AccState): TranslationResult {
   return {
     hookEvent: "PreToolUse",
     hookData,
+    sessionId: state.sessionId,
   };
 }
 
@@ -124,6 +124,7 @@ function emitPostToolUse(state: AccState, result: unknown, error: string | null)
   return {
     hookEvent: error ? "PostToolUseFailure" : "PostToolUse",
     hookData,
+    sessionId: state.sessionId,
   };
 }
 
@@ -154,38 +155,12 @@ export function accTurnStart(state: AccState, turnId: string): AccState {
 
 /**
  * Called on turn_end from pi.
- * Emits all pending tool events and finalizes the turn.
+ * Finalizes the turn. The pi protocol contract guarantees tool_execution_end
+ * arrives before turn_end, so paired PreToolUse/PostToolUse events are handled
+ * entirely by accToolEnd. This function only marks the turn as ended.
  */
 export function accTurnEnd(state: AccState, turnId: string): AccState {
   if (!state.inTurn) return state;
-
-  // Emit PreToolUse if there's a pending tool
-  if (state.currentToolUseId && state.currentToolName) {
-    const preEvent = emitPreToolUse(state);
-    state.pendingToolEvents.push(preEvent);
-
-    // Track tool in turn
-    const turn = state.turns[state.turns.length - 1];
-    if (turn) {
-      const tool: AccTool = {
-        toolUseId: state.currentToolUseId,
-        toolName: state.currentToolName,
-        toolInput: state.currentToolInput ?? {},
-        assistantText: undefined,
-        assistantThinking: undefined,
-        startTime: Date.now(),
-        endTime: Date.now(),
-        result: null,
-        error: null,
-        postText: undefined,
-        postThinking: undefined,
-      };
-      turn.tools.push(tool);
-    }
-  }
-
-  // Emit PostToolUse for any tool that ended
-  // (tool_execution_end events are accumulated separately)
 
   state.inTurn = false;
 
@@ -219,7 +194,9 @@ export function accToolStart(
 
 /**
  * Called on tool_execution_end from pi.
- * Emits PreToolUse + PostToolUse events for this tool.
+ * Returns the paired PreToolUse + PostToolUse events for this tool.
+ * Returns an empty array if the end event doesn't match the current tool
+ * (the contract is that tool_execution_start precedes tool_execution_end).
  */
 export function accToolEnd(
   state: AccState,
@@ -227,66 +204,63 @@ export function accToolEnd(
   toolName: string,
   toolResult: unknown,
   error?: string,
-): AccState {
+): TranslationResult[] {
   // Flush post-tool context first
   const { postText, postThinking } = flushPendingPostContext(state);
 
-  // If this is the current tool, emit the paired events
-  if (state.currentToolUseId === toolCallId || state.currentToolName === toolName) {
-    const toolUseId = state.currentToolUseId ?? toolCallId;
-    const toolInput = state.currentToolInput ?? {};
-
-    // Flush any remaining assistant context
-    const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
-
-    const hookData: HookData = {
-      tool_name: toolName,
-      tool_use_id: toolUseId,
-      tool_input: toolInput,
-      assistant_text: assistantText,
-      assistant_thinking: assistantThinking,
-      post_tool_text: postText,
-      post_tool_thinking: postThinking,
-      cwd: state.cwd,
-      ...(error ? { error } : {}),
-    };
-
-    state.pendingToolEvents.push({
-      hookEvent: "PreToolUse",
-      hookData,
-    });
-
-    state.pendingToolEvents.push({
-      hookEvent: error ? "PostToolUseFailure" : "PostToolUse",
-      hookData,
-    });
-
-    // Track in turn
-    const turn = state.turns[state.turns.length - 1];
-    if (turn) {
-      const tool: AccTool = {
-        toolUseId,
-        toolName,
-        toolInput,
-        assistantText: assistantText ?? undefined,
-        assistantThinking: assistantThinking ?? undefined,
-        startTime: Date.now() - 100, // approximate
-        endTime: Date.now(),
-        result: toolResult,
-        error: error ?? null,
-        postText: postText ?? undefined,
-        postThinking: postThinking ?? undefined,
-      };
-      turn.tools.push(tool);
-    }
-
-    // Reset tool state
-    state.currentToolUseId = null;
-    state.currentToolName = null;
-    state.currentToolInput = null;
+  // Match the current tool by ID. (Name-only fallback removed — see issue #3.)
+  if (state.currentToolUseId !== toolCallId) {
+    return [];
   }
 
-  return state;
+  const toolUseId = state.currentToolUseId;
+  const toolInput = state.currentToolInput ?? {};
+
+  // Flush any remaining assistant context
+  const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
+
+  const hookData: HookData = {
+    tool_name: toolName,
+    tool_use_id: toolUseId,
+    tool_input: toolInput,
+    assistant_text: assistantText,
+    assistant_thinking: assistantThinking,
+    post_tool_text: postText,
+    post_tool_thinking: postThinking,
+    cwd: state.cwd,
+    ...(error ? { error } : {}),
+  };
+
+  const results: TranslationResult[] = [
+    { hookEvent: "PreToolUse", hookData, sessionId: state.sessionId },
+    { hookEvent: error ? "PostToolUseFailure" : "PostToolUse", hookData, sessionId: state.sessionId },
+  ];
+
+  // Track in turn
+  const turn = state.turns[state.turns.length - 1];
+  if (turn) {
+    const tool: AccTool = {
+      toolUseId,
+      toolName,
+      toolInput,
+      assistantText: assistantText ?? undefined,
+      assistantThinking: assistantThinking ?? undefined,
+      startTime: Date.now() - 100, // approximate
+      endTime: Date.now(),
+      result: toolResult,
+      error: error ?? null,
+      postText: postText ?? undefined,
+      postThinking: postThinking ?? undefined,
+    };
+    turn.tools.push(tool);
+  }
+
+  // Reset tool state
+  state.currentToolUseId = null;
+  state.currentToolName = null;
+  state.currentToolInput = null;
+
+  return results;
 }
 
 /**
@@ -314,14 +288,15 @@ export function accModelSelect(state: AccState, model: string, provider: string)
 }
 
 /**
- * Called on agent_start (user prompt submission).
- * Emits UserPromptSubmit + SessionStart.
+ * Called on agent_start (a new pi run begins). Emits SessionStart only.
+ *
+ * Pi 0.74's `agent_start` event is bare — it doesn't carry the user
+ * message. The user's prompt arrives in a subsequent `message_start` event
+ * with role "user"; use `accUserPromptMessage` to emit UserPromptSubmit
+ * from there.
  */
-export function accAgentStart(state: AccState, promptText: string): TranslationResult[] {
-  const events: TranslationResult[] = [];
-
-  // SessionStart event (with pi source so Emacs can identify it)
-  events.push({
+export function accAgentStart(state: AccState): TranslationResult[] {
+  return [{
     hookEvent: "SessionStart",
     hookData: {
       session_id: state.sessionId,
@@ -330,18 +305,24 @@ export function accAgentStart(state: AccState, promptText: string): TranslationR
       model: state.modelName ?? undefined,
       effort_level: state.effortLevel,
     },
-  });
+    sessionId: state.sessionId,
+  }];
+}
 
-  // UserPromptSubmit event
-  events.push({
+/**
+ * Called on `message_start` (or `message_end`) with role "user". Emits the
+ * gravity UserPromptSubmit event for that prompt. No-op if text is empty.
+ */
+export function accUserPromptMessage(state: AccState, promptText: string): TranslationResult[] {
+  if (!promptText) return [];
+  return [{
     hookEvent: "UserPromptSubmit",
     hookData: {
       prompt: promptText,
       cwd: state.cwd,
     },
-  });
-
-  return events;
+    sessionId: state.sessionId,
+  }];
 }
 
 /**
@@ -367,17 +348,8 @@ export function accAgentEnd(
   return {
     hookEvent: "Stop",
     hookData,
+    sessionId: state.sessionId,
   };
-}
-
-/**
- * Drain all pending events from the accumulator.
- * Returns them and clears the pending queue.
- */
-export function drainPendingEvents(state: AccState): TranslationResult[] {
-  const events = [...state.pendingToolEvents];
-  state.pendingToolEvents = [];
-  return events;
 }
 
 /**

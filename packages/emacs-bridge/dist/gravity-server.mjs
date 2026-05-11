@@ -5473,7 +5473,13 @@ var VALID_TERMINAL_MESSAGE_TYPES = /* @__PURE__ */ new Set([
   "request.overview",
   "request.resync",
   "hint.session-dead",
-  "poll"
+  "poll",
+  // Pi driver control messages (handled in handleTerminalMessage's switch).
+  "pi.start",
+  "pi.prompt",
+  "pi.steer",
+  "pi.abort",
+  "pi.set-thinking"
 ]);
 function isHookMessage(obj) {
   return typeof obj.event === "string" && typeof obj.session_id === "string";
@@ -6841,6 +6847,7 @@ var TerminalLive = Layer_exports.succeed(Terminal, makeTerminal());
 
 // src/pi-driver/spawn.ts
 import { spawn } from "child_process";
+import { appendFileSync as appendFileSync2 } from "fs";
 
 // src/pi-driver/protocol.ts
 function parseJsonLine(line) {
@@ -6922,9 +6929,9 @@ var PiProtocol = class _PiProtocol {
   static formatCommand(cmd) {
     switch (cmd.type) {
       case "prompt":
-        return _PiProtocol.formatPrompt(cmd.text, cmd.images);
+        return _PiProtocol.formatPrompt(cmd.message, cmd.images);
       case "steer":
-        return _PiProtocol.formatSteer(cmd.text);
+        return _PiProtocol.formatSteer(cmd.message);
       case "abort":
         return _PiProtocol.formatAbort();
       case "set_thinking_level":
@@ -6932,10 +6939,11 @@ var PiProtocol = class _PiProtocol {
     }
   }
   /**
-   * Format a prompt command for pi's stdin.
+   * Format a prompt command for pi's stdin. Pi expects { message, images? } —
+   * field name is `message`, not `text` (verified against pi 0.74).
    */
   static formatPrompt(text, images) {
-    const cmd = { type: "prompt", text };
+    const cmd = { type: "prompt", message: text };
     if (images && images.length > 0) {
       cmd.images = images;
     }
@@ -6945,7 +6953,7 @@ var PiProtocol = class _PiProtocol {
    * Format a steer command for pi's stdin.
    */
   static formatSteer(text) {
-    return JSON.stringify({ type: "steer", text }) + "\n";
+    return JSON.stringify({ type: "steer", message: text }) + "\n";
   }
   /**
    * Format an abort command for pi's stdin.
@@ -6962,6 +6970,7 @@ var PiProtocol = class _PiProtocol {
 };
 
 // src/pi-driver/spawn.ts
+var RAW_LOG = process.env.GRAVITY_PI_RAW_LOG;
 var PI_BINARY = process.env.PI_BINARY_PATH ?? "pi";
 var DEFAULT_THINKING_LEVEL = "medium";
 function spawnPiSync(options = {}) {
@@ -6972,9 +6981,7 @@ function spawnPiSync(options = {}) {
     "rpc",
     "--no-session",
     "--thinking",
-    thinkingLevel,
-    "--cwd",
-    cwd
+    thinkingLevel
   ];
   const env = { ...process.env };
   if (options.model) env["PI_MODEL"] = options.model;
@@ -6998,7 +7005,14 @@ function spawnPiSync(options = {}) {
     }
   });
   child.stdout?.on("data", (chunk) => {
-    proto.feed(chunk.toString());
+    const s = chunk.toString();
+    if (RAW_LOG) {
+      try {
+        appendFileSync2(RAW_LOG, s);
+      } catch {
+      }
+    }
+    proto.feed(s);
   });
   child.stderr?.on("data", (chunk) => {
     proto.feedStderr(chunk.toString());
@@ -7086,8 +7100,7 @@ function createAccState(sessionId, cwd, effortLevel = "medium") {
     currentToolInput: null,
     turns: [],
     currentTurn: -1,
-    inTurn: false,
-    pendingToolEvents: []
+    inTurn: false
   };
 }
 function flushPendingAssistantContext(state) {
@@ -7103,24 +7116,6 @@ function flushPendingPostContext(state) {
   state.pendingPostText = "";
   state.pendingPostThinking = "";
   return { postText, postThinking };
-}
-function emitPreToolUse(state) {
-  const toolUseId = state.currentToolUseId ?? `tool_${Date.now()}`;
-  const toolName = state.currentToolName ?? "unknown";
-  const toolInput = state.currentToolInput ?? {};
-  const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
-  const hookData = {
-    tool_name: toolName,
-    tool_use_id: toolUseId,
-    tool_input: toolInput,
-    assistant_text: assistantText,
-    assistant_thinking: assistantThinking,
-    cwd: state.cwd
-  };
-  return {
-    hookEvent: "PreToolUse",
-    hookData
-  };
 }
 function accTurnStart(state, turnId) {
   state.inTurn = true;
@@ -7139,27 +7134,6 @@ function accTurnStart(state, turnId) {
 }
 function accTurnEnd(state, turnId) {
   if (!state.inTurn) return state;
-  if (state.currentToolUseId && state.currentToolName) {
-    const preEvent = emitPreToolUse(state);
-    state.pendingToolEvents.push(preEvent);
-    const turn2 = state.turns[state.turns.length - 1];
-    if (turn2) {
-      const tool = {
-        toolUseId: state.currentToolUseId,
-        toolName: state.currentToolName,
-        toolInput: state.currentToolInput ?? {},
-        assistantText: void 0,
-        assistantThinking: void 0,
-        startTime: Date.now(),
-        endTime: Date.now(),
-        result: null,
-        error: null,
-        postText: void 0,
-        postThinking: void 0
-      };
-      turn2.tools.push(tool);
-    }
-  }
   state.inTurn = false;
   const turn = state.turns[state.turns.length - 1];
   if (turn) {
@@ -7176,52 +7150,49 @@ function accToolStart(state, toolCallId, toolName, toolInput) {
 }
 function accToolEnd(state, toolCallId, toolName, toolResult, error) {
   const { postText, postThinking } = flushPendingPostContext(state);
-  if (state.currentToolUseId === toolCallId || state.currentToolName === toolName) {
-    const toolUseId = state.currentToolUseId ?? toolCallId;
-    const toolInput = state.currentToolInput ?? {};
-    const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
-    const hookData = {
-      tool_name: toolName,
-      tool_use_id: toolUseId,
-      tool_input: toolInput,
-      assistant_text: assistantText,
-      assistant_thinking: assistantThinking,
-      post_tool_text: postText,
-      post_tool_thinking: postThinking,
-      cwd: state.cwd,
-      ...error ? { error } : {}
-    };
-    state.pendingToolEvents.push({
-      hookEvent: "PreToolUse",
-      hookData
-    });
-    state.pendingToolEvents.push({
-      hookEvent: error ? "PostToolUseFailure" : "PostToolUse",
-      hookData
-    });
-    const turn = state.turns[state.turns.length - 1];
-    if (turn) {
-      const tool = {
-        toolUseId,
-        toolName,
-        toolInput,
-        assistantText: assistantText ?? void 0,
-        assistantThinking: assistantThinking ?? void 0,
-        startTime: Date.now() - 100,
-        // approximate
-        endTime: Date.now(),
-        result: toolResult,
-        error: error ?? null,
-        postText: postText ?? void 0,
-        postThinking: postThinking ?? void 0
-      };
-      turn.tools.push(tool);
-    }
-    state.currentToolUseId = null;
-    state.currentToolName = null;
-    state.currentToolInput = null;
+  if (state.currentToolUseId !== toolCallId) {
+    return [];
   }
-  return state;
+  const toolUseId = state.currentToolUseId;
+  const toolInput = state.currentToolInput ?? {};
+  const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
+  const hookData = {
+    tool_name: toolName,
+    tool_use_id: toolUseId,
+    tool_input: toolInput,
+    assistant_text: assistantText,
+    assistant_thinking: assistantThinking,
+    post_tool_text: postText,
+    post_tool_thinking: postThinking,
+    cwd: state.cwd,
+    ...error ? { error } : {}
+  };
+  const results = [
+    { hookEvent: "PreToolUse", hookData, sessionId: state.sessionId },
+    { hookEvent: error ? "PostToolUseFailure" : "PostToolUse", hookData, sessionId: state.sessionId }
+  ];
+  const turn = state.turns[state.turns.length - 1];
+  if (turn) {
+    const tool = {
+      toolUseId,
+      toolName,
+      toolInput,
+      assistantText: assistantText ?? void 0,
+      assistantThinking: assistantThinking ?? void 0,
+      startTime: Date.now() - 100,
+      // approximate
+      endTime: Date.now(),
+      result: toolResult,
+      error: error ?? null,
+      postText: postText ?? void 0,
+      postThinking: postThinking ?? void 0
+    };
+    turn.tools.push(tool);
+  }
+  state.currentToolUseId = null;
+  state.currentToolName = null;
+  state.currentToolInput = null;
+  return results;
 }
 function accTextDelta(state, delta) {
   state.pendingAssistantText += delta;
@@ -7235,9 +7206,8 @@ function accModelSelect(state, model, provider) {
   state.modelName = model;
   return state;
 }
-function accAgentStart(state, promptText) {
-  const events = [];
-  events.push({
+function accAgentStart(state) {
+  return [{
     hookEvent: "SessionStart",
     hookData: {
       session_id: state.sessionId,
@@ -7245,16 +7215,20 @@ function accAgentStart(state, promptText) {
       source: "pi",
       model: state.modelName ?? void 0,
       effort_level: state.effortLevel
-    }
-  });
-  events.push({
+    },
+    sessionId: state.sessionId
+  }];
+}
+function accUserPromptMessage(state, promptText) {
+  if (!promptText) return [];
+  return [{
     hookEvent: "UserPromptSubmit",
     hookData: {
       prompt: promptText,
       cwd: state.cwd
-    }
-  });
-  return events;
+    },
+    sessionId: state.sessionId
+  }];
 }
 function accAgentEnd(state, resultType, usage, error) {
   const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
@@ -7266,31 +7240,18 @@ function accAgentEnd(state, resultType, usage, error) {
   };
   return {
     hookEvent: "Stop",
-    hookData
+    hookData,
+    sessionId: state.sessionId
   };
-}
-function drainPendingEvents(state) {
-  const events = [...state.pendingToolEvents];
-  state.pendingToolEvents = [];
-  return events;
 }
 
 // src/pi-driver/hook-translator.ts
+var stamp = (state, r) => ({ ...r, sessionId: state.sessionId });
 function translatePiEvent(event, state) {
   switch (event.type) {
     case "agent_start": {
-      const e = event;
-      let promptText = "";
-      if (e.message?.content) {
-        for (const content of e.message.content) {
-          if (content.type === "text") {
-            promptText += content.text;
-          }
-        }
-      }
-      const events = accAgentStart(state, promptText);
-      state.pendingToolEvents.push(...events);
-      return { kind: "emit", result: events[0] };
+      const events = accAgentStart(state);
+      return { kind: "emit", results: events.map((r) => stamp(state, r)) };
     }
     case "agent_end": {
       const e = event;
@@ -7300,61 +7261,86 @@ function translatePiEvent(event, state) {
         cache_read_input_tokens: e.result.usage.cache_read_input_tokens ?? 0,
         cache_creation_input_tokens: e.result.usage.cache_creation_input_tokens ?? 0
       } : void 0;
-      const result3 = accAgentEnd(
+      const stop = accAgentEnd(
         state,
         e.result?.type ?? "success",
         usage,
         e.result?.error
       );
-      const pending = drainPendingEvents(state);
-      return { kind: "emit", result: result3 };
+      return { kind: "emit", results: [stamp(state, stop)] };
     }
     case "turn_start": {
       const e = event;
       accTurnStart(state, e.turn_id);
-      return { kind: "accumulate", state };
+      return { kind: "noop" };
     }
     case "turn_end": {
       const e = event;
       accTurnEnd(state, e.turn_id);
-      const pending = drainPendingEvents(state);
-      if (pending.length > 0) {
-        return { kind: "emit", result: pending[0] };
-      }
       return { kind: "noop" };
     }
     case "tool_execution_start": {
       const e = event;
-      accToolStart(state, e.tool_call_id, e.tool_name, e.tool_input);
-      return { kind: "accumulate", state };
+      const id = e.toolCallId ?? e.tool_call_id;
+      const name = e.toolName ?? e.tool_name;
+      const input = e.args ?? e.tool_input ?? {};
+      accToolStart(state, id, name, input);
+      return { kind: "noop" };
     }
     case "tool_execution_end": {
       const e = event;
-      accToolEnd(
-        state,
-        e.tool_call_id,
-        e.tool_name,
-        e.tool_result,
-        e.error
-      );
-      if (state.pendingToolEvents.length > 0) {
-        const first = state.pendingToolEvents[0];
-        state.pendingToolEvents.shift();
-        return { kind: "emit", result: first };
+      const id = e.toolCallId ?? e.tool_call_id;
+      const name = e.toolName ?? e.tool_name;
+      const toolResult = e.result ?? e.tool_result;
+      const isError = e.isError === true;
+      const errorMsg = isError ? typeof e.error === "string" ? e.error : "tool execution failed" : typeof e.error === "string" ? e.error : void 0;
+      const results = accToolEnd(state, id, name, toolResult, errorMsg);
+      if (results.length === 0) return { kind: "noop" };
+      return { kind: "emit", results };
+    }
+    // Pi emits streaming partial-result updates between start and end.
+    // No event for us to emit; just ignore.
+    case "tool_execution_update":
+      return { kind: "noop" };
+    // Pi 0.74 emits message_start / message_end as full snapshot events.
+    // For user-role messages, this is where the prompt text lives — extract
+    // it once (on message_start) and emit UserPromptSubmit. Assistant-role
+    // messages are streamed via message_update and surfaced elsewhere.
+    case "message_start": {
+      const e = event;
+      const msg = e.message;
+      if (msg?.role === "user" && Array.isArray(msg.content)) {
+        const text = msg.content.filter((c) => c?.type === "text" && typeof c.text === "string").map((c) => c.text).join("");
+        const results = accUserPromptMessage(state, text);
+        if (results.length > 0) {
+          return { kind: "emit", results: results.map((r) => stamp(state, r)) };
+        }
       }
       return { kind: "noop" };
     }
+    case "message_end":
+      return { kind: "noop" };
     case "message_update": {
       const e = event;
-      const update2 = e.message_update;
+      const update2 = e.assistantMessageEvent ?? e.message_update;
+      if (!update2) return { kind: "noop" };
       if (update2.type === "text_delta" && update2.delta) {
         accTextDelta(state, update2.delta);
-        return { kind: "accumulate", state };
-      }
-      if (update2.type === "thinking_delta" && update2.delta) {
+      } else if (update2.type === "thinking_delta" && update2.delta) {
         accThinkingDelta(state, update2.delta);
-        return { kind: "accumulate", state };
       }
+      return { kind: "noop" };
+    }
+    // Pi emits flat text_delta / thinking_delta events too (in some modes),
+    // not always wrapped in message_update. Handle both.
+    case "text_delta": {
+      const e = event;
+      if (e.delta) accTextDelta(state, e.delta);
+      return { kind: "noop" };
+    }
+    case "thinking_delta": {
+      const e = event;
+      if (e.delta) accThinkingDelta(state, e.delta);
       return { kind: "noop" };
     }
     case "model_select": {
@@ -7366,10 +7352,7 @@ function translatePiEvent(event, state) {
       };
       return {
         kind: "emit",
-        result: {
-          hookEvent: "SessionStart",
-          hookData
-        }
+        results: [{ hookEvent: "SessionStart", hookData, sessionId: state.sessionId }]
       };
     }
     case "error": {
@@ -7382,16 +7365,14 @@ function translatePiEvent(event, state) {
       return { kind: "noop" };
   }
 }
-function getPendingEvents(state) {
-  return [...state.pendingToolEvents];
-}
 function createSessionEnd(state) {
   return {
     hookEvent: "SessionEnd",
     hookData: {
       session_id: state.sessionId,
       cwd: state.cwd
-    }
+    },
+    sessionId: state.sessionId
   };
 }
 
@@ -7448,12 +7429,11 @@ function generateSessionId() {
   return `pi-${now}-${random2}`;
 }
 function startPiDriver(options) {
-  const sessionId = generateSessionId();
+  const sessionId = options.sessionId ?? generateSessionId();
   const cwd = options.cwd ?? process.cwd();
   const thinkingLevel = options.thinkingLevel ?? "medium";
   let state = createAccState(sessionId, cwd, thinkingToEffort(thinkingLevel));
   let metadata = createSessionMetadata(sessionId, cwd, thinkingLevel);
-  let pendingQueue = [];
   const onLifecycle = options.onLifecycle ?? (() => {
   });
   const { driver, process: childProcess } = spawnPiSync({
@@ -7466,10 +7446,9 @@ function startPiDriver(options) {
   driver.setEventHandler((evt) => {
     const result3 = translatePiEvent(evt.event, state);
     if (result3.kind === "emit") {
-      pendingQueue.push(result3.result);
-    } else if (result3.kind === "accumulate") {
-      const pending = getPendingEvents(state);
-      pendingQueue.push(...pending);
+      for (const r of result3.results) {
+        options.onTranslation(r);
+      }
     }
     switch (evt.event.type) {
       case "model_select":
@@ -7482,10 +7461,6 @@ function startPiDriver(options) {
       case "agent_end":
         onLifecycle("stop", metadata);
         break;
-    }
-    while (pendingQueue.length > 0) {
-      const toEmit = pendingQueue.shift();
-      options.onTranslation(toEmit);
     }
   });
   childProcess.on("error", (err) => {
@@ -7563,8 +7538,8 @@ var program = Effect_exports.gen(function* () {
     handleEvent(eventName, sessionId, cwd, data, pid, hookSocket),
     eventLayer
   ));
-  const handlePiTranslation = (result3) => {
-    const sessionId = result3.hookData.session_id || "pi-session";
+  const handlePiTranslation = (outerSessionId, result3) => {
+    const sessionId = outerSessionId;
     const cwd = result3.hookData.cwd || config.piCwd || process.cwd();
     logMsg(`Pi driver event: ${result3.hookEvent} session=${sessionId}`);
     const patches = runEvent(result3.hookEvent, sessionId, cwd, result3.hookData, null);
@@ -7633,27 +7608,39 @@ var program = Effect_exports.gen(function* () {
       return null;
     }
     const sessionId = generateSessionId2();
-    logMsg(`Starting pi session ${sessionId} (cwd=${options.cwd ?? process.cwd()}, thinking=${options.thinkingLevel ?? "medium"})`);
+    const cwd = options.cwd ?? process.cwd();
+    const thinking = options.thinkingLevel ?? "medium";
+    logMsg(`Starting pi session ${sessionId} (cwd=${cwd}, thinking=${thinking})`);
     terminals.broadcast({
       type: "pi.session",
       sessionId,
       event: "started",
-      cwd: options.cwd ?? process.cwd()
+      cwd
+    });
+    handlePiTranslation(sessionId, {
+      hookEvent: "SessionStart",
+      hookData: {
+        session_id: sessionId,
+        cwd,
+        source: "pi",
+        effort_level: thinking
+      }
     });
     const driver = startPiDriver({
       cwd: options.cwd ?? process.cwd(),
       thinkingLevel: options.thinkingLevel ?? "medium",
+      sessionId,
       onTranslation: (result3) => {
-        handlePiTranslation(result3);
+        handlePiTranslation(sessionId, result3);
       },
-      onLifecycle: (event, metadata) => {
+      onLifecycle: (event, _metadata) => {
         if (event === "start") {
-          logMsg(`Pi session started: ${metadata?.sessionId}`);
+          logMsg(`Pi session started: ${sessionId}`);
         } else if (event === "stop") {
-          logMsg(`Pi session ended: ${metadata?.sessionId}`);
+          logMsg(`Pi session ended: ${sessionId}`);
           terminals.broadcast({
             type: "pi.session",
-            sessionId: metadata?.sessionId ?? sessionId,
+            sessionId,
             event: "stopped"
           });
           activePiDriver = null;
@@ -7661,7 +7648,7 @@ var program = Effect_exports.gen(function* () {
           logMsg(`Pi session error`, "error");
           terminals.broadcast({
             type: "pi.session",
-            sessionId: metadata?.sessionId ?? sessionId,
+            sessionId,
             event: "stopped"
           });
           activePiDriver = null;
@@ -8010,6 +7997,12 @@ var program = Effect_exports.gen(function* () {
           logMsg(`Pi session started via terminal: ${sessionId}`);
         } else {
           logMsg(`Pi session start failed \u2014 already running?`, "warn");
+          terminals.sendTo(conn, {
+            type: "pi.session",
+            sessionId: "",
+            event: "rejected",
+            reason: "Pi session already running. Abort it first (p a)."
+          });
         }
         break;
       }

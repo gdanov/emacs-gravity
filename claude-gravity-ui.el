@@ -1967,6 +1967,15 @@ prompts to confirm the directory before starting."
     ("+" "New config item" claude-gravity-config-new)
     ("k" "Dismiss inbox" claude-gravity-inbox-dismiss)
     ("y" "Copy issue ID" claude-gravity-copy-issue-id)]
+   ["Pi Sessions"
+    ("p s" "Start pi session" claude-gravity--pi-start)
+    ("p p" "Send prompt" claude-gravity--pi-prompt
+     :inapt-if-not (lambda () claude-gravity--pi-session-id))
+    ("p t" "Set thinking level" claude-gravity--pi-set-thinking
+     :inapt-if-not (lambda () claude-gravity--pi-session-id))
+    ("p a" "Abort" claude-gravity--pi-abort
+     :inapt-if-not (lambda () claude-gravity--pi-session-id))
+    ("p ?" "Status" claude-gravity--pi-status)]
    ["Debug"
     ("M" "Debug messages" claude-gravity-debug-show)]])
 
@@ -2010,14 +2019,15 @@ prompts to confirm the directory before starting."
     ("S c" "Reset/clear" claude-gravity-reset-session
      :inapt-if-not claude-gravity--current-session-tmux-p)]
    ["Pi Sessions"
-    ("P s" "Start pi session" claude-gravity--pi-start)
-    ("P p" "Send prompt" claude-gravity--pi-prompt
-     :inapt-if-not (lambda () (null claude-gravity--pi-session-id)))
-    ("P t" "Set thinking level" claude-gravity--pi-set-thinking
-     :inapt-if-not (lambda () (null claude-gravity--pi-session-id)))
-    ("P a" "Abort" claude-gravity--pi-abort
-     :inapt-if-not (lambda () (null claude-gravity--pi-session-id)))
-    ("P ?" "Status" claude-gravity--pi-status)]
+    ;; `P' is already bound (single-key) to Show Plan, so use `p' as the pi prefix.
+    ("p s" "Start pi session" claude-gravity--pi-start)
+    ("p p" "Send prompt" claude-gravity--pi-prompt
+     :inapt-if-not (lambda () claude-gravity--pi-session-id))
+    ("p t" "Set thinking level" claude-gravity--pi-set-thinking
+     :inapt-if-not (lambda () claude-gravity--pi-session-id))
+    ("p a" "Abort" claude-gravity--pi-abort
+     :inapt-if-not (lambda () claude-gravity--pi-session-id))
+    ("p ?" "Status" claude-gravity--pi-status)]
    ["Permissions"
     ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
     ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]

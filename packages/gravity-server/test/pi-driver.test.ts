@@ -11,7 +11,7 @@ import type { PiEvent, AccState, TranslationResult, ThinkingLevel } from "../src
 
 // Import the modules
 import { PiProtocol } from "../src/pi-driver/protocol.js";
-import { createAccState, accTurnStart, accTurnEnd, accToolStart, accToolEnd, accTextDelta, accThinkingDelta, accAgentStart, accAgentEnd, drainPendingEvents } from "../src/pi-driver/turn-accumulator.js";
+import { createAccState, accTurnStart, accTurnEnd, accToolStart, accToolEnd, accTextDelta, accThinkingDelta, accAgentStart, accUserPromptMessage, accAgentEnd } from "../src/pi-driver/turn-accumulator.js";
 import { translatePiEvent, createSessionStart, createSessionEnd } from "../src/pi-driver/hook-translator.js";
 import { thinkingToEffort, normalizeThinkingLevel, createSessionMetadata, updateModel, updateThinkingLevel } from "../src/pi-driver/session.js";
 
@@ -24,7 +24,8 @@ describe("PiEvent types", () => {
       { type: "thinking_delta", delta: "thinking..." },
       { type: "turn_start", turn_id: "t1" },
       { type: "turn_end", turn_id: "t1" },
-      { type: "agent_start", message: { role: "user", content: [{ type: "text", text: "hello" }] } },
+      { type: "agent_start" } as unknown as PiEvent,
+      { type: "message_start", message: { role: "user", content: [{ type: "text", text: "hello" }] } } as unknown as PiEvent,
       { type: "agent_end", result: { type: "success" } },
       { type: "tool_execution_start", tool_call_id: "c1", tool_name: "bash", tool_input: {} },
       { type: "tool_execution_end", tool_call_id: "c1", tool_name: "bash", tool_result: {} },
@@ -33,7 +34,7 @@ describe("PiEvent types", () => {
       { type: "error", error: "something went wrong" },
     ];
 
-    expect(events).toHaveLength(11);
+    expect(events).toHaveLength(12);
   });
 
   it("should allow unknown event type", () => {
@@ -114,7 +115,7 @@ describe("PiProtocol", () => {
     const line = PiProtocol.formatPrompt("Hello, world!");
     const parsed = JSON.parse(line.trim());
     expect(parsed.type).toBe("prompt");
-    expect(parsed.text).toBe("Hello, world!");
+    expect(parsed.message).toBe("Hello, world!");
   });
 
   it("should format prompt with images", () => {
@@ -128,7 +129,7 @@ describe("PiProtocol", () => {
     const line = PiProtocol.formatSteer("Try a different approach");
     const parsed = JSON.parse(line.trim());
     expect(parsed.type).toBe("steer");
-    expect(parsed.text).toBe("Try a different approach");
+    expect(parsed.message).toBe("Try a different approach");
   });
 
   it("should format abort command", () => {
@@ -206,9 +207,8 @@ describe("Turn accumulator", () => {
   it("should emit PreToolUse and PostToolUse on tool end", () => {
     accTurnStart(state, "turn-1");
     accToolStart(state, "call-1", "bash", { command: "ls" });
-    accToolEnd(state, "call-1", "bash", { stdout: "file.txt" });
+    const events = accToolEnd(state, "call-1", "bash", { stdout: "file.txt" });
 
-    const events = drainPendingEvents(state);
     expect(events).toHaveLength(2);
     expect(events[0].hookEvent).toBe("PreToolUse");
     expect(events[1].hookEvent).toBe("PostToolUse");
@@ -217,19 +217,27 @@ describe("Turn accumulator", () => {
   it("should emit PostToolUseFailure on tool error", () => {
     accTurnStart(state, "turn-1");
     accToolStart(state, "call-1", "bash", { command: "ls" });
-    accToolEnd(state, "call-1", "bash", {}, "Command failed");
+    const events = accToolEnd(state, "call-1", "bash", {}, "Command failed");
 
-    const events = drainPendingEvents(state);
     expect(events).toHaveLength(2);
     expect(events[1].hookEvent).toBe("PostToolUseFailure");
   });
 
-  it("should handle agent_start", () => {
-    const events = accAgentStart(state, "Hello, pi!");
-    expect(events).toHaveLength(2);
+  it("should handle agent_start: SessionStart only (pi 0.74's agent_start is bare)", () => {
+    const events = accAgentStart(state);
+    expect(events).toHaveLength(1);
     expect(events[0].hookEvent).toBe("SessionStart");
-    expect(events[1].hookEvent).toBe("UserPromptSubmit");
-    expect((events[1].hookData as any).prompt).toBe("Hello, pi!");
+  });
+
+  it("should handle user message_start: UserPromptSubmit with the prompt text", () => {
+    const events = accUserPromptMessage(state, "Hello, pi!");
+    expect(events).toHaveLength(1);
+    expect(events[0].hookEvent).toBe("UserPromptSubmit");
+    expect((events[0].hookData as any).prompt).toBe("Hello, pi!");
+  });
+
+  it("accUserPromptMessage is a noop for empty text", () => {
+    expect(accUserPromptMessage(state, "")).toEqual([]);
   });
 
   it("should handle agent_end with token usage", () => {
@@ -247,8 +255,6 @@ describe("Turn accumulator", () => {
     accTurnStart(state, "turn-1");
     accTurnEnd(state, "turn-1");
     expect(state.inTurn).toBe(false);
-    const pending = drainPendingEvents(state);
-    expect(pending).toHaveLength(0);
   });
 });
 
@@ -261,29 +267,51 @@ describe("Hook translator", () => {
     state = createAccState("test-session", "/test/cwd", "medium");
   });
 
-  it("should translate agent_start to SessionStart + UserPromptSubmit", () => {
-    const event: PiEvent = {
-      type: "agent_start",
-      message: {
-        role: "user",
-        content: [{ type: "text", text: "Hello, pi!" }],
-      },
-    };
-
+  it("agent_start emits only SessionStart (pi 0.74's agent_start is bare)", () => {
+    // Pi 0.74 sends a bare `{type: "agent_start"}` with no message attached.
+    const event = { type: "agent_start" } as unknown as PiEvent;
     const result = translatePiEvent(event, state);
     expect(result.kind).toBe("emit");
     if (result.kind === "emit") {
-      expect(result.result.hookEvent).toBe("SessionStart");
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].hookEvent).toBe("SessionStart");
     }
   });
 
-  it("should translate turn_start as accumulate", () => {
-    const event: PiEvent = { type: "turn_start", turn_id: "turn-1" };
+  it("message_start with role=user emits UserPromptSubmit", () => {
+    const event = {
+      type: "message_start",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "Hello, pi!" }],
+        timestamp: 0,
+      },
+    } as unknown as PiEvent;
     const result = translatePiEvent(event, state);
-    expect(result.kind).toBe("accumulate");
+    expect(result.kind).toBe("emit");
+    if (result.kind === "emit") {
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].hookEvent).toBe("UserPromptSubmit");
+      expect((result.results[0].hookData as { prompt?: string }).prompt).toBe("Hello, pi!");
+    }
   });
 
-  it("should translate tool_execution_start as accumulate", () => {
+  it("message_start with role=assistant is a noop (assistant text comes via message_update)", () => {
+    const event = {
+      type: "message_start",
+      message: { role: "assistant", content: [{ type: "text", text: "" }] },
+    } as unknown as PiEvent;
+    const result = translatePiEvent(event, state);
+    expect(result.kind).toBe("noop");
+  });
+
+  it("should translate turn_start as noop (state-only mutation)", () => {
+    const event: PiEvent = { type: "turn_start", turn_id: "turn-1" };
+    const result = translatePiEvent(event, state);
+    expect(result.kind).toBe("noop");
+  });
+
+  it("should translate tool_execution_start as noop (state-only mutation)", () => {
     const event: PiEvent = {
       type: "tool_execution_start",
       tool_call_id: "call-1",
@@ -291,11 +319,10 @@ describe("Hook translator", () => {
       tool_input: { command: "ls" },
     };
     const result = translatePiEvent(event, state);
-    expect(result.kind).toBe("accumulate");
+    expect(result.kind).toBe("noop");
   });
 
-  it("should translate tool_execution_end to emit PreToolUse and PostToolUse", () => {
-    // First set up tool start
+  it("should translate tool_execution_end to emit PreToolUse and PostToolUse together", () => {
     const startEvent: PiEvent = {
       type: "tool_execution_start",
       tool_call_id: "call-1",
@@ -310,19 +337,14 @@ describe("Hook translator", () => {
       tool_name: "bash",
       tool_result: {},
     };
-    
-    // translatePiEvent now returns first event without draining all
+
     const result = translatePiEvent(endEvent, state);
     expect(result.kind).toBe("emit");
     if (result.kind === "emit") {
-      expect(result.result.hookEvent).toBe("PreToolUse");
+      expect(result.results).toHaveLength(2);
+      expect(result.results[0].hookEvent).toBe("PreToolUse");
+      expect(result.results[1].hookEvent).toBe("PostToolUse");
     }
-    
-    // At this point, pending still has PostToolUse (wasn't drained)
-    // But we shifted it out so we need to check if it was emitted
-    // The translator now emits PreToolUse and leaves PostToolUse in pending
-    // For the test, we verify PreToolUse was emitted
-    // PostToolUse will be emitted on next translation or we could add a flush function
   });
 
   it("should accumulate message_update deltas", () => {
@@ -351,8 +373,8 @@ describe("Hook translator", () => {
     const result = translatePiEvent(event, state);
     expect(result.kind).toBe("emit");
     if (result.kind === "emit") {
-      expect(result.result.hookEvent).toBe("SessionStart");
-      expect((result.result.hookData as any).model).toBe("claude-3-opus");
+      expect(result.results[0].hookEvent).toBe("SessionStart");
+      expect((result.results[0].hookData as any).model).toBe("claude-3-opus");
     }
   });
 
@@ -425,14 +447,15 @@ describe("Full event sequence", () => {
 
     // Simulate a simple pi session: user prompt → text → tool → response
     const events: PiEvent[] = [
-      // Agent starts with user prompt
+      // Agent starts (pi 0.74 sends a bare agent_start; prompt arrives next)
+      { type: "agent_start" } as unknown as PiEvent,
       {
-        type: "agent_start",
+        type: "message_start",
         message: {
           role: "user",
           content: [{ type: "text", text: "List files in current directory" }],
         },
-      },
+      } as unknown as PiEvent,
       // Assistant starts a turn
       { type: "turn_start", turn_id: "t1" },
       // Assistant sends text
@@ -463,20 +486,9 @@ describe("Full event sequence", () => {
     for (const event of events) {
       const result = translatePiEvent(event, state);
       if (result.kind === "emit") {
-        allEvents.push(result.result);
-        // Drain any pending events created during translation
-        const pending = drainPendingEvents(state);
-        allEvents.push(...pending);
-      } else if (result.kind === "accumulate") {
-        // Drain pending events
-        const pending = drainPendingEvents(state);
-        allEvents.push(...pending);
+        allEvents.push(...result.results);
       }
     }
-
-    // Final drain for any remaining events (e.g., from agent_end)
-    const finalPending = drainPendingEvents(state);
-    allEvents.push(...finalPending);
 
     // Verify we got expected events
     const hookEvents = allEvents.map(e => e.hookEvent);
@@ -485,5 +497,202 @@ describe("Full event sequence", () => {
     expect(hookEvents).toContain("PreToolUse");
     expect(hookEvents).toContain("PostToolUse");
     expect(hookEvents).toContain("Stop");
+  });
+
+  it("should handle out-of-order: turn_end before tool_execution_end", () => {
+    // Bug: the cleanup branch in accTurnEnd pushes a PreToolUse but no PostToolUse.
+    // Then tool_execution_end fires, matches currentToolUseId (not reset), emits
+    // another PreToolUse + PostToolUse, and adds a second AccTool to turn.tools.
+    // Expected: exactly one PreToolUse, exactly one PostToolUse, tool in turn.tools once.
+    const state = createAccState("test-session", "/test", "medium");
+    const allEvents: TranslationResult[] = [];
+
+    const events: PiEvent[] = [
+      { type: "agent_start" } as unknown as PiEvent,
+      { type: "message_start", message: { role: "user", content: [{ type: "text", text: "hello" }] } } as unknown as PiEvent,
+      { type: "turn_start", turn_id: "t1" },
+      {
+        type: "tool_execution_start",
+        tool_call_id: "call-1",
+        tool_name: "bash",
+        tool_input: { command: "ls" },
+      },
+      // Out-of-order: turn_end arrives BEFORE tool_execution_end
+      { type: "turn_end", turn_id: "t1" },
+      {
+        type: "tool_execution_end",
+        tool_call_id: "call-1",
+        tool_name: "bash",
+        tool_result: { stdout: "file.txt" },
+      },
+      { type: "agent_end", result: { type: "success" } },
+    ];
+
+    for (const event of events) {
+      const result = translatePiEvent(event, state);
+      if (result.kind === "emit") {
+        allEvents.push(...result.results);
+      }
+    }
+
+    const hookEvents = allEvents.map((e) => e.hookEvent);
+    const preToolUseCount = hookEvents.filter((e) => e === "PreToolUse").length;
+    const postToolUseCount = hookEvents.filter((e) => e === "PostToolUse" || e === "PostToolUseFailure").length;
+
+    // Exactly one PreToolUse and one PostToolUse — no duplicates
+    expect(preToolUseCount).toBe(1);
+    expect(postToolUseCount).toBe(1);
+
+    // Tool appears exactly once in turn.tools
+    const turn = state.turns[0];
+    expect(turn?.tools).toHaveLength(1);
+    expect(turn?.tools[0].toolName).toBe("bash");
+  });
+
+  it("should handle abort: turn_end with no subsequent tool_execution_end", () => {
+    // Bug: when pi crashes or is killed mid-tool, turn_end fires but tool_execution_end
+    // never arrives. The cleanup branch pushes a bare PreToolUse with no matching PostToolUse.
+    // Expected: the tool is either absent from final state, or marked as failed/aborted.
+    const state = createAccState("test-session", "/test", "medium");
+    const allEvents: TranslationResult[] = [];
+
+    const events: PiEvent[] = [
+      { type: "agent_start" } as unknown as PiEvent,
+      { type: "message_start", message: { role: "user", content: [{ type: "text", text: "hello" }] } } as unknown as PiEvent,
+      { type: "turn_start", turn_id: "t1" },
+      {
+        type: "tool_execution_start",
+        tool_call_id: "call-1",
+        tool_name: "bash",
+        tool_input: { command: "ls" },
+      },
+      // No tool_execution_end — pi was killed
+      { type: "turn_end", turn_id: "t1" },
+      { type: "agent_end", result: { type: "success" } },
+    ];
+
+    for (const event of events) {
+      const result = translatePiEvent(event, state);
+      if (result.kind === "emit") {
+        allEvents.push(...result.results);
+      }
+    }
+
+    // The tool should NOT be left as a "running" orphan — either:
+    // (a) it is absent from turn.tools, or
+    // (b) it has a failure marker (PostToolUseFailure emitted)
+    const hookEvents = allEvents.map((e) => e.hookEvent);
+    const preToolUseCount = hookEvents.filter((e) => e === "PreToolUse").length;
+    const postToolUseFailureCount = hookEvents.filter((e) => e === "PostToolUseFailure").length;
+    const postToolUseCount = hookEvents.filter((e) => e === "PostToolUse").length;
+
+    const turn = state.turns[0];
+
+    // If the tool appears in turn.tools it MUST have a failure marker.
+    // A PreToolUse with no matching PostToolUseFailure is a protocol violation.
+    if ((turn?.tools?.length ?? 0) > 0) {
+      // Tool is present → must have a failure event to balance it
+      expect(postToolUseFailureCount).toBe(1);
+      // There should be exactly one PreToolUse for this tool
+      expect(preToolUseCount).toBe(1);
+    } else {
+      // Tool is absent — also acceptable (tool ignored on abort)
+      // No PreToolUse should be emitted for an aborted tool
+      expect(preToolUseCount).toBe(0);
+    }
+
+    // No successful PostToolUse for this session (no tool completed)
+    expect(postToolUseCount).toBe(0);
+  });
+});
+
+// ── Issue #4 + #5: pendingToolEvents leak ──────────────────────────────
+//
+// `tool_execution_end` shifts only the first pending event (leaves PostToolUse
+// stuck). `agent_end` calls drainPendingEvents but discards the result. mod.ts
+// reads via getPendingEvents (non-destructive) on accumulate, so every
+// accumulate event re-emits the entire backlog. The combination corrupts
+// emit ordering, drops events, and produces duplicates in any multi-tool turn.
+
+/**
+ * Mirrors the event-handler body in `pi-driver/mod.ts:setEventHandler` —
+ * i.e. the exact production routing that drives onTranslation. Drives the
+ * given pi events through translatePiEvent and emits every TranslationResult
+ * the translator returns, in order. No shared-state queue.
+ */
+function runProductionEventHandler(
+  events: PiEvent[],
+  state: AccState,
+  emit: (r: TranslationResult) => void,
+): void {
+  for (const evt of events) {
+    const result = translatePiEvent(evt, state);
+    if (result.kind === "emit") {
+      for (const r of result.results) emit(r);
+    }
+  }
+}
+
+describe("issue #4: multi-tool turn — no duplicates, no drops", () => {
+  it("a 3-tool turn emits exactly 1 SessionStart, 1 UserPromptSubmit, 3 PreToolUse, 3 PostToolUse, 1 Stop", () => {
+    const state = createAccState("test-issue-4", "/test", thinkingToEffort("medium"));
+    const emitted: TranslationResult[] = [];
+
+    const events: PiEvent[] = [
+      { type: "agent_start" } as unknown as PiEvent,
+      { type: "message_start", message: { role: "user", content: [{ type: "text", text: "do three things" }] } } as unknown as PiEvent,
+      { type: "turn_start", turn_id: "t1" },
+      { type: "tool_execution_start", tool_call_id: "c1", tool_name: "bash", tool_input: { command: "ls" } },
+      { type: "tool_execution_end",   tool_call_id: "c1", tool_name: "bash", tool_result: { stdout: "" } },
+      { type: "tool_execution_start", tool_call_id: "c2", tool_name: "bash", tool_input: { command: "pwd" } },
+      { type: "tool_execution_end",   tool_call_id: "c2", tool_name: "bash", tool_result: { stdout: "/" } },
+      { type: "tool_execution_start", tool_call_id: "c3", tool_name: "bash", tool_input: { command: "echo hi" } },
+      { type: "tool_execution_end",   tool_call_id: "c3", tool_name: "bash", tool_result: { stdout: "hi" } },
+      { type: "turn_end", turn_id: "t1" },
+      { type: "agent_end", result: { type: "success" } },
+    ];
+
+    runProductionEventHandler(events, state, (r) => emitted.push(r));
+
+    const counts: Record<string, number> = {};
+    for (const e of emitted) counts[e.hookEvent] = (counts[e.hookEvent] ?? 0) + 1;
+
+    expect(counts).toEqual({
+      SessionStart: 1,
+      UserPromptSubmit: 1,
+      PreToolUse: 3,
+      PostToolUse: 3,
+      Stop: 1,
+    });
+
+    // Each tool_use_id appears once in PreToolUse and once in PostToolUse
+    const preIds = emitted
+      .filter((e) => e.hookEvent === "PreToolUse")
+      .map((e) => (e.hookData as { tool_use_id: string }).tool_use_id);
+    const postIds = emitted
+      .filter((e) => e.hookEvent === "PostToolUse")
+      .map((e) => (e.hookData as { tool_use_id: string }).tool_use_id);
+    expect(preIds.sort()).toEqual(["c1", "c2", "c3"]);
+    expect(postIds.sort()).toEqual(["c1", "c2", "c3"]);
+  });
+
+  it("PostToolUse for the LAST tool of a turn is not dropped at agent_end", () => {
+    const state = createAccState("test-issue-5", "/test", thinkingToEffort("medium"));
+    const emitted: TranslationResult[] = [];
+
+    const events: PiEvent[] = [
+      { type: "agent_start" } as unknown as PiEvent,
+      { type: "message_start", message: { role: "user", content: [{ type: "text", text: "one tool" }] } } as unknown as PiEvent,
+      { type: "turn_start", turn_id: "t1" },
+      { type: "tool_execution_start", tool_call_id: "only", tool_name: "bash", tool_input: {} },
+      { type: "tool_execution_end",   tool_call_id: "only", tool_name: "bash", tool_result: {} },
+      { type: "turn_end", turn_id: "t1" },
+      { type: "agent_end", result: { type: "success" } },
+    ];
+
+    runProductionEventHandler(events, state, (r) => emitted.push(r));
+
+    const postCount = emitted.filter((e) => e.hookEvent === "PostToolUse").length;
+    expect(postCount).toBe(1);
   });
 });

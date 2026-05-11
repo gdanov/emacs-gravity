@@ -130,9 +130,9 @@ export class PiProtocol {
   static formatCommand(cmd: PiCommand): string {
     switch (cmd.type) {
       case "prompt":
-        return PiProtocol.formatPrompt(cmd.text, cmd.images);
+        return PiProtocol.formatPrompt(cmd.message, cmd.images);
       case "steer":
-        return PiProtocol.formatSteer(cmd.text);
+        return PiProtocol.formatSteer(cmd.message);
       case "abort":
         return PiProtocol.formatAbort();
       case "set_thinking_level":
@@ -141,10 +141,11 @@ export class PiProtocol {
   }
 
   /**
-   * Format a prompt command for pi's stdin.
+   * Format a prompt command for pi's stdin. Pi expects { message, images? } —
+   * field name is `message`, not `text` (verified against pi 0.74).
    */
   static formatPrompt(text: string, images?: string[]): string {
-    const cmd: PiCommand = { type: "prompt", text };
+    const cmd: PiCommand = { type: "prompt", message: text };
     if (images && images.length > 0) {
       cmd.images = images;
     }
@@ -155,7 +156,7 @@ export class PiProtocol {
    * Format a steer command for pi's stdin.
    */
   static formatSteer(text: string): string {
-    return JSON.stringify({ type: "steer", text } as PiCommand) + "\n";
+    return JSON.stringify({ type: "steer", message: text } as PiCommand) + "\n";
   }
 
   /**

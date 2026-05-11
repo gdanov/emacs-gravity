@@ -220,7 +220,7 @@ Returns nil on error."
           (setq proc (make-network-process
                       :name "daemon-cmd"
                       :family 'local
-                      :remote claude-gravity--daemon-socket-path
+                      :service claude-gravity--daemon-socket-path
                       :buffer buf
                       :coding 'utf-8
                       :noquery t))

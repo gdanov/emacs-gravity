@@ -46,11 +46,17 @@ sync-marketplace: build-bridge build-server
 		exit 1; \
 	fi
 	@echo "Staging bundles into $(MARKETPLACE_CACHE)"
-	@mkdir -p "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist" "$(MARKETPLACE_CACHE)packages/gravity-server/dist"
+	@mkdir -p \
+		"$(MARKETPLACE_CACHE)dist" \
+		"$(MARKETPLACE_CACHE)packages/emacs-bridge/dist" \
+		"$(MARKETPLACE_CACHE)packages/gravity-server/dist"
 	install -m 644 packages/emacs-bridge/dist/emacs-bridge.mjs "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/emacs-bridge.mjs"
-	@# Server: stage to BOTH layouts so this works for v4.0.1 (pre-fix) and v4.0.2+ installs.
-	@#   v4.0.1 _ensure-server uses fallback #2 → packages/gravity-server/dist/
-	@#   v4.0.2+ _ensure-server uses only      → packages/emacs-bridge/dist/
+	@# Server: stage to all three known layouts so this works for any released version.
+	@#   v4.0.1 _ensure-server fallback #2 → packages/gravity-server/dist/
+	@#   v4.0.2+ dev layout                → packages/emacs-bridge/dist/
+	@#   v4.0.5+ published-release layout  → dist/  (hooks/_ensure-server resolves
+	@#                                       $(dirname $0)/../dist/gravity-server.mjs)
+	install -m 644 packages/gravity-server/dist/gravity-server.mjs "$(MARKETPLACE_CACHE)dist/gravity-server.mjs"
 	install -m 644 packages/gravity-server/dist/gravity-server.mjs "$(MARKETPLACE_CACHE)packages/gravity-server/dist/gravity-server.mjs"
 	install -m 644 packages/gravity-server/dist/gravity-server.mjs "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/gravity-server.mjs"
 	@echo "Marketplace cache synced."
@@ -84,8 +90,10 @@ restart-server: sync-marketplace kill-server
 	@# (Sourcing _ensure-server directly doesn't work here anyway: under
 	@# `sh -c '. file'` $0 is `sh`, which breaks its $(dirname $0)/... path
 	@# resolution. Direct spawn from MARKETPLACE_CACHE is cleaner.)
+	@# Respawn from the same path _ensure-server uses (top-level dist/), so
+	@# any subsequent hook-driven auto-spawn matches the manual restart.
 	@echo "Respawning server from $(MARKETPLACE_CACHE)..."
-	@nohup node "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/gravity-server.mjs" >>/tmp/gravity-server.log 2>&1 &
+	@nohup node "$(MARKETPLACE_CACHE)dist/gravity-server.mjs" >>/tmp/gravity-server.log 2>&1 &
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		if [ -S "$(HOME)/.local/state/gravity-hooks.sock" ]; then \
 			echo "Server up."; exit 0; \
