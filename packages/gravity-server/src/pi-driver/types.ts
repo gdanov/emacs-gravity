@@ -302,13 +302,52 @@ export type PiCommand =
   | { type: "steer"; message: string }
   | { type: "abort" }
   | { type: "set_thinking_level"; level: ThinkingLevel }
-  | { type: "set_model"; provider: string; modelId: string };
+  | { type: "set_model"; provider: string; modelId: string }
+  | { type: "get_session_stats" }
+  | { type: "get_state" };
 
 /** Event emitted by protocol.ts for parsed pi events. */
 export type PiProtocolEvent = {
   event: PiEvent;
   raw?: string;
 };
+
+/**
+ * Response to an RPC command sent over stdin. Pi 0.74 always sets
+ * `type: "response"`; `command` echoes the request type; `id` is present
+ * iff the request carried one (used for request/response correlation).
+ */
+export interface PiResponse {
+  type: "response";
+  command: string;
+  id?: string;
+  success: boolean;
+  data?: unknown;
+  error?: string;
+}
+
+/**
+ * Subset of `get_session_stats` response data the adapter consumes. Pi's
+ * full response includes message counts and a session file path which the
+ * adapter currently ignores. See pi docs/rpc.md `get_session_stats`.
+ */
+export interface PiSessionStats {
+  tokens?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    total?: number;
+  };
+  cost?: number;
+  contextUsage?: {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  };
+  sessionFile?: string;
+  sessionId?: string;
+}
 
 // ── Driver options ──────────────────────────────────────────────────
 
@@ -354,6 +393,11 @@ export interface PiDriver {
    * track the chosen model independently if they care.
    */
   setModel(provider: string, modelId: string): void;
+  /**
+   * Request `get_session_stats` from pi (tokens, cost, contextUsage).
+   * Resolves when pi responds; rejects on timeout or pi error.
+   */
+  getSessionStats(): Promise<PiSessionStats>;
   /**
    * Stop the pi subprocess and clean up resources.
    * Returns a promise that resolves when the subprocess exits.

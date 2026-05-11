@@ -644,6 +644,16 @@ SESSION-JSON is an alist from json-parse-string."
                               (alist-get 'lastEventTime session-json))
             :token-usage (claude-gravity--json-token-usage
                           (funcall jnil (alist-get 'tokenUsage session-json)))
+            :cost (let ((c (funcall jnil (alist-get 'cost session-json))))
+                    (and (numberp c) c))
+            :context-usage (let ((cu (funcall jnil (alist-get 'contextUsage session-json))))
+                             (when cu
+                               (list :tokens (alist-get 'tokens cu)
+                                     :context-window (alist-get 'contextWindow cu)
+                                     :percent (alist-get 'percent cu))))
+            :context-pct (let ((cu (funcall jnil (alist-get 'contextUsage session-json))))
+                           (let ((p (and cu (alist-get 'percent cu))))
+                             (and (numberp p) p)))
             :plan (claude-gravity--json-plan
                    (funcall jnil (alist-get 'plan session-json)))
             :streaming-text (funcall jnil (alist-get 'streamingText session-json))
@@ -932,6 +942,23 @@ MSG contains sessionId and patches array."
       ("set_token_usage"
        (plist-put session :token-usage
                   (claude-gravity--json-token-usage (alist-get 'usage patch))))
+
+      ("set_cost"
+       (let ((cost (alist-get 'cost patch)))
+         (plist-put session :cost (and (numberp cost) cost))))
+
+      ("set_context_usage"
+       (let* ((cu (alist-get 'contextUsage patch))
+              (parsed (when cu
+                        (list :tokens (alist-get 'tokens cu)
+                              :context-window (alist-get 'contextWindow cu)
+                              :percent (alist-get 'percent cu))))
+              (pct (and parsed (plist-get parsed :percent))))
+         (plist-put session :context-usage parsed)
+         ;; Derive :context-pct for the existing UI hookpoint (UI reads
+         ;; the integer percent directly; the structured form is kept on
+         ;; :context-usage for callers that want window/tokens too).
+         (plist-put session :context-pct (and (numberp pct) pct))))
 
       ("set_plan"
        (plist-put session :plan

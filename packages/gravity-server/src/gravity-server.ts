@@ -15,7 +15,7 @@ import { Effect, Layer } from "effect";
 import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
 import { parseTerminalMessage, isHookMessage } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
-import { sessionEnd } from "./state/session.js";
+import { sessionEnd, setCost, setContextUsage } from "./state/session.js";
 
 // Effect services
 import { ServerConfig, ServerConfigLive } from "./services/config.js";
@@ -28,7 +28,7 @@ import type { FsService } from "@gravity/shared";
 import type { ServerConfigData } from "./services/config.js";
 
 // Pi driver (optional)
-import { startPiDriver, type StartPiDriverOptions } from "./pi-driver/index.js";
+import { startPiDriver, type StartPiDriverOptions, type PiSessionStats } from "./pi-driver/index.js";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -130,6 +130,36 @@ const program = Effect.gen(function* () {
     }
   };
 
+  /**
+   * Apply a `get_session_stats` response from pi to the session. Emits
+   * `set_cost` and `set_context_usage` patches as needed. Token usage is
+   * already covered by Stop's hookData.token_usage; we don't overwrite it
+   * here to avoid double-counting.
+   */
+  const applyPiSessionStats = (sessionId: string, stats: PiSessionStats): void => {
+    const session = store.get(sessionId);
+    if (!session) return;
+    const patches: Patch[] = [];
+    if (typeof stats.cost === "number") {
+      patches.push(...setCost(session, stats.cost));
+    }
+    if (stats.contextUsage) {
+      patches.push(...setContextUsage(session, {
+        tokens: stats.contextUsage.tokens,
+        contextWindow: stats.contextUsage.contextWindow,
+        percent: stats.contextUsage.percent,
+      }));
+    }
+    if (patches.length === 0) return;
+    if (PULL_MODE) {
+      const stored = store.appendPatches(sessionId, patches);
+      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+      terminals.signalChanged("session", sessionId, seq);
+    } else {
+      terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+    }
+  };
+
   // Define helper functions before pi driver check
 
   /** Poll until a terminal with `capability` connects, or timeout. */
@@ -209,6 +239,19 @@ const program = Effect.gen(function* () {
       onTranslation: (result) => {
         // Route using the outer sessionId from startPiSession
         handlePiTranslation(sessionId, result);
+        // After Stop (pi's agent_end), poll get_session_stats to refresh
+        // cost and contextUsage. Fire-and-forget — errors are logged but
+        // don't block other event processing.
+        if (result.hookEvent === "Stop") {
+          // Defer to next tick so the Stop patch lands first.
+          setImmediate(() => {
+            if (!activePiDriver) return;
+            activePiDriver.getSessionStats().then(
+              (stats) => applyPiSessionStats(sessionId, stats),
+              (err) => logMsg(`pi get_session_stats failed: ${err.message}`, "warn"),
+            );
+          });
+        }
       },
       onLifecycle: (event, _metadata) => {
         if (event === "start") {

@@ -113,6 +113,14 @@ export interface Session {
   startTime: number;
   lastEventTime: number;
   tokenUsage: TokenUsage | null;
+  /** Cumulative cost for the session in USD. Sourced from pi's
+   * `get_session_stats.cost`. Null when not reported (e.g. Claude Code
+   * sessions don't surface a cost field). */
+  cost: number | null;
+  /** Context-window utilization. Sourced from pi's
+   * `get_session_stats.contextUsage` (tokens used / window size / percent).
+   * Null when not reported. */
+  contextUsage: { tokens: number | null; contextWindow: number; percent: number | null } | null;
   plan: Plan | null;
   streamingText: string | null;
   permissionMode: string | null;
@@ -262,6 +270,8 @@ export type Patch =
   | { op: "set_status"; status: "active" | "ended" }
   | { op: "set_claude_status"; claudeStatus: "idle" | "responding" }
   | { op: "set_token_usage"; usage: TokenUsage }
+  | { op: "set_cost"; cost: number | null }
+  | { op: "set_context_usage"; contextUsage: { tokens: number | null; contextWindow: number; percent: number | null } | null }
   | { op: "set_plan"; plan: Plan | null }
   | { op: "set_streaming_text"; text: string | null }
   | { op: "set_permission_mode"; mode: string | null }

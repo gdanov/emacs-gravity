@@ -15,6 +15,7 @@ import type {
   PiDriverOptions,
   ThinkingLevel,
   PiProtocolEvent,
+  PiSessionStats,
 } from "./types.js";
 
 /** Path to the pi binary (default: "pi"). */
@@ -149,6 +150,15 @@ export function spawnPiSync(
     setModel: (provider: string, modelId: string): void => {
       if (stopped || !child.stdin || child.stdin.destroyed) return;
       child.stdin.write(PiProtocol.formatSetModel(provider, modelId));
+    },
+
+    getSessionStats: async (): Promise<PiSessionStats> => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_session_stats" });
+      if (!response.success) {
+        throw new Error(`pi get_session_stats failed: ${response.error ?? "unknown error"}`);
+      }
+      return (response.data ?? {}) as PiSessionStats;
     },
 
     stop: async (): Promise<void> => {

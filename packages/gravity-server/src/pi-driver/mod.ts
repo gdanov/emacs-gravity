@@ -27,6 +27,7 @@ import type {
   AccState,
   TranslationResult,
   ThinkingLevel,
+  PiSessionStats,
 } from "./types.js";
 
 /** Generate a unique session ID for the pi driver. */
@@ -84,6 +85,8 @@ export interface PiDriverInstance {
   setEffortLevel(level: string): void;
   /** Switch model at runtime (pi `set_model` RPC). */
   setModel(provider: string, modelId: string): void;
+  /** Request session stats from pi (tokens, cost, contextUsage). */
+  getSessionStats(): Promise<PiSessionStats>;
   /** Stop the pi subprocess and clean up. */
   stop(): Promise<void>;
   /** Get current session metadata. */
@@ -216,6 +219,8 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
       metadata = updateModel(metadata, modelId, provider);
       state.modelName = modelId;
     },
+
+    getSessionStats: () => driver.getSessionStats(),
 
     stop: () => {
       return driver.stop();

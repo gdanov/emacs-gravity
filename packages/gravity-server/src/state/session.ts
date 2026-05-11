@@ -58,6 +58,8 @@ export function createSession(sessionId: string, cwd: string, source?: string): 
     startTime: Date.now(),
     lastEventTime: Date.now(),
     tokenUsage: null,
+    cost: null,
+    contextUsage: null,
     plan: null,
     streamingText: null,
     permissionMode: null,
@@ -117,6 +119,8 @@ export function resetSession(s: Session): Patch[] {
   s.plan = null;
   s.streamingText = null;
   s.tokenUsage = null;
+  s.cost = null;
+  s.contextUsage = null;
   s.lastEventTime = Date.now();
   // Emit patches so terminals clear stale data
   return [
@@ -125,6 +129,8 @@ export function resetSession(s: Session): Patch[] {
     { op: "set_plan", plan: null },
     { op: "set_streaming_text", text: null },
     { op: "set_token_usage", usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    { op: "set_cost", cost: null },
+    { op: "set_context_usage", contextUsage: null },
   ];
 }
 
@@ -142,6 +148,19 @@ export function setPermissionMode(s: Session, mode: string | null): Patch[] {
 export function setTokenUsage(s: Session, usage: TokenUsage): Patch[] {
   s.tokenUsage = usage;
   return [{ op: "set_token_usage", usage }];
+}
+
+export function setCost(s: Session, cost: number | null): Patch[] {
+  s.cost = cost;
+  return [{ op: "set_cost", cost }];
+}
+
+export function setContextUsage(
+  s: Session,
+  contextUsage: Session["contextUsage"],
+): Patch[] {
+  s.contextUsage = contextUsage;
+  return [{ op: "set_context_usage", contextUsage }];
 }
 
 export function setPlan(s: Session, plan: Plan | null): Patch[] {
