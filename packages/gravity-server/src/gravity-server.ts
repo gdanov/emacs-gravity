@@ -15,7 +15,7 @@ import { Effect, Layer } from "effect";
 import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
 import { parseTerminalMessage, isHookMessage } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
-import { sessionEnd, setCost, setContextUsage } from "./state/session.js";
+import { sessionEnd, setCost, setContextUsage, updateMeta } from "./state/session.js";
 
 // Effect services
 import { ServerConfig, ServerConfigLive } from "./services/config.js";
@@ -199,7 +199,7 @@ const program = Effect.gen(function* () {
   let activePiDriver: ReturnType<typeof startPiDriver> | null = null;
 
   /** Start a new pi session (called via terminal message). */
-  const startPiSession = (options: { cwd?: string; thinkingLevel?: string }): string | null => {
+  const startPiSession = (options: { cwd?: string; thinkingLevel?: string; resumeSession?: string }): string | null => {
     if (activePiDriver) {
       logMsg(`Pi session already running — use pi.abort first`, "warn");
       return null;
@@ -236,6 +236,7 @@ const program = Effect.gen(function* () {
       cwd: options.cwd ?? process.cwd(),
       thinkingLevel: (options.thinkingLevel as any) ?? "medium",
       sessionId,
+      resumeSession: options.resumeSession,
       onTranslation: (result) => {
         // Route using the outer sessionId from startPiSession
         handlePiTranslation(sessionId, result);
@@ -279,6 +280,39 @@ const program = Effect.gen(function* () {
     });
 
     activePiDriver = driver;
+
+    // Capture pi's on-disk session file once pi is ready. Retry a few
+    // times because get_state may race with pi's session-init (it returns
+    // sessionFile=null until the session is loaded). Fire-and-forget.
+    const captureSessionFile = (attempt = 0): void => {
+      if (!activePiDriver || activePiDriver !== driver) return;
+      driver.getState().then((state) => {
+        const f = (state as { sessionFile?: unknown }).sessionFile;
+        if (typeof f === "string" && f.length > 0) {
+          const session = store.get(sessionId);
+          if (session) {
+            const patches = updateMeta(session, { piSessionFile: f });
+            if (PULL_MODE) {
+              const stored = store.appendPatches(sessionId, patches);
+              const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+              terminals.signalChanged("session", sessionId, seq);
+            } else {
+              terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+            }
+          }
+        } else if (attempt < 3) {
+          setTimeout(() => captureSessionFile(attempt + 1), 500 * (attempt + 1));
+        }
+      }, (err) => {
+        if (attempt < 3) {
+          setTimeout(() => captureSessionFile(attempt + 1), 500 * (attempt + 1));
+        } else {
+          logMsg(`pi get_state failed after retries: ${err.message}`, "warn");
+        }
+      });
+    };
+    setImmediate(() => captureSessionFile());
+
     return sessionId;
   };
 
@@ -327,6 +361,33 @@ const program = Effect.gen(function* () {
       return;
     }
     activePiDriver.setModel(provider, modelId);
+  };
+
+  /**
+   * Resume a pi session by loading SESSION-PATH into the running pi process
+   * via the `switch_session` RPC. If no pi process is running, spawns one
+   * first (with `--session <path>`).
+   */
+  const piSessionResume = (sessionPath: string): void => {
+    if (!sessionPath) {
+      logMsg(`pi.resume called without sessionPath`, "warn");
+      return;
+    }
+    if (activePiDriver) {
+      activePiDriver.switchSession(sessionPath).then(
+        (ok) => {
+          if (!ok) logMsg(`pi switch_session cancelled by extension`, "warn");
+        },
+        (err) => logMsg(`pi switch_session failed: ${err.message}`, "error"),
+      );
+    } else {
+      // No active pi — spawn a new one resuming the given path. Reuses the
+      // existing pi.start flow but with `resumeSession` set.
+      const sessionId = startPiSession({ resumeSession: sessionPath } as { cwd?: string; thinkingLevel?: string; resumeSession?: string });
+      if (sessionId) {
+        logMsg(`Pi session ${sessionId} spawned resuming ${sessionPath}`);
+      }
+    }
   };
 
   /** Stop the active pi session. */
@@ -733,6 +794,12 @@ const program = Effect.gen(function* () {
       case "pi.set-model": {
         const m = msg as { provider: string; modelId: string };
         piSessionSetModel(m.provider, m.modelId);
+        break;
+      }
+
+      case "pi.resume": {
+        const m = msg as { sessionPath: string };
+        piSessionResume(m.sessionPath);
         break;
       }
     }

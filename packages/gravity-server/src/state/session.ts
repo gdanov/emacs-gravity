@@ -60,6 +60,7 @@ export function createSession(sessionId: string, cwd: string, source?: string): 
     tokenUsage: null,
     cost: null,
     contextUsage: null,
+    piSessionFile: null,
     plan: null,
     streamingText: null,
     permissionMode: null,
@@ -170,7 +171,7 @@ export function setPlan(s: Session, plan: Plan | null): Patch[] {
 
 export function updateMeta(
   s: Session,
-  opts: { pid?: number; slug?: string; displayName?: string; branch?: string; modelName?: string; tmuxSession?: string },
+  opts: { pid?: number; slug?: string; displayName?: string; branch?: string; modelName?: string; tmuxSession?: string; piSessionFile?: string },
 ): Patch[] {
   s.lastEventTime = Date.now();
   if (opts.pid && opts.pid > 0) s.pid = opts.pid;
@@ -179,6 +180,7 @@ export function updateMeta(
   if (opts.branch) s.branch = opts.branch;
   if (opts.modelName) s.modelName = opts.modelName;
   if (opts.tmuxSession && !s.tmuxSession) s.tmuxSession = opts.tmuxSession;
+  if (opts.piSessionFile) s.piSessionFile = opts.piSessionFile;
   return [{ op: "set_meta", ...opts }];
 }
 

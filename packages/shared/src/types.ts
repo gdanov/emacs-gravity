@@ -117,6 +117,10 @@ export interface Session {
    * `get_session_stats.cost`. Null when not reported (e.g. Claude Code
    * sessions don't surface a cost field). */
   cost: number | null;
+  /** Pi only: on-disk path of pi's session file (under
+   * `--session-dir`). Used to resume the session via `switch_session`
+   * or `--session <path>`. Null for non-pi sessions. */
+  piSessionFile: string | null;
   /** Context-window utilization. Sourced from pi's
    * `get_session_stats.contextUsage` (tokens used / window size / percent).
    * Null when not reported. */
@@ -275,7 +279,7 @@ export type Patch =
   | { op: "set_plan"; plan: Plan | null }
   | { op: "set_streaming_text"; text: string | null }
   | { op: "set_permission_mode"; mode: string | null }
-  | { op: "set_meta"; slug?: string; displayName?: string; branch?: string; pid?: number; modelName?: string; tmuxSession?: string }
+  | { op: "set_meta"; slug?: string; displayName?: string; branch?: string; pid?: number; modelName?: string; tmuxSession?: string; piSessionFile?: string }
   | { op: "add_turn"; turn: TurnNode }
   | { op: "freeze_turn"; turnNumber: number }
   | { op: "set_turn_stop"; turnNumber: number; stopText?: string; stopThinking?: string }
@@ -338,6 +342,7 @@ export type TerminalMessage =
   | { type: "pi.abort"; sessionId: string }
   | { type: "pi.set-thinking"; sessionId: string; level: string }
   | { type: "pi.set-model"; sessionId: string; provider: string; modelId: string }
+  | { type: "pi.resume"; sessionId?: string; sessionPath: string }
 
 export interface ProjectSummary {
   project: string;

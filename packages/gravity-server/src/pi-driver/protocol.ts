@@ -218,6 +218,8 @@ export class PiProtocol {
         return JSON.stringify(withId({ type: "get_session_stats" })) + "\n";
       case "get_state":
         return JSON.stringify(withId({ type: "get_state" })) + "\n";
+      case "switch_session":
+        return JSON.stringify(withId({ type: "switch_session", sessionPath: cmd.sessionPath })) + "\n";
     }
   }
 

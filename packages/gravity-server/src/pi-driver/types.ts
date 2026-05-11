@@ -304,7 +304,8 @@ export type PiCommand =
   | { type: "set_thinking_level"; level: ThinkingLevel }
   | { type: "set_model"; provider: string; modelId: string }
   | { type: "get_session_stats" }
-  | { type: "get_state" };
+  | { type: "get_state" }
+  | { type: "switch_session"; sessionPath: string };
 
 /** Event emitted by protocol.ts for parsed pi events. */
 export type PiProtocolEvent = {
@@ -363,6 +364,18 @@ export interface PiDriverOptions {
   provider?: string;
   /** Path to pi binary. Defaults to "pi" (PATH lookup). */
   piBinaryPath?: string;
+  /**
+   * Directory where pi stores session files (`--session-dir`). Defaults to
+   * `~/.local/state/gravity-pi-sessions`. The directory is created if it
+   * doesn't exist. Pi writes one `.jsonl` file per session here.
+   */
+  sessionDir?: string;
+  /**
+   * If set, pi spawns with `--session <id-or-path>`, resuming that session.
+   * Accepts a path to a `.jsonl` file or a partial UUID — pi resolves
+   * either form against `--session-dir`.
+   */
+  resumeSession?: string;
 }
 
 // ── Driver API ──────────────────────────────────────────────────────
@@ -398,6 +411,19 @@ export interface PiDriver {
    * Resolves when pi responds; rejects on timeout or pi error.
    */
   getSessionStats(): Promise<PiSessionStats>;
+  /**
+   * Request `get_state` from pi. Returns the response data verbatim
+   * (see pi RPC docs `get_state`): contains `sessionFile`, `sessionId`,
+   * `model`, `thinkingLevel`, `messageCount`, …
+   */
+  getState(): Promise<Record<string, unknown>>;
+  /**
+   * Switch the running pi process to a different session file
+   * (`switch_session` RPC). Pi reloads the .jsonl at `sessionPath`.
+   * Returns whether the switch was accepted (it can be cancelled by a
+   * `session_before_switch` extension event handler).
+   */
+  switchSession(sessionPath: string): Promise<boolean>;
   /**
    * Stop the pi subprocess and clean up resources.
    * Returns a promise that resolves when the subprocess exits.

@@ -514,6 +514,26 @@ checks the buffer-local session id first, then the magit section."
       (let ((session (gethash sid claude-gravity--sessions)))
         (and session (equal (plist-get session :source) "pi"))))))
 
+(defun claude-gravity--pi-resume (session-id)
+  "Resume a pi session by SESSION-ID.
+Looks up the gravity Session for SESSION-ID, reads `:pi-session-file'
+(set by gravity-server after spawn), and asks the server to load that
+file via pi's `switch_session' RPC (`pi.resume' terminal message).
+If no pi process is running, gravity-server will spawn one and pass
+the path via `--session <path>'."
+  (let* ((session (gethash session-id claude-gravity--sessions))
+         (path (and session (plist-get session :pi-session-file))))
+    (cond
+     ((null session)
+      (user-error "Unknown gravity session: %s" session-id))
+     ((null path)
+      (user-error "No pi-session-file recorded for %s (resume not possible)" session-id))
+     (t
+      (claude-gravity--log 'info "Pi: resume sessionPath=%s" path)
+      (claude-gravity--send-to-server
+       `((type . "pi.resume")
+         (sessionPath . ,path)))))))
+
 
 ;;; ── Message receiving ───────────────────────────────────────────────
 
@@ -660,6 +680,7 @@ SESSION-JSON is an alist from json-parse-string."
             :permission-mode (funcall jnil (alist-get 'permissionMode session-json))
             :model-name (funcall jnil (alist-get 'modelName session-json))
             :tmux-session (funcall jnil (alist-get 'tmuxSession session-json))
+            :pi-session-file (funcall jnil (alist-get 'piSessionFile session-json))
             :turns turns-tl
             :turn-index turn-index
             :current-turn (or (alist-get 'currentTurn session-json) 0)
@@ -976,7 +997,8 @@ MSG contains sessionId and patches array."
              (branch (alist-get 'branch patch))
              (pid (alist-get 'pid patch))
              (model-name (alist-get 'modelName patch))
-             (tmux-session (alist-get 'tmuxSession patch)))
+             (tmux-session (alist-get 'tmuxSession patch))
+             (pi-session-file (alist-get 'piSessionFile patch)))
          (when slug (plist-put session :slug slug))
          (when display-name (plist-put session :display-name display-name))
          (when branch (plist-put session :branch branch))
@@ -988,6 +1010,8 @@ MSG contains sessionId and patches array."
            (let ((sid (plist-get session :session-id)))
              (when (and sid (not (gethash sid claude-gravity--tmux-sessions)))
                (puthash sid tmux-session claude-gravity--tmux-sessions))))
+         (when pi-session-file
+           (plist-put session :pi-session-file pi-session-file))
          (plist-put session :last-event-time (current-time))))
 
       ("add_turn"

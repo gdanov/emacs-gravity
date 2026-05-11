@@ -4,7 +4,9 @@
 // manages process cleanup on shutdown.
 
 import { spawn, type ChildProcess } from "child_process";
-import { appendFileSync } from "fs";
+import { appendFileSync, mkdirSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 import { PiProtocol } from "./protocol.js";
 
 // Optional raw-event capture for debugging. Set GRAVITY_PI_RAW_LOG to a path
@@ -25,10 +27,19 @@ const PI_BINARY = process.env.PI_BINARY_PATH ?? "pi";
 const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
 
 /**
+ * Default directory for pi session files. Pi writes one `.jsonl` per session
+ * here when started with `--session-dir`. Resume reads from the same place.
+ */
+const DEFAULT_PI_SESSION_DIR = join(homedir(), ".local", "state", "gravity-pi-sessions");
+
+/**
  * Spawn a pi subprocess and return its control interface.
  *
- * The subprocess runs in RPC mode with --no-session (adapter owns session).
- * Protocol parsing and RPC commands are handled by the PiProtocol instance.
+ * The subprocess runs in RPC mode. Sessions are persisted under
+ * `--session-dir` (defaults to ~/.local/state/gravity-pi-sessions) so they
+ * can be resumed later via `--session <id-or-path>` or pi's `switch_session`
+ * RPC. Protocol parsing and RPC commands are handled by the PiProtocol
+ * instance.
  */
 export function spawnPiSync(
   options: PiDriverOptions = {},
@@ -38,13 +49,24 @@ export function spawnPiSync(
 } {
   const cwd = options.cwd ?? process.cwd();
   const thinkingLevel = options.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
+  const sessionDir = options.sessionDir ?? DEFAULT_PI_SESSION_DIR;
+
+  // Make sure the session dir exists; pi expects to be able to write into it.
+  try {
+    mkdirSync(sessionDir, { recursive: true });
+  } catch (err) {
+    process.stderr.write(`[pi-adapter] could not create session dir ${sessionDir}: ${(err as Error).message}\n`);
+  }
 
   // cwd is set via the spawn() options below; pi inherits it. Pi has no --cwd flag.
   const args = [
     "--mode", "rpc",
-    "--no-session",
+    "--session-dir", sessionDir,
     "--thinking", thinkingLevel,
   ];
+  if (options.resumeSession) {
+    args.push("--session", options.resumeSession);
+  }
 
   // Build environment with optional overrides
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
@@ -159,6 +181,27 @@ export function spawnPiSync(
         throw new Error(`pi get_session_stats failed: ${response.error ?? "unknown error"}`);
       }
       return (response.data ?? {}) as PiSessionStats;
+    },
+
+    getState: async (): Promise<Record<string, unknown>> => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_state" });
+      if (!response.success) {
+        throw new Error(`pi get_state failed: ${response.error ?? "unknown error"}`);
+      }
+      return (response.data ?? {}) as Record<string, unknown>;
+    },
+
+    switchSession: async (sessionPath: string): Promise<boolean> => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "switch_session", sessionPath });
+      if (!response.success) {
+        throw new Error(`pi switch_session failed: ${response.error ?? "unknown error"}`);
+      }
+      // Pi may cancel the switch via session_before_switch extension; the
+      // response carries `data: { cancelled: bool }`.
+      const data = (response.data ?? {}) as { cancelled?: boolean };
+      return data.cancelled !== true;
     },
 
     stop: async (): Promise<void> => {

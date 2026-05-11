@@ -87,6 +87,10 @@ export interface PiDriverInstance {
   setModel(provider: string, modelId: string): void;
   /** Request session stats from pi (tokens, cost, contextUsage). */
   getSessionStats(): Promise<PiSessionStats>;
+  /** Request `get_state` from pi (sessionFile, sessionId, model, etc.). */
+  getState(): Promise<Record<string, unknown>>;
+  /** Load a different session file into the running pi process. */
+  switchSession(sessionPath: string): Promise<boolean>;
   /** Stop the pi subprocess and clean up. */
   stop(): Promise<void>;
   /** Get current session metadata. */
@@ -140,6 +144,8 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
     model: options.model,
     provider: options.provider,
     piBinaryPath: options.piBinaryPath,
+    sessionDir: options.sessionDir,
+    resumeSession: options.resumeSession,
   });
 
   // Set up event handler
@@ -221,6 +227,10 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
     },
 
     getSessionStats: () => driver.getSessionStats(),
+
+    getState: () => driver.getState(),
+
+    switchSession: (sessionPath: string) => driver.switchSession(sessionPath),
 
     stop: () => {
       return driver.stop();

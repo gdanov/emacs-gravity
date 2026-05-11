@@ -579,6 +579,7 @@ Returns non-nil if a daemon session was re-keyed."
 (declare-function claude-gravity-tmux-set-permission-mode "claude-gravity-tmux")
 (declare-function claude-gravity--current-session-pi-p "claude-gravity-client")
 (declare-function claude-gravity--pi-set-model "claude-gravity-client")
+(declare-function claude-gravity--pi-resume "claude-gravity-client")
 
 (defun claude-gravity--current-session-managed-p ()
   "Return non-nil if the session at point is managed (daemon, tmux, or pi)."
@@ -617,12 +618,23 @@ Returns non-nil if a daemon session was re-keyed."
    (t (user-error "No managed session at point"))))
 
 (defun claude-gravity-unified-resume (session-id &optional cwd model)
-  "Resume an ended session (daemon or tmux).
-SESSION-ID is the session to resume."
+  "Resume an ended session (daemon, tmux, or pi).
+SESSION-ID is the session to resume.
+
+Backend dispatch:
+- pi sessions (`:source' = \"pi\"): asks gravity-server to load the
+  session's `:pi-session-file' via `switch_session' RPC.
+- daemon (if `--daemon-alive-p'): `claude-gravity-daemon-resume-session'.
+- otherwise: tmux `claude-gravity-resume-session'.
+
+The candidate list is filtered to ended sessions for CC backends but
+includes any pi session — pi's resume is also useful to swap between
+two live pi session files in the running process."
   (interactive
    (let* ((candidates nil))
      (maphash (lambda (id session)
-                (when (eq (plist-get session :status) 'ended)
+                (when (or (eq (plist-get session :status) 'ended)
+                          (equal (plist-get session :source) "pi"))
                   (push (cons (format "%s [%s]"
                                       (or (plist-get session :slug) id)
                                       (plist-get session :project))
@@ -634,10 +646,14 @@ SESSION-ID is the session to resume."
                 (sid (cdr (assoc choice candidates))))
            (list sid))
        (list (read-string "Session ID to resume: ")))))
-  ;; Decide backend: if daemon is running, use it; otherwise tmux
-  (if (claude-gravity--daemon-alive-p)
-      (claude-gravity-daemon-resume-session session-id cwd model)
-    (claude-gravity-resume-session session-id cwd model)))
+  (let ((session (gethash session-id claude-gravity--sessions)))
+    (cond
+     ((and session (equal (plist-get session :source) "pi"))
+      (claude-gravity--pi-resume session-id))
+     ((claude-gravity--daemon-alive-p)
+      (claude-gravity-daemon-resume-session session-id cwd model))
+     (t
+      (claude-gravity-resume-session session-id cwd model)))))
 
 
 (defun claude-gravity-set-model (model)
