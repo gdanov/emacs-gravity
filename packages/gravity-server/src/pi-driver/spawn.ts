@@ -146,6 +146,11 @@ export function spawnPiSync(
       child.stdin.write(PiProtocol.formatThinkingLevel(level));
     },
 
+    setModel: (provider: string, modelId: string): void => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      child.stdin.write(PiProtocol.formatSetModel(provider, modelId));
+    },
+
     stop: async (): Promise<void> => {
       if (stopped) return;
       stopped = true;

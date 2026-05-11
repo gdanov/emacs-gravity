@@ -277,6 +277,15 @@ const program = Effect.gen(function* () {
     activePiDriver.setEffortLevel(level);
   };
 
+  /** Switch model for active pi session (pi `set_model` RPC). */
+  const piSessionSetModel = (provider: string, modelId: string): void => {
+    if (!activePiDriver) {
+      logMsg(`No active pi session`, "warn");
+      return;
+    }
+    activePiDriver.setModel(provider, modelId);
+  };
+
   /** Stop the active pi session. */
   const stopPiSession = async (): Promise<void> => {
     if (!activePiDriver) {
@@ -675,6 +684,12 @@ const program = Effect.gen(function* () {
       case "pi.set-thinking": {
         const m = msg as { level: string };
         piSessionSetThinking(m.level);
+        break;
+      }
+
+      case "pi.set-model": {
+        const m = msg as { provider: string; modelId: string };
+        piSessionSetModel(m.provider, m.modelId);
         break;
       }
     }

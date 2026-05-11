@@ -301,7 +301,8 @@ export type PiCommand =
   | { type: "prompt"; message: string; images?: string[] }
   | { type: "steer"; message: string }
   | { type: "abort" }
-  | { type: "set_thinking_level"; level: ThinkingLevel };
+  | { type: "set_thinking_level"; level: ThinkingLevel }
+  | { type: "set_model"; provider: string; modelId: string };
 
 /** Event emitted by protocol.ts for parsed pi events. */
 export type PiProtocolEvent = {
@@ -346,6 +347,13 @@ export interface PiDriver {
    * Set the thinking/effort level at runtime.
    */
   setThinkingLevel(level: ThinkingLevel): void;
+  /**
+   * Switch to a specific model at runtime. Pi accepts provider+modelId pairs
+   * (see pi RPC docs: set_model command). Pi 0.74 replies with the full Model
+   * object; the driver doesn't currently surface that response — callers
+   * track the chosen model independently if they care.
+   */
+  setModel(provider: string, modelId: string): void;
   /**
    * Stop the pi subprocess and clean up resources.
    * Returns a promise that resolves when the subprocess exits.

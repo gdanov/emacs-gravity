@@ -82,6 +82,8 @@ export interface PiDriverInstance {
   setThinkingLevel(level: ThinkingLevel): void;
   /** Set thinking level via string (will be normalized). */
   setEffortLevel(level: string): void;
+  /** Switch model at runtime (pi `set_model` RPC). */
+  setModel(provider: string, modelId: string): void;
   /** Stop the pi subprocess and clean up. */
   stop(): Promise<void>;
   /** Get current session metadata. */
@@ -204,6 +206,15 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
       driver.setThinkingLevel(normalized);
       metadata = updateThinkingLevel(metadata, normalized);
       state.effortLevel = thinkingToEffort(normalized);
+    },
+
+    setModel: (provider: string, modelId: string) => {
+      driver.setModel(provider, modelId);
+      // Optimistically reflect in metadata/state. Pi's `set_model` response
+      // carries the canonical Model object; if/when we wire response parsing
+      // we can reconcile from that.
+      metadata = updateModel(metadata, modelId, provider);
+      state.modelName = modelId;
     },
 
     stop: () => {

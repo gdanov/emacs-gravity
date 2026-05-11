@@ -327,6 +327,7 @@ export type TerminalMessage =
   | { type: "pi.steer"; sessionId: string; text: string }
   | { type: "pi.abort"; sessionId: string }
   | { type: "pi.set-thinking"; sessionId: string; level: string }
+  | { type: "pi.set-model"; sessionId: string; provider: string; modelId: string }
 
 export interface ProjectSummary {
   project: string;

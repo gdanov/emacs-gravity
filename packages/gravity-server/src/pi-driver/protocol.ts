@@ -137,6 +137,8 @@ export class PiProtocol {
         return PiProtocol.formatAbort();
       case "set_thinking_level":
         return PiProtocol.formatThinkingLevel(cmd.level);
+      case "set_model":
+        return PiProtocol.formatSetModel(cmd.provider, cmd.modelId);
     }
   }
 
@@ -171,5 +173,14 @@ export class PiProtocol {
    */
   static formatThinkingLevel(level: ThinkingLevel): string {
     return JSON.stringify({ type: "set_thinking_level", level } as PiCommand) + "\n";
+  }
+
+  /**
+   * Format a set_model command for pi's stdin.
+   * Pi expects { type: "set_model", provider, modelId } (verified against
+   * pi 0.74 RPC docs).
+   */
+  static formatSetModel(provider: string, modelId: string): string {
+    return JSON.stringify({ type: "set_model", provider, modelId } as PiCommand) + "\n";
   }
 }

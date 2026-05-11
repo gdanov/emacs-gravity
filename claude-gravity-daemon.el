@@ -577,11 +577,14 @@ Returns non-nil if a daemon session was re-keyed."
 (declare-function claude-gravity--current-session-tmux-p "claude-gravity-tmux")
 (declare-function claude-gravity-tmux-set-model "claude-gravity-tmux")
 (declare-function claude-gravity-tmux-set-permission-mode "claude-gravity-tmux")
+(declare-function claude-gravity--current-session-pi-p "claude-gravity-client")
+(declare-function claude-gravity--pi-set-model "claude-gravity-client")
 
 (defun claude-gravity--current-session-managed-p ()
-  "Return non-nil if the session at point is managed (daemon or tmux)."
+  "Return non-nil if the session at point is managed (daemon, tmux, or pi)."
   (or (claude-gravity--current-session-daemon-p)
-      (claude-gravity--current-session-tmux-p)))
+      (claude-gravity--current-session-tmux-p)
+      (claude-gravity--current-session-pi-p)))
 
 (defun claude-gravity-unified-compose (&optional session-id)
   "Open compose buffer for the current session (daemon or tmux)."
@@ -639,7 +642,11 @@ SESSION-ID is the session to resume."
 
 (defun claude-gravity-set-model (model)
   "Set MODEL for the current managed session.
-Dispatches to the appropriate backend (daemon or tmux)."
+Dispatches to the appropriate backend (daemon, tmux, or pi).
+
+For pi sessions, MODEL is unused — pi's RPC `set_model' requires both
+provider and model id, so the pi branch invokes its own interactive
+helper (`claude-gravity--pi-set-model') which prompts for both fields."
   (interactive
    (let* ((choices '("1. opus" "2. sonnet" "3. haiku"))
           (choice (completing-read "Model: " choices nil t))
@@ -648,6 +655,7 @@ Dispatches to the appropriate backend (daemon or tmux)."
   (cond
    ((claude-gravity--current-session-daemon-p) (claude-gravity-daemon-set-model model))
    ((claude-gravity--current-session-tmux-p)   (claude-gravity-tmux-set-model model))
+   ((claude-gravity--current-session-pi-p)     (call-interactively #'claude-gravity--pi-set-model))
    (t (user-error "No managed session at point"))))
 
 (defun claude-gravity-set-permission-mode (mode)

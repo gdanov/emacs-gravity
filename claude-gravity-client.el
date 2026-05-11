@@ -486,6 +486,34 @@ LEVEL is one of: off, minimal, low, medium, high, xhigh."
       (message "Pi session active: %s" claude-gravity--pi-session-id)
     (message "No active pi session.")))
 
+(defun claude-gravity--pi-set-model (provider model-id)
+  "Switch the active pi session to PROVIDER + MODEL-ID.
+Pi's `set_model' RPC takes provider and model id as separate fields
+(see pi RPC docs).  Interactive callers are prompted for both."
+  (interactive
+   (list (read-string "Provider (anthropic/openai/google/...): " "anthropic")
+         (read-string "Model id: ")))
+  (if (null claude-gravity--pi-session-id)
+      (message "No active pi session.")
+    (claude-gravity--log 'info "Pi: set-model provider=%s modelId=%s" provider model-id)
+    (claude-gravity--send-to-server
+     `((type . "pi.set-model")
+       (sessionId . ,claude-gravity--pi-session-id)
+       (provider . ,provider)
+       (modelId . ,model-id)))))
+
+(defun claude-gravity--current-session-pi-p ()
+  "Return non-nil if the session at point is a pi session.
+Mirrors `claude-gravity--current-session-daemon-p' and -tmux-p:
+checks the buffer-local session id first, then the magit section."
+  (let ((sid (or claude-gravity--buffer-session-id
+                 (let ((section (magit-current-section)))
+                   (when (and section (eq (oref section type) 'session-entry))
+                     (oref section value))))))
+    (when sid
+      (let ((session (gethash sid claude-gravity--sessions)))
+        (and session (equal (plist-get session :source) "pi"))))))
+
 
 ;;; ── Message receiving ───────────────────────────────────────────────
 
