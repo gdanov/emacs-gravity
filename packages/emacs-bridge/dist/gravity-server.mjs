@@ -8572,6 +8572,7 @@ var program = Effect_exports.gen(function* () {
           isDead = true;
           logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
         }
+      } else if (session.source === "pi") {
       } else if (now - session.lastEventTime > STALENESS_THRESHOLD_MS) {
         isDead = true;
         logMsg(`Health check: session ${sessionId} stale (no events for ${Math.round((now - session.lastEventTime) / 1e3)}s)`);
