@@ -63,11 +63,36 @@
                    (or (match-string 1 m) (match-string 2 m)
                        (match-string 3 m) (match-string 4 m) ""))
                  cell)))
-             (truncate-cell
+             (wrap-cell
               (lambda (cell w)
                 (let ((dw (funcall display-width cell)))
-                  (if (<= dw w) cell
-                    (concat (substring (funcall strip-markup cell) 0 (max 1 (- w 1))) "…")))))
+                  (if (<= dw w)
+                      (list cell)
+                    (let* ((stripped (funcall strip-markup cell))
+                           (words (split-string stripped " +" t))
+                           (lines nil)
+                           (current ""))
+                      (dolist (word words)
+                        (let ((sep-len (if (string-empty-p current) 0 1)))
+                          (cond
+                           ((<= (+ (length current) sep-len (length word)) w)
+                            (setq current (if (string-empty-p current) word
+                                            (concat current " " word))))
+                           ((> (length word) w)
+                            (unless (string-empty-p current)
+                              (push current lines)
+                              (setq current ""))
+                            (let ((s word))
+                              (while (> (length s) w)
+                                (push (substring s 0 w) lines)
+                                (setq s (substring s w)))
+                              (setq current s)))
+                           (t
+                            (push current lines)
+                            (setq current word)))))
+                      (unless (string-empty-p current)
+                        (push current lines))
+                      (or (nreverse lines) (list "")))))))
              (make-sep
               (lambda (left mid right)
                 (concat left
@@ -75,16 +100,26 @@
                         right)))
              (fmt-row
               (lambda (row)
-                (concat "│"
-                        (mapconcat
-                         (lambda (pair)
-                           (let* ((cell (funcall truncate-cell (car pair) (cdr pair)))
-                                  (w (cdr pair)))
-                             (concat " " cell
-                                     (make-string (max 0 (- w (funcall display-width cell))) ?\s)
-                                     " ")))
-                         (cl-mapcar #'cons row widths) "│")
-                        "│"))))
+                (let* ((wrapped (cl-mapcar (lambda (cell w) (funcall wrap-cell cell w))
+                                           row widths))
+                       (row-height (apply #'max 1 (mapcar #'length wrapped))))
+                  (mapconcat
+                   (lambda (line-idx)
+                     (concat "│"
+                             (mapconcat
+                              (lambda (pair)
+                                (let* ((lines (car pair))
+                                       (w (cdr pair))
+                                       (line (or (nth line-idx lines) "")))
+                                  (concat " " line
+                                          (make-string
+                                           (max 0 (- w (funcall display-width line)))
+                                           ?\s)
+                                          " ")))
+                              (cl-mapcar #'cons wrapped widths) "│")
+                             "│"))
+                   (number-sequence 0 (1- row-height))
+                   "\n")))))
         (concat (funcall make-sep "┌" "┬" "┐") "\n"
                 (funcall fmt-row (car data-rows)) "\n"
                 (funcall make-sep "├" "┼" "┤") "\n"
