@@ -1,3 +1,6 @@
+*.elc
+.emacs.d/**
+
 node_modules/
 packages/*/dist/*
 # Committed release artifacts (built by CI on release, also by `make build-*` locally)
