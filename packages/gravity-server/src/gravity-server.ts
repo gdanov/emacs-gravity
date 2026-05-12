@@ -15,6 +15,7 @@ import { Effect, Layer } from "effect";
 import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
 import { parseTerminalMessage, isHookMessage } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
+import { MermaidRpcServer } from "./handlers/mermaid-rpc-server.js";
 import { sessionEnd, setCost, setContextUsage, updateMeta } from "./state/session.js";
 
 // Effect services
@@ -1115,7 +1116,15 @@ const program = Effect.gen(function* () {
     logMsg(`Hook socket listening on ${config.hookSocketPath}`);
   });
 
+  // ── Start mermaid RPC server (TCP JSON-RPC on port 9876) ────────
+
+  const mermaidServer = new MermaidRpcServer({ port: 9876, host: "127.0.0.1" });
+  mermaidServer.start().catch((e: unknown) => {
+    logMsg(`Mermaid RPC server failed to start: ${e}`, "warn");
+  });
+
   // ── Start terminal server ────────────────────────────────────────
+
 
   yield* fs.unlinkIfExists(config.terminalSocketPath);
   yield* fs.mkdirp(dirname(config.terminalSocketPath));
