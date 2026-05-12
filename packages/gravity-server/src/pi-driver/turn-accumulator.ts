@@ -131,7 +131,8 @@ export function accToolStart(
 ): AccState {
   state.currentToolUseId = toolCallId;
   state.currentToolName = toolName;
-  state.currentToolInput = toolInput;
+  // Normalize pi's Edit tool input so accToolEnd sees consistent field names
+  state.currentToolInput = normalizeToolInput(toolInput);
   state.currentToolStartTime = Date.now();
   // Clear stale partial from any prior tool — partials are per-tool.
   state.currentToolPartial = undefined;
@@ -171,16 +172,17 @@ export function accToolEnd(
   }
 
   const toolUseId = state.currentToolUseId;
-  const toolInput = state.currentToolInput ?? {};
+  const rawToolInput = state.currentToolInput ?? {};
+
+  // Normalize pi's Edit tool input (oldText/newText → old_string/new_string)
+  // so the UI rendering code works identically for both pi and Claude Code.
+  const toolInput = normalizeToolInput(rawToolInput);
 
   // If pi sent tool_execution_update events but the final tool_execution_end
   // carries no result of its own, fall back to the last accumulated partial.
   // Pi's behavior is tool-dependent: some tools deliver the final payload
   // on `_end`, others only stream via `_update` and end with `result: null`.
-  const effectiveResult =
-    toolResult === undefined || toolResult === null
-      ? state.currentToolPartial
-      : toolResult;
+  const effectiveResult = normalizeToolResult(toolName, toolResult ?? state.currentToolPartial);
 
   // Use the assistant text/thinking that accToolStart snapshotted from the
   // pending accumulator. The pending accumulator may have received MORE
@@ -374,4 +376,105 @@ export function accSetEffortLevel(state: AccState, level: string): AccState {
 export function accSetBranch(state: AccState, branch: string | null): AccState {
   state.branch = branch;
   return state;
+}
+
+// ── Input / Result Normalizers ──────────────────────────────────────────
+
+/**
+ * Normalize tool input so the UI rendering code works identically for
+ * both pi (oldText/newText) and Claude Code (old_string/new_string).
+ */
+function normalizeToolInput(input: Record<string, unknown>): Record<string, unknown> {
+  if (!input || typeof input !== "object") return input;
+  const result: Record<string, unknown> = { ...input };
+  // pi uses oldText/newText; CC uses old_string/new_string
+  if ("oldText" in result) {
+    result.old_string = result.oldText;
+    delete result.oldText;
+  }
+  if ("newText" in result) {
+    result.new_string = result.newText;
+    delete result.newText;
+  }
+  // Also normalize path → file_path for Edit tools
+  if ("path" in result && !("file_path" in result)) {
+    result.file_path = result.path;
+    delete result.path;
+  }
+  return result;
+}
+
+
+/**
+ * Normalize tool result to include structuredPatch for Edit tools so
+ * the UI rendering code works identically for both pi and Claude Code.
+ *
+ * Pi's Edit tool returns: { diff: string, firstChangedLine?: number }
+ * CC's Edit tool returns: { structuredPatch: [...], oldString, newString, ... }
+ *
+ * We transform pi's format into CC's format so the UI doesn't need to
+ * know the difference.
+ */
+function normalizeToolResult(toolName: string, result: unknown): unknown {
+  if (toolName !== "Edit" || !result || typeof result !== "object") return result;
+  const r = result as Record<string, unknown>;
+  // Already in CC format
+  if ("structuredPatch" in r) return result;
+  // Transform pi format → CC format
+  if ("diff" in r) {
+    const diff = r.diff as string;
+    if (typeof diff === "string" && diff.length > 0) {
+      return {
+        ...r,
+        // Synthesize structuredPatch from unified diff
+        structuredPatch: parseUnifiedDiff(diff),
+        // Also include old_string/new_string if available
+        oldString: r.oldString ?? r.old_string ?? "",
+        newString: r.newString ?? r.new_string ?? "",
+      };
+    }
+  }
+  return result;
+}
+
+/**
+ * Parse a unified diff string into structuredPatch hunks.
+ * Returns an array of hunk objects matching CC's structuredPatch format.
+ */
+function parseUnifiedDiff(diff: string): Array<{
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];
+}> {
+  const hunks: Array<{
+    oldStart: number;
+    oldLines: number;
+    newStart: number;
+    newLines: number;
+    lines: string[];
+  }> = [];
+  const lines = diff.split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const hunkMatch = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (hunkMatch) {
+      const oldStart = parseInt(hunkMatch[1], 10);
+      const oldLines = parseInt(hunkMatch[2] ?? "1", 10);
+      const newStart = parseInt(hunkMatch[3], 10);
+      const newLines = parseInt(hunkMatch[4] ?? "1", 10);
+      const hunkLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].match(/^@@ /)) {
+        hunkLines.push(lines[i]);
+        i++;
+      }
+      hunks.push({ oldStart, oldLines, newStart, newLines, lines: hunkLines });
+    } else {
+      i++;
+    }
+  }
+  return hunks;
 }
