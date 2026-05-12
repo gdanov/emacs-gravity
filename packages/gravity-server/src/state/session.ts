@@ -41,7 +41,11 @@ function stripBloatedFields(result: unknown): unknown {
 
 /** Create a new empty session. */
 export function createSession(sessionId: string, cwd: string, source?: string): Session {
-  const project = cwd.split("/").pop() || cwd;
+  // Strip trailing slash before extracting basename. read-directory-name on the
+  // Emacs side returns paths with a trailing "/", which makes split("/").pop()
+  // return "" and then fall back to the full cwd as the project label.
+  const trimmed = cwd.replace(/\/+$/, "");
+  const project = trimmed.split("/").pop() || trimmed || cwd;
   return {
     sessionId,
     cwd,

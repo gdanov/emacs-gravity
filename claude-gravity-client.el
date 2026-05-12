@@ -427,7 +427,10 @@ prompts whether to stop it and start a new one in CWD. Picking no aborts
 the start. Returns nil — the new session id arrives asynchronously via
 the pi.session \"started\" broadcast and is stored in
 `claude-gravity--pi-session-id'."
-  (interactive (list (read-directory-name "Working directory: " default-directory)))
+  (interactive
+   (list (read-directory-name "Working directory: "
+                              (or (claude-gravity--normalize-cwd default-directory)
+                                  default-directory))))
   (claude-gravity--ensure-server)
   (cond
    ;; No singleton conflict — start directly.
@@ -453,11 +456,12 @@ the pi.session \"started\" broadcast and is stored in
 
 (defun claude-gravity--pi-start-send (cwd thinking-level)
   "Internal: send the pi.start message without any singleton checks."
-  (claude-gravity--send-to-server
-   `((type . "pi.start")
-     ,@(when cwd `((cwd . ,cwd)))
-     ,@(when thinking-level `((thinkingLevel . ,thinking-level)))))
-  (claude-gravity--log 'info "Pi: starting session (cwd=%s)" (or cwd default-directory)))
+  (let ((normalized (and cwd (claude-gravity--normalize-cwd cwd))))
+    (claude-gravity--send-to-server
+     `((type . "pi.start")
+       ,@(when normalized `((cwd . ,normalized)))
+       ,@(when thinking-level `((thinkingLevel . ,thinking-level)))))
+    (claude-gravity--log 'info "Pi: starting session (cwd=%s)" (or normalized default-directory))))
 
 (defun claude-gravity--pi-start-after-stop (cwd thinking-level)
   "Internal: send pi.stop, then pi.start once the singleton is freed.
@@ -995,6 +999,14 @@ MSG contains sessionId and full session state."
             (accept-process-output nil 0.005)))))
     ;; Store session
     (puthash session-id session claude-gravity--sessions)
+    ;; Recover pi session id from snapshot. Pi is a server-side singleton,
+    ;; so any active pi session in a snapshot is THE pi session. This makes
+    ;; Emacs restart resilient — pi-prompt etc. work without manual recovery.
+    (when (and (equal (plist-get session :source) "pi")
+               (eq (plist-get session :status) 'active)
+               (not (equal claude-gravity--pi-session-id session-id)))
+      (claude-gravity--log 'info "Pi: recovering session id from snapshot: %s" session-id)
+      (setq claude-gravity--pi-session-id session-id))
     ;; Register tmux mapping if present
     (let ((tmux-name (plist-get session :tmux-session)))
       (when (and tmux-name (not (gethash session-id claude-gravity--tmux-sessions)))
@@ -1346,7 +1358,12 @@ Also prunes orphan sessions that the server no longer knows about."
               (when (and buf (buffer-live-p buf))
                 (kill-buffer buf)))))
         (remhash sid claude-gravity--sessions)
-        (remhash sid claude-gravity--client-subscribed-sessions)))
+        (remhash sid claude-gravity--client-subscribed-sessions)
+        ;; Clear pi-session-id if its session was orphaned (server forgot about it,
+        ;; e.g. after a server restart). Otherwise pi-prompt would target a dead id.
+        (when (equal claude-gravity--pi-session-id sid)
+          (claude-gravity--log 'info "Pi: clearing stale session id %s" sid)
+          (setq claude-gravity--pi-session-id nil))))
     ;; Render overview
     (claude-gravity--schedule-refresh)))
 
@@ -1361,6 +1378,8 @@ Also prunes orphan sessions that the server no longer knows about."
       (let ((buf (plist-get session :buffer)))
         (when (and buf (buffer-live-p buf))
           (kill-buffer buf))))
+    (when (equal claude-gravity--pi-session-id session-id)
+      (setq claude-gravity--pi-session-id nil))
     (remhash session-id claude-gravity--sessions)
     (remhash session-id claude-gravity--client-subscribed-sessions)
     (claude-gravity--schedule-refresh)))

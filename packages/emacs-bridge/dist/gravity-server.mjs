@@ -5826,7 +5826,8 @@ function stripBloatedFields(result3) {
   return cleaned;
 }
 function createSession(sessionId, cwd, source) {
-  const project = cwd.split("/").pop() || cwd;
+  const trimmed = cwd.replace(/\/+$/, "");
+  const project = trimmed.split("/").pop() || trimmed || cwd;
   return {
     sessionId,
     cwd,
