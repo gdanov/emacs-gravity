@@ -32,6 +32,9 @@ import {
   setPlan,
   updateMeta,
   addPrompt,
+  attachPrompt,
+  openTurn,
+  closeTurn,
   finalizeLastPrompt,
   addTool,
   completeTool,
@@ -167,11 +170,12 @@ const handleSessionStart = (ctx: EventContext) =>
 
     const existing = store.get(ctx.sessionId);
     // Reset on re-start with the same session id (Claude Code's /clear shape
-    // and resume cases). Skip for pi: pi emits a fresh agent_start (which
-    // becomes a SessionStart) on every prompt — resetting would wipe
-    // accumulated turns/plan/tokens between prompts.
-    const isPi = ctx.data.source === "pi";
-    if (existing && !isPi) {
+    // and resume cases). Pi no longer triggers SessionStart per prompt —
+    // pi's per-prompt boundary is TurnOpen — so there is no pi case to
+    // exempt here. SessionStart for a pi session fires once, synthesized
+    // eagerly by `startPiSession`, before any pi events arrive; that path
+    // creates a fresh session and the `existing` branch is not taken.
+    if (existing) {
       patches.push(...resetSession(existing));
     }
     const s = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session, ctx.data.source);
@@ -216,16 +220,27 @@ const handleUserPromptSubmit = (ctx: EventContext) =>
         && lastTurn.prompt.submitted != null
         && (Date.now() - lastTurn.prompt.submitted) < 500;
       if (!isDuplicate) {
-        patches.push(
-          ...addPrompt(session, {
-            type: "user",
-            text: displayText,
-            submitted: Date.now(),
-            elapsed: null,
-            toolUseId: null,
-            answer: null,
-          }),
-        );
+        const entry = {
+          type: "user" as const,
+          text: displayText,
+          submitted: Date.now(),
+          elapsed: null,
+          toolUseId: null,
+          answer: null,
+        };
+        // Pi opens the turn separately via TurnOpen (agent_start). The user
+        // message arrives later as a UserPromptSubmit; attach to the
+        // already-opened, still-empty turn instead of creating a new one.
+        // Claude Code's UserPromptSubmit is atomic (open + attach), so it
+        // falls through to addPrompt.
+        const attachToOpen =
+          (ctx.data.source === "pi" || session.source === "pi") &&
+          lastTurn && !lastTurn.prompt && !lastTurn.frozen;
+        if (attachToOpen) {
+          patches.push(...attachPrompt(session, entry));
+        } else {
+          patches.push(...addPrompt(session, entry));
+        }
         if (!session.displayName) {
           const name = displayText.length <= 60
             ? displayText
@@ -235,6 +250,74 @@ const handleUserPromptSubmit = (ctx: EventContext) =>
       }
     }
     patches.push(...setClaudeStatus(session, "responding"));
+    return patches;
+  });
+
+/**
+ * Internal pi-driver event: open an empty turn (boundary signal). Emitted
+ * by the translator on pi's `agent_start`. The corresponding UserPromptSubmit
+ * (carried by pi's `message_start role=user`) will attach the prompt label
+ * to this turn. If the user message never arrives or is empty, the turn
+ * shows up unlabeled — the boundary is still in place.
+ */
+const handleTurnOpen = (ctx: EventContext) =>
+  Effect.gen(function* () {
+    const store = yield* Effect.service(SessionStore);
+    const session = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session, ctx.data.source as string | undefined);
+    const patches: Patch[] = [];
+    patches.push(...openTurn(session));
+    patches.push(...setClaudeStatus(session, "responding"));
+    return patches;
+  });
+
+/**
+ * Internal pi-driver event: close the current turn (stamp stop text,
+ * record tokens, freeze). Emitted by the translator on pi's `agent_end`.
+ * Mirrors the work that `handleStop` does for Claude Code (idle status,
+ * inbox idle item), but routes through `closeTurn` to guarantee the turn
+ * is frozen — even if the next prompt never comes.
+ */
+const handleTurnClose = (ctx: EventContext) =>
+  Effect.gen(function* () {
+    const store = yield* Effect.service(SessionStore);
+    const inbox = yield* Effect.service(Inbox);
+    const session = store.get(ctx.sessionId);
+    if (!session) return [];
+
+    const patches: Patch[] = [];
+    patches.push(...setClaudeStatus(session, "idle"));
+
+    const stopText = stripSystemTags(ctx.data.stop_text as string) ?? undefined;
+    const stopThinking = stripSystemTags(ctx.data.stop_thinking as string) ?? undefined;
+    const tokenUsage = ctx.data.token_usage;
+    const closeOpts: { stopText?: string; stopThinking?: string; tokenIn?: number; tokenOut?: number } = {
+      stopText,
+      stopThinking,
+    };
+    if (tokenUsage) {
+      const tokenIn =
+        (tokenUsage.input_tokens ?? 0) +
+        (tokenUsage.cache_read_input_tokens ?? 0) +
+        (tokenUsage.cache_creation_input_tokens ?? 0);
+      const tokenOut = tokenUsage.output_tokens ?? 0;
+      closeOpts.tokenIn = tokenIn;
+      closeOpts.tokenOut = tokenOut;
+      patches.push(...setTokenUsage(session, tokenUsage));
+    }
+    patches.push(...closeTurn(session, closeOpts));
+
+    const turn = session.currentTurn;
+    const snippet = stopText
+      ? stopText.replace(/[\n\r\t]+/g, " ").substring(0, 80)
+      : "idle";
+    inbox.add(
+      "idle",
+      ctx.sessionId,
+      session.project,
+      session.slug || ctx.sessionId.substring(0, 8),
+      snippet,
+      { turn, snippet },
+    );
     return patches;
   });
 
@@ -530,6 +613,8 @@ const dispatch: Record<string, Handler> = {
   Notification: () => Effect.succeed([]),
   PermissionRequest: handlePermissionRequest,
   AskUserQuestionIntercept: handleAskUserQuestionIntercept,
+  TurnOpen: handleTurnOpen,
+  TurnClose: handleTurnClose,
 };
 
 // ── Post-stop race detection ─────────────────────────────────────────

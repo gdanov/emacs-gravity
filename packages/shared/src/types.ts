@@ -76,7 +76,15 @@ export interface HookData {
   [key: string]: unknown;
 }
 
-/** All hook event types supported by the bridge. */
+/** All hook event types supported by the bridge.
+ *
+ * The first group mirrors Claude Code's hook vocabulary (delivered via the
+ * emacs-bridge shim). The trailing `TurnOpen` / `TurnClose` are internal
+ * boundary events emitted by the pi-driver translator — they don't
+ * correspond to any Claude Code hook. They exist so pi can drive turn
+ * boundaries independently of the user-prompt-arrival event, which is the
+ * only signal CC ever needs.
+ */
 export type HookEventName =
   | "SessionStart"
   | "SessionEnd"
@@ -89,7 +97,9 @@ export type HookEventName =
   | "Stop"
   | "Notification"
   | "PermissionRequest"
-  | "AskUserQuestionIntercept";
+  | "AskUserQuestionIntercept"
+  | "TurnOpen"
+  | "TurnClose";
 
 // ── View Model (session state tree) ──────────────────────────────────
 //

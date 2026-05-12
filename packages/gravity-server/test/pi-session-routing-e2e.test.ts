@@ -241,43 +241,29 @@ describe("pi-session-e2e: session ID routing", () => {
       expect(afterSecond.status).toBe("active");
     });
 
-    it("SessionStart on an already-active session is a no-op (no resetSession patches)", () => {
-      const store = makeSessionStore();
-      const sessionId = `pi-${Date.now().toString(36)}-noreset`;
-
-      // Initial SessionStart creates the session.
-      handlePiTranslation(
-        { hookEvent: "SessionStart", hookData: { session_id: sessionId, cwd: "/test", source: "pi" }, sessionId },
-        store,
-      );
-      // Add a tool so we can detect a wipe.
-      const state = createAccState(sessionId, "/test", thinkingToEffort("medium"));
-      const setup: PiEvent[] = [
+    it("translator emits TurnOpen (not SessionStart) for pi's agent_start", () => {
+      // The old design routed agent_start → SessionStart and relied on a
+      // `!isPi` gate in handleSessionStart to skip the reset. Under the new
+      // boundary mapping, agent_start emits TurnOpen — SessionStart is
+      // synthesized exactly once by startPiSession at subprocess spawn time
+      // and never again. This test pins the contract that the translator
+      // does not emit SessionStart for any number of consecutive agent_start
+      // events, so the obsolete `!isPi` reset-skip is no longer needed.
+      const state = createAccState("pi-test", "/test", thinkingToEffort("medium"));
+      const emitted: string[] = [];
+      const events: PiEvent[] = [
         { type: "agent_start" } as PiEvent,
-        { type: "message_start", message: { role: "user", content: [{ type: "text", text: "hi" }] } } as unknown as PiEvent,
-        { type: "turn_start", turn_id: "t" },
-        { type: "tool_execution_start", tool_call_id: "tc", tool_name: "bash", tool_input: {} },
-        { type: "tool_execution_end", tool_call_id: "tc", tool_name: "bash", tool_result: {} },
-        { type: "turn_end", turn_id: "t" },
-        { type: "agent_end", result: { type: "success" } },
+        { type: "agent_end", messages: [] } as unknown as PiEvent,
+        { type: "agent_start" } as PiEvent,
+        { type: "agent_end", messages: [] } as unknown as PiEvent,
       ];
-      for (const evt of setup) {
+      for (const evt of events) {
         const r = translatePiEvent(evt, state);
-        if (r.kind === "emit") for (const x of r.results) handlePiTranslation(x, store);
+        if (r.kind === "emit") for (const x of r.results) emitted.push(x.hookEvent);
       }
-      const before = store.get(sessionId)!;
-      const turnCountBefore = before.totalToolCount;
-      expect(turnCountBefore).toBeGreaterThan(0);
-
-      // Second SessionStart on the still-active session — must not reset.
-      handlePiTranslation(
-        { hookEvent: "SessionStart", hookData: { session_id: sessionId, cwd: "/test", source: "pi" }, sessionId },
-        store,
-      );
-
-      const after = store.get(sessionId)!;
-      expect(after.totalToolCount).toBe(turnCountBefore);
-      expect(after.plan).toBeNull(); // unchanged
+      expect(emitted).not.toContain("SessionStart");
+      expect(emitted.filter((e) => e === "TurnOpen").length).toBe(2);
+      expect(emitted.filter((e) => e === "TurnClose").length).toBe(2);
     });
   });
 });

@@ -198,56 +198,123 @@ function getTurnNode(s: Session, turnNumber: number): TurnNode | undefined {
   return s.turns.find((t) => t.turnNumber === turnNumber);
 }
 
-export function addPrompt(s: Session, entry: PromptEntry): Patch[] {
+/**
+ * Open a new empty turn.
+ *
+ * Defensively freezes the previous turn if it is still open — this guards
+ * against the restart hazard where a pi subprocess dies mid-turn and the
+ * next spawn would otherwise stack a new turn on top of an unfrozen one.
+ *
+ * Emits `freeze_turn` (prev, if applicable) + `add_turn` (new).
+ */
+export function openTurn(s: Session): Patch[] {
   const patches: Patch[] = [];
 
-  // Freeze previous turn
   const prev = currentTurnNode(s);
   if (prev && !prev.frozen) {
     prev.frozen = true;
     patches.push({ op: "freeze_turn", turnNumber: prev.turnNumber });
   }
 
-  // Create new turn
   s.currentTurn++;
   const turn = createTurnNode(s.currentTurn);
-  turn.prompt = entry;
   s.turns.push(turn);
-
   patches.push({ op: "add_turn", turn });
-  patches.push({ op: "add_prompt", turnNumber: s.currentTurn, prompt: entry });
+
   return patches;
 }
 
-export function finalizeLastPrompt(
+/**
+ * Attach a prompt to the current (last) turn. Does NOT create a new turn —
+ * the caller must have already called `openTurn` if needed. Idempotent: if
+ * the current turn already has a prompt, this is a no-op (the boundary
+ * survives, just no relabel).
+ */
+export function attachPrompt(s: Session, entry: PromptEntry): Patch[] {
+  const turn = currentTurnNode(s);
+  if (!turn) return [];
+  if (turn.prompt) return [];
+  turn.prompt = entry;
+  return [{ op: "add_prompt", turnNumber: turn.turnNumber, prompt: entry }];
+}
+
+/**
+ * Close the current turn: stamp stop text/thinking, mark frozen, record
+ * elapsed time on the prompt. Optionally records token usage on the turn.
+ *
+ * Emits `set_turn_stop` (if any stop text/thinking) + `set_turn_tokens`
+ * (if usage given) + `freeze_turn`. Idempotent under repeated calls — a
+ * second `closeTurn` on the same already-frozen turn is a no-op except for
+ * updating fields that are still null.
+ */
+export function closeTurn(
   s: Session,
-  stopText?: string,
-  stopThinking?: string,
+  opts: {
+    stopText?: string;
+    stopThinking?: string;
+    tokenIn?: number;
+    tokenOut?: number;
+  } = {},
 ): Patch[] {
   const turn = currentTurnNode(s);
   if (!turn) return [];
 
   const patches: Patch[] = [];
 
-  // Compute elapsed on prompt
   if (turn.prompt && !turn.prompt.elapsed && turn.prompt.submitted) {
     turn.prompt.elapsed = (Date.now() - turn.prompt.submitted) / 1000;
   }
 
-  // Store stop text/thinking on turn node
-  if (stopText) turn.stopText = stopText;
-  if (stopThinking) turn.stopThinking = stopThinking;
+  if (opts.stopText && !turn.stopText) turn.stopText = opts.stopText;
+  if (opts.stopThinking && !turn.stopThinking) turn.stopThinking = opts.stopThinking;
 
-  if (stopText || stopThinking) {
+  if (opts.stopText || opts.stopThinking) {
     patches.push({
       op: "set_turn_stop",
       turnNumber: turn.turnNumber,
-      stopText: stopText,
-      stopThinking: stopThinking,
+      stopText: opts.stopText,
+      stopThinking: opts.stopThinking,
     });
   }
 
+  if (opts.tokenIn != null || opts.tokenOut != null) {
+    const tokenIn = opts.tokenIn ?? 0;
+    const tokenOut = opts.tokenOut ?? 0;
+    turn.tokenIn = tokenIn;
+    turn.tokenOut = tokenOut;
+    patches.push({ op: "set_turn_tokens", turnNumber: turn.turnNumber, tokenIn, tokenOut });
+  }
+
+  if (!turn.frozen) {
+    turn.frozen = true;
+    patches.push({ op: "freeze_turn", turnNumber: turn.turnNumber });
+  }
+
   return patches;
+}
+
+/** Open a new turn and attach a prompt to it. Used by sources where the
+ * boundary and the prompt arrive atomically (Claude Code's
+ * UserPromptSubmit). */
+export function addPrompt(s: Session, entry: PromptEntry): Patch[] {
+  return [...openTurn(s), ...attachPrompt(s, entry)];
+}
+
+/**
+ * Finalize the last prompt: set stop text/thinking AND freeze the turn.
+ *
+ * Historically this only set stop text and left the turn unfrozen — the
+ * next `addPrompt` did the freeze lazily. That left turns open if the
+ * source stopped and never sent another prompt (the pi case, and the
+ * latent bug for Claude Code masked by tight prompt cadence). Now backed
+ * by `closeTurn` so the turn is always frozen on stop.
+ */
+export function finalizeLastPrompt(
+  s: Session,
+  stopText?: string,
+  stopThinking?: string,
+): Patch[] {
+  return closeTurn(s, { stopText, stopThinking });
 }
 
 export function setTurnTokens(s: Session, tokenIn: number, tokenOut: number): Patch[] {

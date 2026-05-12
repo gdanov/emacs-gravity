@@ -1333,7 +1333,9 @@ describe("Event Handler", () => {
       expect(session.currentTurn).toBe(2);
       expect(session.totalToolCount).toBe(2); // t1 + t2, no dups
       expect(session.turns[1].frozen).toBe(true);
-      expect(session.turns[2].frozen).toBe(false);
+      // Stop now freezes the turn (was previously only frozen by the next
+      // UserPromptSubmit — see design/pi-adapter.md "freeze on Stop").
+      expect(session.turns[2].frozen).toBe(true);
       expect(session.turns[1].stopText).toBe("Done first");
       expect(session.turns[2].stopText).toBe("Done second");
     });
@@ -1864,10 +1866,10 @@ describe("Event Handler", () => {
       expect(session.turns[2].agents[0].status).toBe("done");
       expect(session.turns[2].agents[0].toolCount).toBe(1);
 
-      // Turn freeze
+      // Turn freeze — Stop now freezes the current turn (freeze-on-Stop).
       expect(session.turns[0].frozen).toBe(true);
       expect(session.turns[1].frozen).toBe(true);
-      expect(session.turns[2].frozen).toBe(false);
+      expect(session.turns[2].frozen).toBe(true);
 
       // Stop text
       expect(session.turns[1].stopText).toBe("Fixed the auth bug");

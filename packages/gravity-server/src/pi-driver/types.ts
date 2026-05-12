@@ -61,10 +61,53 @@ export interface AgentStartEvent extends PiBaseEvent {
   type: "agent_start";
 }
 
-/** Agent finished one prompt cycle (not the whole session). */
+/**
+ * One assistant message from pi's `agent_end.messages[]`.
+ *
+ * Pi 0.74 emits the agent run's full message list on `agent_end`. The
+ * trailing `AssistantMessage` carries the final stop reason; the sum of
+ * `usage` across assistant messages is the agent run's total token cost.
+ * See pi `docs/session.md` for the full message-type union.
+ */
+export interface PiAssistantMessage {
+  role: "assistant";
+  content?: unknown;
+  api?: string;
+  provider?: string;
+  model?: string;
+  usage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    totalTokens?: number;
+    cost?: unknown;
+  };
+  stopReason?: "stop" | "length" | "toolUse" | "error" | "aborted";
+  errorMessage?: string;
+  timestamp?: number;
+}
+
+/** Any message in `agent_end.messages[]`. */
+export interface PiAgentMessage {
+  role: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Agent finished one prompt cycle (not the whole session).
+ *
+ * Pi 0.74 wire shape is `{ messages: AgentMessage[] }`. The legacy
+ * `result: { type, error, usage }` fields are NOT emitted by pi 0.74 — they
+ * are retained on this type for defensive parsing only, in case pi reverts
+ * to that shape on a future version. The translator walks `messages` for
+ * usage and stopReason; do not read `result`.
+ */
 export interface AgentEndEvent extends PiBaseEvent {
   type: "agent_end";
-  result: {
+  messages?: PiAgentMessage[];
+  // Legacy / defensive — pi 0.74 does not emit these.
+  result?: {
     type: "success" | "error" | "aborted";
     error?: string;
     usage?: {
@@ -146,7 +189,10 @@ export interface MessageStartEvent extends PiBaseEvent {
   type: "message_start";
   message?: {
     role?: "user" | "assistant" | "system";
-    content?: Array<{ type?: string; text?: string }>;
+    // Per pi docs/session.md, UserMessage.content is
+    //   `string | (TextContent | ImageContent)[]`.
+    // Accept both shapes; the translator handles them.
+    content?: string | Array<{ type?: string; text?: string }>;
   };
 }
 

@@ -223,10 +223,13 @@ describe("Turn accumulator", () => {
     expect(events[1].hookEvent).toBe("PostToolUseFailure");
   });
 
-  it("should handle agent_start: SessionStart only (pi 0.74's agent_start is bare)", () => {
+  it("should handle agent_start: emit TurnOpen (pi 0.74's agent_start is bare)", () => {
+    // Per the boundary mapping in design/pi-adapter.md, agent_start opens a
+    // new gravity turn. SessionStart is synthesized once eagerly at pi
+    // subprocess spawn time by gravity-server, not on every agent_start.
     const events = accAgentStart(state);
     expect(events).toHaveLength(1);
-    expect(events[0].hookEvent).toBe("SessionStart");
+    expect(events[0].hookEvent).toBe("TurnOpen");
   });
 
   it("should handle user message_start: UserPromptSubmit with the prompt text", () => {
@@ -247,7 +250,10 @@ describe("Turn accumulator", () => {
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
     });
-    expect(result.hookEvent).toBe("Stop");
+    // agent_end closes the gravity turn — TurnClose, not Stop. Stop is the
+    // Claude Code hook event; the pi spine uses TurnClose to guarantee the
+    // turn freezes even if no further prompt arrives.
+    expect(result.hookEvent).toBe("TurnClose");
     expect(result.hookData.token_usage).toBeDefined();
   });
 
@@ -267,14 +273,15 @@ describe("Hook translator", () => {
     state = createAccState("test-session", "/test/cwd", "medium");
   });
 
-  it("agent_start emits only SessionStart (pi 0.74's agent_start is bare)", () => {
+  it("agent_start emits TurnOpen (pi 0.74's agent_start is bare)", () => {
     // Pi 0.74 sends a bare `{type: "agent_start"}` with no message attached.
+    // The translator maps it to TurnOpen — the per-prompt boundary signal.
     const event = { type: "agent_start" } as unknown as PiEvent;
     const result = translatePiEvent(event, state);
     expect(result.kind).toBe("emit");
     if (result.kind === "emit") {
       expect(result.results).toHaveLength(1);
-      expect(result.results[0].hookEvent).toBe("SessionStart");
+      expect(result.results[0].hookEvent).toBe("TurnOpen");
     }
   });
 
@@ -490,13 +497,15 @@ describe("Full event sequence", () => {
       }
     }
 
-    // Verify we got expected events
+    // Verify we got expected events. Boundary events are now TurnOpen /
+    // TurnClose (per design/pi-adapter.md "the spine"). SessionStart is
+    // synthesized outside the translator at subprocess spawn time.
     const hookEvents = allEvents.map(e => e.hookEvent);
-    expect(hookEvents).toContain("SessionStart");
+    expect(hookEvents).toContain("TurnOpen");
     expect(hookEvents).toContain("UserPromptSubmit");
     expect(hookEvents).toContain("PreToolUse");
     expect(hookEvents).toContain("PostToolUse");
-    expect(hookEvents).toContain("Stop");
+    expect(hookEvents).toContain("TurnClose");
   });
 
   it("should handle out-of-order: turn_end before tool_execution_end", () => {
@@ -634,7 +643,7 @@ function runProductionEventHandler(
 }
 
 describe("issue #4: multi-tool turn — no duplicates, no drops", () => {
-  it("a 3-tool turn emits exactly 1 SessionStart, 1 UserPromptSubmit, 3 PreToolUse, 3 PostToolUse, 1 Stop", () => {
+  it("a 3-tool turn emits exactly 1 TurnOpen, 1 UserPromptSubmit, 3 PreToolUse, 3 PostToolUse, 1 TurnClose", () => {
     const state = createAccState("test-issue-4", "/test", thinkingToEffort("medium"));
     const emitted: TranslationResult[] = [];
 
@@ -658,11 +667,11 @@ describe("issue #4: multi-tool turn — no duplicates, no drops", () => {
     for (const e of emitted) counts[e.hookEvent] = (counts[e.hookEvent] ?? 0) + 1;
 
     expect(counts).toEqual({
-      SessionStart: 1,
+      TurnOpen: 1,
       UserPromptSubmit: 1,
       PreToolUse: 3,
       PostToolUse: 3,
-      Stop: 1,
+      TurnClose: 1,
     });
 
     // Each tool_use_id appears once in PreToolUse and once in PostToolUse

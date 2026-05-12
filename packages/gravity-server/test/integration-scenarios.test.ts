@@ -342,9 +342,12 @@ describe("Integration Scenarios", () => {
       // Verify patch ops sequence
       const ops = patches.map((p) => p.op);
 
-      // Turn freezing: 3 freeze_turn ops (freeze turn 0 before turn 1, freeze turn 1 before turn 2, freeze turn 2 before turn 3)
+      // Turn freezing: 4 freeze_turn ops — turn 0 freezes on the first
+      // UserPromptSubmit, turns 1/2/3 each freeze on Stop (freeze-on-Stop).
+      // The subsequent UserPromptSubmit calls openTurn which no-ops the
+      // freeze because the prev turn is already frozen.
       const freezes = patches.filter((p) => p.op === "freeze_turn");
-      expect(freezes.length).toBe(3);
+      expect(freezes.length).toBe(4);
 
       // 3 add_turn ops (turns 1, 2, 3)
       const addTurns = patches.filter((p) => p.op === "add_turn");
@@ -377,7 +380,8 @@ describe("Integration Scenarios", () => {
       expect(snap.turns[0].frozen).toBe(true);
       expect(snap.turns[1].frozen).toBe(true);
       expect(snap.turns[2].frozen).toBe(true);
-      expect(snap.turns[3].frozen).toBe(false); // last turn not frozen
+      // Last turn is now frozen too (freeze-on-Stop).
+      expect(snap.turns[3].frozen).toBe(true);
       expect(snap.currentTurn).toBe(3);
       expect(snap.totalToolCount).toBe(4);
       expect(snap.tokenUsage.input_tokens).toBe(500);

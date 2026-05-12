@@ -14,6 +14,8 @@ import type {
   TranslationResult,
   TranslateEventResult,
   AgentEndEvent,
+  PiAgentMessage,
+  PiAssistantMessage,
   TurnStartEvent,
   TurnEndEvent,
   ToolExecutionStartEvent,
@@ -43,6 +45,71 @@ const stamp = (state: AccState, r: TranslationResult): TranslationResult =>
   ({ ...r, sessionId: state.sessionId });
 
 /**
+ * Sum AssistantMessage usage across an agent run's messages[].
+ *
+ * Pi's per-message `Usage` uses camelCase fields (`input`, `output`,
+ * `cacheRead`, `cacheWrite`) — gravity's `TokenUsage` uses snake_case
+ * (`input_tokens`, `output_tokens`, `cache_read_input_tokens`,
+ * `cache_creation_input_tokens`). This function translates and aggregates.
+ *
+ * Falls back to the legacy `result.usage` shape if `messages` is missing
+ * (pi 0.74 does not emit `result.usage`; retained defensively).
+ */
+function extractAgentRunUsage(
+  messages: PiAgentMessage[] | undefined,
+): TokenUsage | undefined {
+  if (!Array.isArray(messages) || messages.length === 0) return undefined;
+  let input = 0;
+  let output = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
+  let seen = false;
+  for (const m of messages) {
+    if (m?.role !== "assistant") continue;
+    const u = (m as PiAssistantMessage).usage;
+    if (!u) continue;
+    seen = true;
+    input += u.input ?? 0;
+    output += u.output ?? 0;
+    cacheRead += u.cacheRead ?? 0;
+    cacheWrite += u.cacheWrite ?? 0;
+  }
+  if (!seen) return undefined;
+  return {
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: cacheWrite,
+  };
+}
+
+/**
+ * Pick a result type ("success" | "error" | "aborted") and optional error
+ * message for the agent run. Prefer the trailing AssistantMessage's
+ * `stopReason` (pi 0.74). Fall back to the legacy `result.{type,error}`
+ * shape if present.
+ */
+function extractAgentRunResult(
+  e: AgentEndEvent,
+): { resultType: "success" | "error" | "aborted"; error?: string } {
+  if (Array.isArray(e.messages) && e.messages.length > 0) {
+    for (let i = e.messages.length - 1; i >= 0; i--) {
+      const m = e.messages[i];
+      if (m?.role !== "assistant") continue;
+      const am = m as PiAssistantMessage;
+      const sr = am.stopReason;
+      if (sr === "error") return { resultType: "error", error: am.errorMessage };
+      if (sr === "aborted") return { resultType: "aborted", error: am.errorMessage };
+      return { resultType: "success" };
+    }
+  }
+  if (e.result) {
+    return { resultType: e.result.type ?? "success", error: e.result.error };
+  }
+  return { resultType: "success" };
+}
+
+/**
  * Translate a pi event into gravity events.
  *
  * Returns either { kind: "emit", results } with one or more events to emit
@@ -66,20 +133,15 @@ export function translatePiEvent(
 
     case "agent_end": {
       const e = event as AgentEndEvent;
-      const usage: TokenUsage | undefined = e.result?.usage
-        ? {
-            input_tokens: e.result.usage.input_tokens,
-            output_tokens: e.result.usage.output_tokens,
-            cache_read_input_tokens: e.result.usage.cache_read_input_tokens ?? 0,
-            cache_creation_input_tokens: e.result.usage.cache_creation_input_tokens ?? 0,
-          }
-        : undefined;
-      const stop = accAgentEnd(
-        state,
-        e.result?.type ?? "success",
-        usage,
-        e.result?.error,
-      );
+      // Pi 0.74 wire shape: { messages: AgentMessage[] }. Walk the messages
+      // and sum AssistantMessage usage across the agent run. The trailing
+      // AssistantMessage's stopReason maps to our result type. Fall back to
+      // the legacy { result: { usage, type, error } } shape if pi ever
+      // reverts to it.
+      const usage = extractAgentRunUsage(e.messages);
+      const { resultType, error } = extractAgentRunResult(e);
+
+      const stop = accAgentEnd(state, resultType, usage, error);
       return { kind: "emit", results: [stamp(state, stop)] };
     }
 
@@ -131,16 +193,28 @@ export function translatePiEvent(
     // it once (on message_start) and emit UserPromptSubmit. Assistant-role
     // messages are streamed via message_update and surfaced elsewhere.
     case "message_start": {
+      // Pi's UserMessage.content is `string | (TextContent | ImageContent)[]`
+      // (docs/session.md). Accept both shapes — handling only the array form
+      // silently drops string-form prompts. The boundary still survives
+      // (agent_start opened the turn) but the label is missed without this.
       const e = event as MessageStartEvent;
       const msg = e.message;
-      if (msg?.role === "user" && Array.isArray(msg.content)) {
-        const text = msg.content
-          .filter((c) => c?.type === "text" && typeof c.text === "string")
-          .map((c) => c.text as string)
-          .join("");
-        const results = accUserPromptMessage(state, text);
-        if (results.length > 0) {
-          return { kind: "emit", results: results.map((r) => stamp(state, r)) };
+      if (msg?.role === "user") {
+        const content = msg.content as unknown;
+        let text = "";
+        if (typeof content === "string") {
+          text = content;
+        } else if (Array.isArray(content)) {
+          text = content
+            .filter((c) => c?.type === "text" && typeof c.text === "string")
+            .map((c) => c.text as string)
+            .join("");
+        }
+        if (text.length > 0) {
+          const results = accUserPromptMessage(state, text);
+          if (results.length > 0) {
+            return { kind: "emit", results: results.map((r) => stamp(state, r)) };
+          }
         }
       }
       return { kind: "noop" };

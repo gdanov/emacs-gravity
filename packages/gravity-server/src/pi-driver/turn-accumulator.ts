@@ -256,18 +256,23 @@ export function accModelSelect(state: AccState, model: string, provider: string)
 }
 
 /**
- * Called on agent_start (a new pi run begins). Emits SessionStart only.
+ * Called on agent_start (a new pi run begins). Emits TurnOpen.
  *
  * Pi 0.74's `agent_start` event is bare — it doesn't carry the user
  * message. The user's prompt arrives in a subsequent `message_start` event
  * with role "user"; use `accUserPromptMessage` to emit UserPromptSubmit
- * from there.
+ * from there. The TurnOpen handler creates an empty turn that
+ * UserPromptSubmit later attaches a label to.
+ *
+ * SessionStart for the pi session is synthesized eagerly at subprocess
+ * spawn time by gravity-server's `startPiSession` — agent_start does NOT
+ * emit SessionStart. A long-lived pi process can fire agent_start N times;
+ * SessionStart must fire exactly once.
  */
 export function accAgentStart(state: AccState): TranslationResult[] {
   return [{
-    hookEvent: "SessionStart",
+    hookEvent: "TurnOpen",
     hookData: {
-      session_id: state.sessionId,
       cwd: state.cwd,
       source: "pi",
       branch: state.branch ?? undefined,
@@ -295,8 +300,18 @@ export function accUserPromptMessage(state: AccState, promptText: string): Trans
 }
 
 /**
- * Called on agent_end (all turns complete).
- * Emits Stop event with token usage.
+ * Called on agent_end (one pi prompt cycle completes).
+ *
+ * Emits TurnClose, which closes (and freezes) the current turn. The
+ * gravity-server handler calls `closeTurn(stopText, stopThinking, usage)`
+ * and additionally toggles claude status to idle + drops an "idle" inbox
+ * item — that work used to live in the Stop handler and pi rode through
+ * it; now the TurnClose handler owns it.
+ *
+ * Token usage comes from the trailing AssistantMessage in
+ * `agent_end.messages[]`, not the imaginary `result.usage` (pi 0.74 does
+ * not emit that field). The translator computes usage before calling here
+ * and passes it in.
  */
 export function accAgentEnd(
   state: AccState,
@@ -315,7 +330,7 @@ export function accAgentEnd(
   };
 
   return {
-    hookEvent: "Stop",
+    hookEvent: "TurnClose",
     hookData,
     sessionId: state.sessionId,
   };
