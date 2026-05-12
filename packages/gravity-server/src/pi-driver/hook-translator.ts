@@ -84,23 +84,26 @@ function extractAgentRunUsage(
 }
 
 /**
- * Pick a result type ("success" | "error" | "aborted") and optional error
- * message for the agent run. Prefer the trailing AssistantMessage's
- * `stopReason` (pi 0.74). Fall back to the legacy `result.{type,error}`
- * shape if present.
+ * Pick a result type ("success" | "error" | "aborted"), the raw
+ * `stopReason`, and an optional error message for the agent run.
+ *
+ * The trailing AssistantMessage's `stopReason` is the canonical signal
+ * per pi 0.74 (`docs/session.md`). One of `"stop"`, `"length"`,
+ * `"toolUse"`, `"error"`, `"aborted"`. Falls back to the legacy
+ * `result.{type,error}` shape if `messages` is missing.
  */
 function extractAgentRunResult(
   e: AgentEndEvent,
-): { resultType: "success" | "error" | "aborted"; error?: string } {
+): { resultType: "success" | "error" | "aborted"; stopReason?: string; error?: string } {
   if (Array.isArray(e.messages) && e.messages.length > 0) {
     for (let i = e.messages.length - 1; i >= 0; i--) {
       const m = e.messages[i];
       if (m?.role !== "assistant") continue;
       const am = m as PiAssistantMessage;
       const sr = am.stopReason;
-      if (sr === "error") return { resultType: "error", error: am.errorMessage };
-      if (sr === "aborted") return { resultType: "aborted", error: am.errorMessage };
-      return { resultType: "success" };
+      if (sr === "error") return { resultType: "error", stopReason: sr, error: am.errorMessage };
+      if (sr === "aborted") return { resultType: "aborted", stopReason: sr, error: am.errorMessage };
+      return { resultType: "success", stopReason: sr };
     }
   }
   if (e.result) {
@@ -135,13 +138,13 @@ export function translatePiEvent(
       const e = event as AgentEndEvent;
       // Pi 0.74 wire shape: { messages: AgentMessage[] }. Walk the messages
       // and sum AssistantMessage usage across the agent run. The trailing
-      // AssistantMessage's stopReason maps to our result type. Fall back to
+      // AssistantMessage's stopReason is surfaced verbatim. Fall back to
       // the legacy { result: { usage, type, error } } shape if pi ever
       // reverts to it.
       const usage = extractAgentRunUsage(e.messages);
-      const { resultType, error } = extractAgentRunResult(e);
+      const { resultType, stopReason, error } = extractAgentRunResult(e);
 
-      const stop = accAgentEnd(state, resultType, usage, error);
+      const stop = accAgentEnd(state, resultType, usage, error, stopReason);
       return { kind: "emit", results: [stamp(state, stop)] };
     }
 

@@ -90,6 +90,7 @@ export function createTurnNode(turnNumber: number): TurnNode {
     frozen: false,
     stopText: null,
     stopThinking: null,
+    stopReason: null,
     tokenIn: null,
     tokenOut: null,
   };
@@ -252,6 +253,7 @@ export function closeTurn(
   opts: {
     stopText?: string;
     stopThinking?: string;
+    stopReason?: string;
     tokenIn?: number;
     tokenOut?: number;
   } = {},
@@ -267,13 +269,15 @@ export function closeTurn(
 
   if (opts.stopText && !turn.stopText) turn.stopText = opts.stopText;
   if (opts.stopThinking && !turn.stopThinking) turn.stopThinking = opts.stopThinking;
+  if (opts.stopReason && !turn.stopReason) turn.stopReason = opts.stopReason;
 
-  if (opts.stopText || opts.stopThinking) {
+  if (opts.stopText || opts.stopThinking || opts.stopReason) {
     patches.push({
       op: "set_turn_stop",
       turnNumber: turn.turnNumber,
       stopText: opts.stopText,
       stopThinking: opts.stopThinking,
+      stopReason: opts.stopReason,
     });
   }
 

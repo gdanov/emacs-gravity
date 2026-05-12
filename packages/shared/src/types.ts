@@ -181,6 +181,15 @@ export interface TurnNode {
   stopThinking: string | null;
   tokenIn: number | null;
   tokenOut: number | null;
+  /**
+   * Why the model stopped on this turn. Sourced from the trailing
+   * AssistantMessage's `stopReason` in pi's `agent_end.messages[]`. One of
+   * `"stop"` (model produced no further tool calls), `"length"` (budget
+   * exhausted), `"toolUse"` (stopped to wait for tool result), `"error"`,
+   * `"aborted"`, or null (Claude Code path — CC's Stop hook doesn't carry
+   * a stop reason).
+   */
+  stopReason: string | null;
 }
 
 export interface StepNode {
@@ -292,7 +301,7 @@ export type Patch =
   | { op: "set_meta"; slug?: string; displayName?: string; branch?: string; pid?: number; modelName?: string; tmuxSession?: string; piSessionFile?: string }
   | { op: "add_turn"; turn: TurnNode }
   | { op: "freeze_turn"; turnNumber: number }
-  | { op: "set_turn_stop"; turnNumber: number; stopText?: string; stopThinking?: string }
+  | { op: "set_turn_stop"; turnNumber: number; stopText?: string; stopThinking?: string; stopReason?: string }
   | { op: "set_turn_tokens"; turnNumber: number; tokenIn: number; tokenOut: number }
   | { op: "add_step"; turnNumber: number; agentId?: string; step: StepNode }
   | { op: "add_tool"; turnNumber: number; stepIndex: number; agentId?: string; tool: Tool }

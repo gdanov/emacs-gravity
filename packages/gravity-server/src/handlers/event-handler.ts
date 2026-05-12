@@ -296,10 +296,12 @@ const handleTurnClose = (ctx: EventContext) =>
 
     const stopText = stripSystemTags(ctx.data.stop_text as string) ?? undefined;
     const stopThinking = stripSystemTags(ctx.data.stop_thinking as string) ?? undefined;
+    const stopReason = typeof ctx.data.stop_reason === "string" ? ctx.data.stop_reason : undefined;
     const tokenUsage = ctx.data.token_usage;
-    const closeOpts: { stopText?: string; stopThinking?: string; tokenIn?: number; tokenOut?: number } = {
+    const closeOpts: { stopText?: string; stopThinking?: string; stopReason?: string; tokenIn?: number; tokenOut?: number } = {
       stopText,
       stopThinking,
+      stopReason,
     };
     if (tokenUsage) {
       const tokenIn =

@@ -257,6 +257,11 @@ describe("Turn accumulator", () => {
     expect(result.hookData.token_usage).toBeDefined();
   });
 
+  it("forwards stopReason on TurnClose hookData when provided", () => {
+    const result = accAgentEnd(state, "success", undefined, undefined, "length");
+    expect((result.hookData as { stop_reason?: string }).stop_reason).toBe("length");
+  });
+
   it("should emit turn end with no pending events", () => {
     accTurnStart(state, "turn-1");
     accTurnEnd(state, "turn-1");
@@ -282,6 +287,41 @@ describe("Hook translator", () => {
     if (result.kind === "emit") {
       expect(result.results).toHaveLength(1);
       expect(result.results[0].hookEvent).toBe("TurnOpen");
+    }
+  });
+
+  it("agent_end sums usage across AssistantMessages and extracts stopReason", () => {
+    // Pi 0.74 wire shape: { messages: AgentMessage[] }. Each AssistantMessage
+    // carries its own per-LLM-call usage; the gravity turn = the whole agent
+    // run, so usage is summed across all assistant messages. stopReason is
+    // taken from the trailing AssistantMessage.
+    const event = {
+      type: "agent_end",
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          usage: { input: 10, output: 5, cacheRead: 1, cacheWrite: 0 },
+          stopReason: "toolUse",
+        },
+        { role: "toolResult", content: [] },
+        {
+          role: "assistant",
+          usage: { input: 20, output: 8, cacheRead: 2, cacheWrite: 0 },
+          stopReason: "length",
+        },
+      ],
+    } as unknown as PiEvent;
+    const result = translatePiEvent(event, state);
+    expect(result.kind).toBe("emit");
+    if (result.kind === "emit") {
+      const r = result.results[0];
+      expect(r.hookEvent).toBe("TurnClose");
+      const usage = (r.hookData as { token_usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number } }).token_usage;
+      expect(usage?.input_tokens).toBe(30); // 10 + 20
+      expect(usage?.output_tokens).toBe(13); // 5 + 8
+      expect(usage?.cache_read_input_tokens).toBe(3); // 1 + 2
+      expect((r.hookData as { stop_reason?: string }).stop_reason).toBe("length");
     }
   });
 

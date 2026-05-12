@@ -130,6 +130,23 @@ describe("closeTurn", () => {
     expect(ops).toContain("freeze_turn");
   });
 
+  it("records stopReason on the turn and the set_turn_stop patch", () => {
+    const s = createSession("s-stop", "/tmp");
+    openTurn(s);
+    const patches = closeTurn(s, { stopReason: "length" });
+    expect(s.turns[1].stopReason).toBe("length");
+    const stop = patches.find((p) => p.op === "set_turn_stop");
+    // @ts-expect-error narrowing through patch union
+    expect(stop?.stopReason).toBe("length");
+  });
+
+  it("emits set_turn_stop when only stopReason is provided (no text/thinking)", () => {
+    const s = createSession("s-stop-only", "/tmp");
+    openTurn(s);
+    const patches = closeTurn(s, { stopReason: "aborted" });
+    expect(patches.some((p) => p.op === "set_turn_stop")).toBe(true);
+  });
+
   it("records token usage when provided and emits set_turn_tokens", () => {
     const s = createSession("s2", "/tmp");
     openTurn(s);

@@ -326,6 +326,7 @@ export function accAgentEnd(
   resultType: "success" | "error" | "aborted",
   usage?: TokenUsage,
   error?: string,
+  stopReason?: string,
 ): TranslationResult {
   // Flush any remaining pending text as stop_text
   const { assistantText, assistantThinking } = flushPendingAssistantContext(state);
@@ -335,6 +336,7 @@ export function accAgentEnd(
     stop_thinking: assistantThinking,
     cwd: state.cwd,
     ...(usage ? { token_usage: usage } : {}),
+    ...(stopReason ? { stop_reason: stopReason } : {}),
   };
 
   return {
