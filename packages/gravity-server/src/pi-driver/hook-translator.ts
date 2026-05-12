@@ -280,6 +280,67 @@ export function translatePiEvent(
       return { kind: "noop" };
     }
 
+    // ── Documented pi events with no current gravity surface ────────────
+    //
+    // Listed explicitly so additions / renames in pi's event vocabulary
+    // surface as TypeScript narrowing changes rather than silently falling
+    // through `default`. See design/pi-adapter.md "Gaps and parity TODOs".
+
+    case "queue_update":
+      // Pending steering / follow-up queue changed. Informational.
+      // TODO: surface as a hint to the user when the queue is non-empty.
+      return { kind: "noop" };
+
+    case "compaction_start": {
+      // Pi is about to summarize older history. Mid-stream compaction can
+      // fire during a long tool loop; turn boundaries are unaffected.
+      const e = event as { reason?: string };
+      process.stderr.write(`[pi-adapter] compaction_start reason=${e.reason ?? "?"}\n`);
+      // TODO: emit a synthetic prompt-like marker in the turn tree so the
+      // compaction boundary is visible to the user.
+      return { kind: "noop" };
+    }
+
+    case "compaction_end": {
+      const e = event as {
+        reason?: string;
+        aborted?: boolean;
+        result?: { tokensBefore?: number; summary?: string };
+      };
+      process.stderr.write(
+        `[pi-adapter] compaction_end reason=${e.reason ?? "?"} aborted=${e.aborted ?? false} tokensBefore=${e.result?.tokensBefore ?? "?"}\n`,
+      );
+      // TODO: surface the summary text on the turn tree (no spec yet).
+      return { kind: "noop" };
+    }
+
+    case "auto_retry_start": {
+      // Provider rate-limit / transient error retry. Could surface as a
+      // status indicator; for now just log.
+      const e = event as { attempt?: number; maxAttempts?: number; delayMs?: number };
+      process.stderr.write(
+        `[pi-adapter] auto_retry_start attempt=${e.attempt ?? "?"}/${e.maxAttempts ?? "?"} delayMs=${e.delayMs ?? "?"}\n`,
+      );
+      return { kind: "noop" };
+    }
+
+    case "auto_retry_end": {
+      const e = event as { success?: boolean; attempt?: number; finalError?: string };
+      const detail = e.success === false ? ` finalError=${e.finalError ?? "?"}` : "";
+      process.stderr.write(
+        `[pi-adapter] auto_retry_end success=${e.success ?? false} attempt=${e.attempt ?? "?"}${detail}\n`,
+      );
+      return { kind: "noop" };
+    }
+
+    case "extension_error": {
+      const e = event as { extensionPath?: string; event?: string; error?: string };
+      process.stderr.write(
+        `[pi-adapter] extension_error path=${e.extensionPath ?? "?"} event=${e.event ?? "?"}: ${e.error ?? "?"}\n`,
+      );
+      return { kind: "noop" };
+    }
+
     default:
       return { kind: "noop" };
   }

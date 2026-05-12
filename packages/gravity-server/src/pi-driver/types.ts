@@ -172,7 +172,13 @@ export interface ToolExecutionUpdateEvent extends PiBaseEvent {
   partial?: unknown;
 }
 
-/** Model selected (logged on startup). */
+/**
+ * Model selected. Pi emits this via the extension event channel (see
+ * pi-coding-agent source `agent-session.ts:_extensionRunner.emit({type:
+ * "model_select", ...})`), not as a core session event in `docs/rpc.md`.
+ * Handler retained defensively; harmless if pi never surfaces it on
+ * stdout in RPC mode.
+ */
 export interface ModelSelectEvent extends PiBaseEvent {
   type: "model_select";
   model: string;
@@ -237,11 +243,85 @@ export interface ErrorEvent extends PiBaseEvent {
  * Git branch changed (pi emits this when the user switches branches).
  * Updates the accumulator's branch field so the next SessionStart
  * carries the correct value.
+ *
+ * Not in pi's documented event vocabulary (`docs/rpc.md` session events)
+ * — sourced from pi's extension event channel. Handler retained
+ * defensively; harmless if pi never emits it.
  */
 export interface BranchUpdateEvent extends PiBaseEvent {
   type: "branch_update";
   /** Git branch name, or null when leaving a git repo. */
   branch: string | null;
+}
+
+/**
+ * Pending steering / follow-up queue changed. Informational; gravity
+ * doesn't currently surface the queue. See `docs/rpc.md` `queue_update`.
+ */
+export interface QueueUpdateEvent extends PiBaseEvent {
+  type: "queue_update";
+  steering?: string[];
+  followUp?: string[];
+}
+
+/**
+ * Compaction begins. Pi is about to summarize and discard older
+ * conversation history to free context window space.
+ *
+ * `reason` is `"manual"`, `"threshold"`, or `"overflow"`. Compaction can
+ * fire between turns or mid-stream during a long tool loop.
+ */
+export interface CompactionStartEvent extends PiBaseEvent {
+  type: "compaction_start";
+  reason?: "manual" | "threshold" | "overflow" | string;
+}
+
+/**
+ * Compaction completes. Pi has replaced older history with a summary.
+ * The session's cumulative token totals (from `get_session_stats`) are
+ * unaffected — compaction only resets the model's context window, not
+ * the historical token cost. `tokensBefore` records what was discarded.
+ */
+export interface CompactionEndEvent extends PiBaseEvent {
+  type: "compaction_end";
+  reason?: "manual" | "threshold" | "overflow" | string;
+  aborted?: boolean;
+  willRetry?: boolean;
+  result?: {
+    summary?: string;
+    firstKeptEntryId?: string;
+    tokensBefore?: number;
+    details?: unknown;
+  };
+}
+
+/**
+ * Auto-retry begins after a transient provider error (overloaded, rate
+ * limit, 5xx). Informational — gravity could surface as a status
+ * indicator but currently just logs.
+ */
+export interface AutoRetryStartEvent extends PiBaseEvent {
+  type: "auto_retry_start";
+  attempt?: number;
+  maxAttempts?: number;
+  delayMs?: number;
+  errorMessage?: string;
+}
+
+/** Auto-retry completes. `success` reports the outcome. */
+export interface AutoRetryEndEvent extends PiBaseEvent {
+  type: "auto_retry_end";
+  success?: boolean;
+  attempt?: number;
+  finalError?: string;
+}
+
+/** An extension threw an error. Logged; no gravity surface. */
+export interface ExtensionErrorEvent extends PiBaseEvent {
+  type: "extension_error";
+  extensionPath?: string;
+  event?: string;
+  error?: string;
 }
 
 /**
@@ -306,6 +386,12 @@ export type PiEvent =
   | ExtensionUIRequestEvent
   | ErrorEvent
   | BranchUpdateEvent
+  | QueueUpdateEvent
+  | CompactionStartEvent
+  | CompactionEndEvent
+  | AutoRetryStartEvent
+  | AutoRetryEndEvent
+  | ExtensionErrorEvent
   | PiBaseEvent; // fallback for unknown events
 
 // ── Translation result types ────────────────────────────────────────

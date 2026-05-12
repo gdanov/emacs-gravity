@@ -328,33 +328,33 @@ Implemented:
 - [x] **Multi-session pi** — N concurrent pi processes, one per gravity session
 - [x] **Extension UI bridge** — `confirm`/`select` routed through gravity inbox
 
-### Required primitives (prerequisite — not yet implemented)
+### Spine primitives (implemented)
 
-The boundary mapping above names three primitives that **do not exist in `state/session.ts` today**:
+Three primitives in `state/session.ts` own all turn-boundary mutations:
 
-- `openTurn(session)` — create an empty `TurnNode`, append to `session.turns`, freeze the previous turn if any. Emits `add_turn` (+ `freeze_turn` for prev).
-- `attachPrompt(session, text)` — set `prompt` on the current (last) turn. Emits `add_prompt`. Idempotent / late-arrival safe: if called twice for the same turn, second call wins (or no-ops if text already set).
-- `closeTurn(session, stopText, stopThinking, usage)` — set `stop_text`/`stop_thinking`/`token_in`/`token_out`, set `frozen=true`. Emits `set_turn_stop` + `set_turn_tokens` + `freeze_turn`.
+- `openTurn(session)` — creates an empty `TurnNode`, freezes the previous turn if any (the defensive freeze guards against the restart hazard). Emits `freeze_turn` (prev, if applicable) + `add_turn`.
+- `attachPrompt(session, entry)` — attaches a prompt to the current (last) turn. Does NOT create a new turn. Idempotent: if the current turn already has a prompt, no-op (boundary survives, no relabel).
+- `closeTurn(session, { stopText, stopThinking, tokenIn, tokenOut })` — stamps stop text/thinking, records tokens, sets `frozen=true`. Emits `set_turn_stop` + `set_turn_tokens` (if usage) + `freeze_turn`.
 
-Today's `addPrompt` (creates turn AND attaches prompt — entangled) and `finalizeLastPrompt` (sets stop_text, **does not freeze**) cover overlapping ground but with the wrong shape for the new mapping. The pending items below assume these primitives exist; introducing them is step 0 of the migration.
+`addPrompt` is now `openTurn + attachPrompt` (used by Claude Code's UserPromptSubmit where boundary + label arrive atomically). `finalizeLastPrompt` is now `closeTurn` (used by CC's Stop), so CC's Stop path freezes the turn too — the latent bug masked by CC's tight prompt cadence is fixed.
 
-Pending (matches the boundary mapping in this doc):
+Done (boundary mapping wired end-to-end):
 
-- [ ] **Introduce `openTurn` / `attachPrompt` / `closeTurn` in `state/session.ts`** — see above. Step 0 for everything else here.
-- [ ] **`agent_start` opens a turn directly** — replace `accAgentStart` → `SessionStart` emission with a real `openTurn` mutation. Stop using `SessionStart` as a per-prompt boundary signal.
-- [ ] **`agent_end` freezes the turn** — `accAgentEnd` (→ Stop) must call `closeTurn(stopText, stopThinking, usage)` which sets `frozen=true` and emits `freeze_turn`. Do not rely on the next `addPrompt` to freeze. **Token usage source**: walk `agent_end.messages[]` and read `usage` off the trailing `AssistantMessage` — there is no `agent_end.result.usage` (current code reads `e.result?.usage`, which is always undefined).
-- [ ] **`message_start` accepts `content: string`** — current translator only handles array form, silently drops string-form user messages. With the new mapping the boundary survives the drop, but the prompt label is still missed.
-- [ ] **Remove the `isPi` special case** in `event-handler.ts:handleSessionStart` once `SessionStart` no longer fires per pi prompt.
-- [ ] **Apply `freeze on Stop` to Claude Code too** — same latent bug, masked by CC's tight prompt cadence.
+- [x] **Spine primitives in `state/session.ts`** — `openTurn`, `attachPrompt`, `closeTurn` introduced.
+- [x] **`agent_start` opens a turn directly** — `accAgentStart` emits `TurnOpen` (new internal hook event), handler calls `openTurn`. `SessionStart` for pi is synthesized exactly once by `startPiSession`, never per prompt.
+- [x] **`agent_end` freezes the turn** — `accAgentEnd` emits `TurnClose`, handler calls `closeTurn(stopText, stopThinking, { tokenIn, tokenOut })`. Token usage extracted from `agent_end.messages[]` trailing AssistantMessage (camelCase→snake_case mapping); legacy `result.usage` kept as defensive fallback.
+- [x] **`message_start` accepts `content: string`** — translator handles both string and array forms per pi's `UserMessage` shape.
+- [x] **Removed the `isPi` special case** in `event-handler.ts:handleSessionStart`.
+- [x] **Freeze on Stop for Claude Code** — `finalizeLastPrompt` routed through `closeTurn`, so CC's Stop freezes the turn.
+- [x] **Restart guard via defensive freeze** — `openTurn` freezes any prior unfrozen turn. If a pi process dies mid-turn and is respawned, the next `agent_start` cannot stack a new turn on top of a stale unfrozen one.
+- [x] **Pending UI dialog cleanup on pi exit** — already implemented in `gravity-server.ts`'s `onLifecycle` "stop"/"error" branch: iterates `pendingPiUIResponses`, filters by `sessionId`, removes each inbox item and broadcasts `inbox.removed`.
 
-### Gaps and parity TODOs (not blocking the spine, but tracked here)
+### Remaining gaps and parity TODOs
 
-- [ ] **Restart / crash recovery.** Spec the behavior when a pi subprocess dies mid-turn and is respawned. With the `isPi` gate skipping `SessionStart` reset, the next spawn's first `agent_start` would land on top of a still-open stale turn — the exact bug the new spine claims to fix returns under restart. Options: (a) on subprocess exit, synthesize a `closeTurn` for any unfrozen turn; (b) on subprocess respawn, treat the first `agent_start` as a hard reset; (c) make `openTurn` itself freeze a prior unfrozen turn defensively. Option (c) is cheapest and most local.
-- [ ] **Pending UI dialog cleanup on pi exit.** The doc claims "any pending UI dialogs are dropped from the inbox" on pi exit. Verify (or implement) explicit cleanup in `spawn.ts`/`mod.ts` exit handlers — currently not obvious from the code.
-- [ ] **`agent_end.messages[]` source-of-truth.** Beyond token usage, the trailing `AssistantMessage` also carries `stopReason`. Decide whether gravity surfaces `stopReason` (e.g. to distinguish "model stopped" from "budget exhausted" from "abort").
+- [x] **Unmapped documented events** — explicit no-op handlers added for `queue_update`, `compaction_start`/`compaction_end`, `auto_retry_start`/`auto_retry_end`, `extension_error`. They log to stderr today; no patches emitted. **Not done**: emit a synthetic prompt-like marker on `compaction_end` so the turn tree shows the compaction boundary, and decide whether to reset `set_turn_tokens` baseline.
+- [ ] **`agent_end.messages[]` `stopReason` surface.** Beyond token usage, the trailing `AssistantMessage` carries `stopReason` (`"stop" | "length" | "toolUse" | "error" | "aborted"`). Decide whether gravity surfaces this (e.g. to distinguish "model stopped" from "budget exhausted" from "abort"). Translator computes it but discards the value.
 - [ ] **`message_end role=assistant` → per-step token accounting.** Pi emits `message_end` with full `usage` and `stopReason` for every inner LLM call. If we ever want per-step (not just per-turn) token attribution, this is the hook. Not needed for spine.
-- [ ] **Undocumented events `model_select` / `branch_update`.** Translator handles them but they don't appear in pi's documented vocabulary. Either confirm they exist (RPC-private?) and document, or delete the handlers.
-- [ ] **Unmapped documented events: `queue_update`, `compaction_start` / `compaction_end`, `auto_retry_start` / `auto_retry_end`, `extension_error`.** All in `docs/rpc.md`, none in the translator. Most gravity-relevant: `compaction_*` resets token accounting and inserts a summary — currently invisible. Minimum: log. Better: emit a `set_turn_tokens` reset and a synthetic prompt-like marker so the turn tree shows a compaction boundary.
+- [ ] **`model_select` / `branch_update` provenance.** Annotated in code as extension-channel events (pi's source emits them via `_extensionRunner.emit`, not as core session events). Handlers retained defensively. Verify by running with verbose stdout whether these actually appear in pi 0.74's RPC-mode output; delete if not.
 - [ ] **`tool_execution_update` streaming output.** Currently dropped. Claude Code's `PostToolUse` delivers full bash output as one payload, so users see it; in pi the streaming `_update` events are the only delivery path and we ignore them. Decide: surface into `tool.result` accumulator, or accept the visibility gap.
 
 ## Feature Parity with Claude Code
