@@ -7,6 +7,12 @@ const __filename = __fileURLToPath(import.meta.url);
 const __dirname = __dirnameFn(__filename);
 
 var __defProp = Object.defineProperty;
+var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+}) : x)(function(x) {
+  if (typeof require !== "undefined") return require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
 var __export = (target, all3) => {
   for (var name in all3)
     __defProp(target, name, { get: all3[name], enumerable: true });
@@ -7271,6 +7277,7 @@ function createAccState(sessionId, cwd, effortLevel = "medium") {
   return {
     sessionId,
     cwd,
+    branch: null,
     modelName: null,
     effortLevel,
     pendingAssistantText: "",
@@ -7405,6 +7412,7 @@ function accAgentStart(state) {
       session_id: state.sessionId,
       cwd: state.cwd,
       source: "pi",
+      branch: state.branch ?? void 0,
       model: state.modelName ?? void 0,
       effort_level: state.effortLevel
     },
@@ -7435,6 +7443,10 @@ function accAgentEnd(state, resultType, usage, error) {
     hookData,
     sessionId: state.sessionId
   };
+}
+function accSetBranch(state, branch) {
+  state.branch = branch;
+  return state;
 }
 
 // src/pi-driver/hook-translator.ts
@@ -7550,6 +7562,11 @@ function translatePiEvent(event, state) {
       const e = event;
       process.stderr.write(`[pi-adapter] error event: ${e.error}
 `);
+      return { kind: "noop" };
+    }
+    case "branch_update": {
+      const e = event;
+      accSetBranch(state, e.branch);
       return { kind: "noop" };
     }
     default:
@@ -7708,9 +7725,7 @@ function startPiDriver(options) {
     stop: () => {
       return driver.stop();
     },
-    getMetadata: () => {
-      return metadata;
-    }
+    getAccState: () => state
   };
 }
 
@@ -7791,11 +7806,12 @@ var program = Effect_exports.gen(function* () {
     }
     const method = request3.method;
     const sendResponse = (payload) => {
-      if (!activePiDriver) {
-        logMsg(`pi extension_ui_response: no active driver to send to (request id=${request3.id})`, "warn");
+      const driver = piDrivers.get(sessionId);
+      if (!driver) {
+        logMsg(`pi extension_ui_response: no driver for session ${sessionId} (request id=${request3.id})`, "warn");
         return;
       }
-      activePiDriver.sendExtensionUIResponse({ id: request3.id, ...payload });
+      driver.sendExtensionUIResponse({ id: request3.id, ...payload });
     };
     switch (method) {
       case "confirm": {
@@ -7816,7 +7832,7 @@ var program = Effect_exports.gen(function* () {
             pi_ui: { method, id: request3.id, options: ["Allow", "Block"] }
           }
         );
-        pendingPiUIResponses.set(item.id, { piRequestId: request3.id, method });
+        pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request3.id, method });
         terminals.broadcast({ type: "inbox.added", item });
         break;
       }
@@ -7839,7 +7855,7 @@ var program = Effect_exports.gen(function* () {
             pi_ui: { method, id: request3.id, options }
           }
         );
-        pendingPiUIResponses.set(item.id, { piRequestId: request3.id, method });
+        pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request3.id, method });
         terminals.broadcast({ type: "inbox.added", item });
         break;
       }
@@ -7868,6 +7884,55 @@ var program = Effect_exports.gen(function* () {
         logMsg(`pi extension_ui_request unknown method ${method} \u2014 cancelling`, "warn");
         sendResponse({ cancelled: true });
     }
+  };
+  const captureBranch = (sessionId, sessionFile, driver) => {
+    const attemptRead = (attempt = 0) => {
+      if (piDrivers.get(sessionId) !== driver) return;
+      try {
+        const { readFileSync: readFileSync2 } = __require("fs");
+        let branch = null;
+        try {
+          const fd = __require("fs").openSync(sessionFile, "r");
+          const buf = Buffer.alloc(64 * 1024);
+          const n = __require("fs").readSync(fd, buf, 0, buf.length, 0);
+          __require("fs").closeSync(fd);
+          if (n > 0) {
+            const firstLine = buf.toString("utf-8", 0, n).split("\n")[0];
+            if (firstLine) {
+              const obj = JSON.parse(firstLine);
+              branch = obj.gitBranch ?? null;
+            }
+          }
+        } catch {
+        }
+        if (branch === null && attempt < 5) {
+          setTimeout(() => attemptRead(attempt + 1), 200 * (attempt + 1));
+          return;
+        }
+        if (branch !== null) {
+          const accState = driver.getAccState();
+          accState.branch = branch;
+        }
+        const session = store.get(sessionId);
+        if (session && branch !== null) {
+          const patches = updateMeta(session, { branch });
+          if (patches.length > 0) {
+            if (PULL_MODE) {
+              const stored = store.appendPatches(sessionId, patches);
+              const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+              terminals.signalChanged("session", sessionId, seq);
+            } else {
+              terminals.broadcast({ type: "session.update", sessionId, patches });
+            }
+          }
+        }
+      } catch (err) {
+        if (attempt < 3) {
+          setTimeout(() => attemptRead(attempt + 1), 200 * (attempt + 1));
+        }
+      }
+    };
+    setImmediate(() => attemptRead());
   };
   const applyPiSessionStats = (sessionId, stats) => {
     const session = store.get(sessionId);
@@ -7921,13 +7986,9 @@ var program = Effect_exports.gen(function* () {
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
-  let activePiDriver = null;
+  const piDrivers = /* @__PURE__ */ new Map();
   const pendingPiUIResponses = /* @__PURE__ */ new Map();
   const startPiSession = (options) => {
-    if (activePiDriver) {
-      logMsg(`Pi session already running \u2014 use pi.abort first`, "warn");
-      return null;
-    }
     const sessionId = generateSessionId2();
     const cwd = options.cwd ?? process.cwd();
     const thinking = options.thinkingLevel ?? "medium";
@@ -7959,8 +8020,9 @@ var program = Effect_exports.gen(function* () {
         handlePiTranslation(sessionId, result3);
         if (result3.hookEvent === "Stop") {
           setImmediate(() => {
-            if (!activePiDriver) return;
-            activePiDriver.getSessionStats().then(
+            const d = piDrivers.get(sessionId);
+            if (!d) return;
+            d.getSessionStats().then(
               (stats) => applyPiSessionStats(sessionId, stats),
               (err) => logMsg(`pi get_session_stats failed: ${err.message}`, "warn")
             );
@@ -7973,23 +8035,24 @@ var program = Effect_exports.gen(function* () {
         } else if (event === "stop" || event === "error") {
           if (event === "error") logMsg(`Pi session error`, "error");
           else logMsg(`Pi session ended: ${sessionId}`);
-          for (const [itemId] of pendingPiUIResponses) {
+          for (const [itemId, entry] of pendingPiUIResponses) {
+            if (entry.sessionId !== sessionId) continue;
             inbox.remove(itemId);
             terminals.broadcast({ type: "inbox.removed", itemId });
+            pendingPiUIResponses.delete(itemId);
           }
-          pendingPiUIResponses.clear();
           terminals.broadcast({
             type: "pi.session",
             sessionId,
             event: "stopped"
           });
-          activePiDriver = null;
+          piDrivers.delete(sessionId);
         }
       }
     });
-    activePiDriver = driver;
+    piDrivers.set(sessionId, driver);
     const captureSessionFile = (attempt = 0) => {
-      if (!activePiDriver || activePiDriver !== driver) return;
+      if (piDrivers.get(sessionId) !== driver) return;
       driver.getState().then((state) => {
         const f = state.sessionFile;
         if (typeof f === "string" && f.length > 0) {
@@ -8004,6 +8067,7 @@ var program = Effect_exports.gen(function* () {
               terminals.broadcast({ type: "session.update", sessionId, patches });
             }
           }
+          captureBranch(sessionId, f, driver);
         } else if (attempt < 3) {
           setTimeout(() => captureSessionFile(attempt + 1), 500 * (attempt + 1));
         }
@@ -8018,49 +8082,45 @@ var program = Effect_exports.gen(function* () {
     setImmediate(() => captureSessionFile());
     return sessionId;
   };
-  const piSessionPrompt = (text, images) => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
+  const getPiDriver = (sessionId, op) => {
+    const d = piDrivers.get(sessionId);
+    if (!d) {
+      logMsg(`${op}: no pi driver for session ${sessionId}`, "warn");
+      return null;
     }
-    activePiDriver.prompt(text, images).catch((err) => {
+    return d;
+  };
+  const piSessionPrompt = (sessionId, text, images) => {
+    const d = getPiDriver(sessionId, "pi.prompt");
+    if (!d) return;
+    d.prompt(text, images).catch((err) => {
       logMsg(`pi.prompt error: ${err.message}`, "error");
     });
   };
-  const piSessionSteer = (text) => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
-    }
-    activePiDriver.steer(text);
+  const piSessionSteer = (sessionId, text) => {
+    const d = getPiDriver(sessionId, "pi.steer");
+    if (!d) return;
+    d.steer(text);
   };
-  const piSessionAbort = () => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session to abort`, "warn");
-      return;
-    }
-    activePiDriver.abort();
+  const piSessionAbort = (sessionId) => {
+    const d = getPiDriver(sessionId, "pi.abort");
+    if (!d) return;
+    d.abort();
   };
-  const piSessionSetThinking = (level) => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
-    }
-    activePiDriver.setEffortLevel(level);
+  const piSessionSetThinking = (sessionId, level) => {
+    const d = getPiDriver(sessionId, "pi.set-thinking");
+    if (!d) return;
+    d.setEffortLevel(level);
   };
-  const piSessionSetModel = (provider, modelId) => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
-    }
-    activePiDriver.setModel(provider, modelId);
+  const piSessionSetModel = (sessionId, provider, modelId) => {
+    const d = getPiDriver(sessionId, "pi.set-model");
+    if (!d) return;
+    d.setModel(provider, modelId);
   };
-  const piSessionCompact = (customInstructions) => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session to compact`, "warn");
-      return;
-    }
-    activePiDriver.compact(customInstructions).then(
+  const piSessionCompact = (sessionId, customInstructions) => {
+    const d = getPiDriver(sessionId, "pi.compact");
+    if (!d) return;
+    d.compact(customInstructions).then(
       (data) => {
         const summary = data.summary ? ` \u2014 ${data.summary.substring(0, 80)}\u2026` : "";
         logMsg(`pi compact done (tokensBefore=${data.tokensBefore ?? "?"})${summary}`);
@@ -8068,43 +8128,40 @@ var program = Effect_exports.gen(function* () {
       (err) => logMsg(`pi compact failed: ${err.message}`, "error")
     );
   };
-  const piSessionNewSession = () => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session for new_session`, "warn");
-      return;
-    }
-    activePiDriver.newSession().then(
+  const piSessionNewSession = (sessionId) => {
+    const d = getPiDriver(sessionId, "pi.new-session");
+    if (!d) return;
+    d.newSession().then(
       (ok) => {
         if (!ok) logMsg(`pi new_session cancelled by extension`, "warn");
       },
       (err) => logMsg(`pi new_session failed: ${err.message}`, "error")
     );
   };
-  const piSessionResume = (sessionPath) => {
+  const piSessionResume = (sessionPath, sessionId) => {
     if (!sessionPath) {
       logMsg(`pi.resume called without sessionPath`, "warn");
       return;
     }
-    if (activePiDriver) {
-      activePiDriver.switchSession(sessionPath).then(
+    const driver = sessionId ? piDrivers.get(sessionId) : void 0;
+    if (driver) {
+      driver.switchSession(sessionPath).then(
         (ok) => {
           if (!ok) logMsg(`pi switch_session cancelled by extension`, "warn");
         },
         (err) => logMsg(`pi switch_session failed: ${err.message}`, "error")
       );
     } else {
-      const sessionId = startPiSession({ resumeSession: sessionPath });
-      if (sessionId) {
-        logMsg(`Pi session ${sessionId} spawned resuming ${sessionPath}`);
+      const newId = startPiSession({ resumeSession: sessionPath });
+      if (newId) {
+        logMsg(`Pi session ${newId} spawned resuming ${sessionPath}`);
       }
     }
   };
-  const stopPiSession = async () => {
-    if (!activePiDriver) {
-      return;
-    }
-    await activePiDriver.stop();
-    activePiDriver = null;
+  const stopPiSession = async (sessionId) => {
+    const d = piDrivers.get(sessionId);
+    if (!d) return;
+    await d.stop();
   };
   const generateSessionId2 = () => {
     const now = Date.now().toString(36);
@@ -8287,10 +8344,11 @@ var program = Effect_exports.gen(function* () {
         const { itemId, decision, message, updatedPermissions } = msg;
         const piUi = pendingPiUIResponses.get(itemId);
         if (piUi) {
-          if (!activePiDriver) {
-            logMsg(`action.permission for pi UI ${piUi.piRequestId}: no active driver`, "warn");
+          const driver = piDrivers.get(piUi.sessionId);
+          if (!driver) {
+            logMsg(`action.permission for pi UI ${piUi.piRequestId}: no driver for session ${piUi.sessionId}`, "warn");
           } else {
-            activePiDriver.sendExtensionUIResponse({
+            driver.sendExtensionUIResponse({
               id: piUi.piRequestId,
               confirmed: decision === "allow"
             });
@@ -8313,11 +8371,12 @@ var program = Effect_exports.gen(function* () {
         const { itemId, answers } = msg;
         const piUi = pendingPiUIResponses.get(itemId);
         if (piUi) {
-          if (!activePiDriver) {
-            logMsg(`action.question for pi UI ${piUi.piRequestId}: no active driver`, "warn");
+          const driver = piDrivers.get(piUi.sessionId);
+          if (!driver) {
+            logMsg(`action.question for pi UI ${piUi.piRequestId}: no driver for session ${piUi.sessionId}`, "warn");
           } else {
             const value = answers[0];
-            activePiDriver.sendExtensionUIResponse({
+            driver.sendExtensionUIResponse({
               id: piUi.piRequestId,
               ...value !== void 0 ? { value } : { cancelled: true }
             });
@@ -8432,56 +8491,59 @@ var program = Effect_exports.gen(function* () {
         if (sessionId) {
           logMsg(`Pi session started via terminal: ${sessionId}`);
         } else {
-          logMsg(`Pi session start failed \u2014 already running?`, "warn");
+          logMsg(`Pi session start failed`, "warn");
           terminals.sendTo(conn, {
             type: "pi.session",
             sessionId: "",
             event: "rejected",
-            reason: "Pi session already running. Stop it first (S k) or use claude-gravity--pi-start-replacing."
+            reason: "Pi session start failed (see server log)."
           });
         }
         break;
       }
       case "pi.prompt": {
         const m = msg;
-        piSessionPrompt(m.text, m.images);
+        piSessionPrompt(m.sessionId, m.text, m.images);
         break;
       }
       case "pi.steer": {
         const m = msg;
-        piSessionSteer(m.text);
+        piSessionSteer(m.sessionId, m.text);
         break;
       }
       case "pi.abort": {
-        piSessionAbort();
+        const m = msg;
+        piSessionAbort(m.sessionId);
         break;
       }
       case "pi.set-thinking": {
         const m = msg;
-        piSessionSetThinking(m.level);
+        piSessionSetThinking(m.sessionId, m.level);
         break;
       }
       case "pi.set-model": {
         const m = msg;
-        piSessionSetModel(m.provider, m.modelId);
+        piSessionSetModel(m.sessionId, m.provider, m.modelId);
         break;
       }
       case "pi.resume": {
         const m = msg;
-        piSessionResume(m.sessionPath);
+        piSessionResume(m.sessionPath, m.sessionId);
         break;
       }
       case "pi.compact": {
         const m = msg;
-        piSessionCompact(m.customInstructions);
+        piSessionCompact(m.sessionId, m.customInstructions);
         break;
       }
       case "pi.new-session": {
-        piSessionNewSession();
+        const m = msg;
+        piSessionNewSession(m.sessionId);
         break;
       }
       case "pi.stop": {
-        stopPiSession().catch((err) => logMsg(`pi.stop failed: ${err.message}`, "error"));
+        const m = msg;
+        stopPiSession(m.sessionId).catch((err) => logMsg(`pi.stop failed: ${err.message}`, "error"));
         break;
       }
     }

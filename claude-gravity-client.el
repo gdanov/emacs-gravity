@@ -413,161 +413,11 @@ Dispatches to the appropriate server action based on hookEventName."
 
 
 ;;; ── Pi session control ─────────────────────────────────────────────
-
-(defvar claude-gravity--pi-session-id nil
-  "Session ID of the active pi session, or nil if none.")
-
-(defun claude-gravity--pi-start (&optional cwd thinking-level)
-  "Start a new pi session.
-CWD is the working directory (defaults to `default-directory').
-THINKING-LEVEL is the thinking level (off, minimal, low, medium, high, xhigh).
-
-If a pi session is already running (gravity-server enforces a singleton),
-prompts whether to stop it and start a new one in CWD. Picking no aborts
-the start. Returns nil — the new session id arrives asynchronously via
-the pi.session \"started\" broadcast and is stored in
-`claude-gravity--pi-session-id'."
-  (interactive
-   (list (read-directory-name "Working directory: "
-                              (or (claude-gravity--normalize-cwd default-directory)
-                                  default-directory))))
-  (claude-gravity--ensure-server)
-  (cond
-   ;; No singleton conflict — start directly.
-   ((null claude-gravity--pi-session-id)
-    (claude-gravity--pi-start-send cwd thinking-level))
-   ;; Singleton busy. Offer to replace.
-   ((let* ((existing-id claude-gravity--pi-session-id)
-           (existing (gethash existing-id claude-gravity--sessions))
-           (existing-cwd (and existing (plist-get existing :cwd)))
-           (existing-project (and existing (plist-get existing :project))))
-      (yes-or-no-p
-       (format "Pi already running%s. Stop it and start new in %s? "
-               (cond (existing-project (format " in %s" existing-project))
-                     (existing-cwd (format " in %s" existing-cwd))
-                     (t ""))
-               (file-name-nondirectory
-                (directory-file-name (or cwd default-directory))))))
-    ;; Stop the existing pi process; the new start fires after pi.session
-    ;; "stopped" arrives (which clears claude-gravity--pi-session-id).
-    (claude-gravity--pi-start-after-stop cwd thinking-level))
-   (t
-    (message "Pi: start cancelled (existing session left alone)"))))
-
-(defun claude-gravity--pi-start-send (cwd thinking-level)
-  "Internal: send the pi.start message without any singleton checks."
-  (let ((normalized (and cwd (claude-gravity--normalize-cwd cwd))))
-    (claude-gravity--send-to-server
-     `((type . "pi.start")
-       ,@(when normalized `((cwd . ,normalized)))
-       ,@(when thinking-level `((thinkingLevel . ,thinking-level)))))
-    (claude-gravity--log 'info "Pi: starting session (cwd=%s)" (or normalized default-directory))))
-
-(defun claude-gravity--pi-start-after-stop (cwd thinking-level)
-  "Internal: send pi.stop, then pi.start once the singleton is freed.
-Waits up to 5s for `claude-gravity--pi-session-id' to clear before
-issuing pi.start. Falls back to a direct start if the clear doesn't
-arrive — the server's singleton guard will reject it cleanly."
-  (claude-gravity--log 'info "Pi: stopping current session before starting in %s"
-                       (or cwd default-directory))
-  (claude-gravity--pi-stop)
-  ;; Poll briefly for the singleton to clear.
-  (let ((deadline (time-add (current-time) 5.0)))
-    (while (and claude-gravity--pi-session-id
-                (time-less-p (current-time) deadline))
-      (sleep-for 0.1))
-    (if claude-gravity--pi-session-id
-        (claude-gravity--log 'warn
-                             "Pi: previous session did not stop within 5s; attempting start anyway")
-      (claude-gravity--log 'info "Pi: previous session stopped, proceeding"))
-    (claude-gravity--pi-start-send cwd thinking-level)))
-
-(defun claude-gravity--pi-prompt (text &optional images)
-  "Send TEXT as a prompt to the active pi session.
-IMAGES is an optional list of image URLs."
-  (interactive "sPrompt: ")
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session. Use `claude-gravity--pi-start' first.")
-    (claude-gravity--log 'info "Pi: sending prompt (%d chars)" (length text))
-    (claude-gravity--send-to-server
-     `((type . "pi.prompt")
-       (sessionId . ,claude-gravity--pi-session-id)
-       (text . ,text)
-       ,@(when images `((images . ,images)))))))
-
-(defun claude-gravity--pi-steering (text)
-  "Send TEXT as a steering message to the active pi session.
-Steering interrupts/guides the current response."
-  (interactive "sSteering: ")
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: sending steering (%d chars)" (length text))
-    (claude-gravity--send-to-server
-     `((type . "pi.steer")
-       (sessionId . ,claude-gravity--pi-session-id)
-       (text . ,text)))))
-
-(defun claude-gravity--pi-abort ()
-  "Abort the current turn of the active pi session (RPC abort).
-Pi stays alive; only the in-flight LLM operation is interrupted.
-Use `claude-gravity--pi-stop' to terminate pi entirely."
-  (interactive)
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: aborting current turn")
-    (claude-gravity--send-to-server
-     `((type . "pi.abort")
-       (sessionId . ,claude-gravity--pi-session-id)))))
-
-(defun claude-gravity--pi-stop ()
-  "Stop the active pi session — kills the pi process.
-This is the unified \"end session\" verb for pi, matching tmux pane
-kill and daemon stop semantics. Use `claude-gravity--pi-abort' to
-just interrupt the current turn while keeping pi alive."
-  (interactive)
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: stopping session (kill process)")
-    (claude-gravity--send-to-server
-     `((type . "pi.stop")
-       (sessionId . ,claude-gravity--pi-session-id)))))
-
-(defun claude-gravity--pi-set-thinking (level)
-  "Set the thinking level for the active pi session.
-LEVEL is one of: off, minimal, low, medium, high, xhigh."
-  (interactive (completing-read "Thinking level: "
-                                '("off" "minimal" "low" "medium" "high" "xhigh")
-                                nil t "medium"))
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: setting thinking level to %s" level)
-    (claude-gravity--send-to-server
-     `((type . "pi.set-thinking")
-       (sessionId . ,claude-gravity--pi-session-id)
-       (level . ,level)))))
-
-(defun claude-gravity--pi-status ()
-  "Show the status of the active pi session."
-  (interactive)
-  (if claude-gravity--pi-session-id
-      (message "Pi session active: %s" claude-gravity--pi-session-id)
-    (message "No active pi session.")))
-
-(defun claude-gravity--pi-set-model (provider model-id)
-  "Switch the active pi session to PROVIDER + MODEL-ID.
-Pi's `set_model' RPC takes provider and model id as separate fields
-(see pi RPC docs).  Interactive callers are prompted for both."
-  (interactive
-   (list (read-string "Provider (anthropic/openai/google/...): " "anthropic")
-         (read-string "Model id: ")))
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: set-model provider=%s modelId=%s" provider model-id)
-    (claude-gravity--send-to-server
-     `((type . "pi.set-model")
-       (sessionId . ,claude-gravity--pi-session-id)
-       (provider . ,provider)
-       (modelId . ,model-id)))))
+;;
+;; Pi supports N concurrent sessions, just like Claude. There is no
+;; "active" pi session — every command takes a sessionId from the
+;; caller (typically the session at point, via the daemon.el unified
+;; dispatcher). The server-side pi driver map is keyed by sessionId.
 
 (defun claude-gravity--current-session-pi-p ()
   "Return non-nil if the session at point is a pi session.
@@ -581,43 +431,171 @@ checks the buffer-local session id first, then the magit section."
       (let ((session (gethash sid claude-gravity--sessions)))
         (and session (equal (plist-get session :source) "pi"))))))
 
-(defun claude-gravity--pi-compact (&optional custom-instructions)
-  "Manually compact pi's conversation context (`compact' RPC).
+(defun claude-gravity--current-pi-session-id ()
+  "Return the sessionId of the pi session at point, or signal a user error.
+Used by interactive pi commands to derive their target session."
+  (let ((sid (or claude-gravity--buffer-session-id
+                 (let ((section (magit-current-section)))
+                   (when (and section (eq (oref section type) 'session-entry))
+                     (oref section value))))))
+    (unless sid
+      (user-error "No session at point"))
+    (let ((session (gethash sid claude-gravity--sessions)))
+      (unless (and session (equal (plist-get session :source) "pi"))
+        (user-error "Session at point is not a pi session"))
+      sid)))
+
+(defun claude-gravity--pi-start (&optional cwd thinking-level)
+  "Start a new pi session.
+CWD is the working directory (defaults to the project root of
+`default-directory').  THINKING-LEVEL is one of: off, minimal, low,
+medium, high, xhigh.
+
+The new session id arrives asynchronously via the pi.session
+\"started\" broadcast and shows up in the overview like any other
+session. N concurrent pi sessions are allowed."
+  (interactive
+   (list (read-directory-name "Working directory: "
+                              (or (claude-gravity--normalize-cwd default-directory)
+                                  default-directory))))
+  (claude-gravity--ensure-server)
+  (let ((normalized (and cwd (claude-gravity--normalize-cwd cwd))))
+    (claude-gravity--send-to-server
+     `((type . "pi.start")
+       ,@(when normalized `((cwd . ,normalized)))
+       ,@(when thinking-level `((thinkingLevel . ,thinking-level)))))
+    (claude-gravity--log 'info "Pi: starting session (cwd=%s)" (or normalized default-directory))))
+
+(defun claude-gravity--pi-prompt (session-id text &optional images)
+  "Send TEXT as a prompt to pi session SESSION-ID.
+IMAGES is an optional list of image URLs.  Interactive callers
+target the session at point."
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (read-string "Prompt: ")))
+  (claude-gravity--log 'info "Pi[%s]: sending prompt (%d chars)" session-id (length text))
+  (claude-gravity--send-to-server
+   `((type . "pi.prompt")
+     (sessionId . ,session-id)
+     (text . ,text)
+     ,@(when images `((images . ,images))))))
+
+(defun claude-gravity--pi-steering (session-id text)
+  "Send TEXT as a steering message to pi session SESSION-ID.
+Steering interrupts/guides the current response."
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (read-string "Steering: ")))
+  (claude-gravity--log 'info "Pi[%s]: sending steering (%d chars)" session-id (length text))
+  (claude-gravity--send-to-server
+   `((type . "pi.steer")
+     (sessionId . ,session-id)
+     (text . ,text))))
+
+(defun claude-gravity--pi-abort (session-id)
+  "Abort the current turn of pi session SESSION-ID (RPC abort).
+Pi stays alive; only the in-flight LLM operation is interrupted.
+Use `claude-gravity--pi-stop' to terminate pi entirely."
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (claude-gravity--log 'info "Pi[%s]: aborting current turn" session-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.abort")
+     (sessionId . ,session-id))))
+
+(defun claude-gravity--pi-stop (session-id)
+  "Stop pi session SESSION-ID — kills its pi process.
+This is the unified \"end session\" verb for pi, matching tmux pane
+kill and daemon stop semantics. Use `claude-gravity--pi-abort' to
+just interrupt the current turn while keeping pi alive."
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (claude-gravity--log 'info "Pi[%s]: stopping session (kill process)" session-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.stop")
+     (sessionId . ,session-id))))
+
+(defun claude-gravity--pi-set-thinking (session-id level)
+  "Set the thinking LEVEL for pi session SESSION-ID.
+LEVEL is one of: off, minimal, low, medium, high, xhigh."
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (completing-read "Thinking level: "
+                          '("off" "minimal" "low" "medium" "high" "xhigh")
+                          nil t "medium")))
+  (claude-gravity--log 'info "Pi[%s]: setting thinking level to %s" session-id level)
+  (claude-gravity--send-to-server
+   `((type . "pi.set-thinking")
+     (sessionId . ,session-id)
+     (level . ,level))))
+
+(defun claude-gravity--pi-status ()
+  "List currently active pi sessions."
+  (interactive)
+  (let ((pi-sessions nil))
+    (maphash (lambda (sid s)
+               (when (equal (plist-get s :source) "pi")
+                 (push (format "%s [%s] %s"
+                               sid
+                               (or (plist-get s :project) "?")
+                               (or (plist-get s :status) ""))
+                       pi-sessions)))
+             claude-gravity--sessions)
+    (if pi-sessions
+        (message "Pi sessions (%d): %s"
+                 (length pi-sessions)
+                 (mapconcat #'identity pi-sessions ", "))
+      (message "No active pi sessions."))))
+
+(defun claude-gravity--pi-set-model (session-id provider model-id)
+  "Switch pi session SESSION-ID to PROVIDER + MODEL-ID.
+Pi's `set_model' RPC takes provider and model id as separate fields
+(see pi RPC docs).  Interactive callers are prompted for both."
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (read-string "Provider (anthropic/openai/google/...): " "anthropic")
+         (read-string "Model id: ")))
+  (claude-gravity--log 'info "Pi[%s]: set-model provider=%s modelId=%s" session-id provider model-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.set-model")
+     (sessionId . ,session-id)
+     (provider . ,provider)
+     (modelId . ,model-id))))
+
+(defun claude-gravity--pi-compact (session-id &optional custom-instructions)
+  "Manually compact pi session SESSION-ID's context (`compact' RPC).
 Pi runs an LLM-driven summarization to reduce tokens. With prefix arg,
 prompts for custom instructions to guide the summary."
   (interactive
-   (list (when current-prefix-arg
+   (list (claude-gravity--current-pi-session-id)
+         (when current-prefix-arg
            (read-string "Compaction focus (optional): "))))
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: compact%s"
-                         (if custom-instructions (format " (instructions=%s)" custom-instructions) ""))
-    (claude-gravity--send-to-server
-     `((type . "pi.compact")
-       (sessionId . ,claude-gravity--pi-session-id)
-       ,@(when (and custom-instructions (not (string-empty-p custom-instructions)))
-           `((customInstructions . ,custom-instructions)))))))
+  (claude-gravity--log 'info "Pi[%s]: compact%s" session-id
+                       (if custom-instructions (format " (instructions=%s)" custom-instructions) ""))
+  (claude-gravity--send-to-server
+   `((type . "pi.compact")
+     (sessionId . ,session-id)
+     ,@(when (and custom-instructions (not (string-empty-p custom-instructions)))
+         `((customInstructions . ,custom-instructions))))))
 
-(defun claude-gravity--pi-new-session ()
-  "Start a fresh session inside the running pi process (`new_session' RPC).
+(defun claude-gravity--pi-new-session (session-id)
+  "Start a fresh session inside pi process for SESSION-ID (`new_session' RPC).
 The pi process is reused; only the conversation state is reset.
 Roughly equivalent to Claude Code's /clear."
-  (interactive)
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (when (yes-or-no-p "Pi: start a fresh session (current conversation will be cleared)? ")
-      (claude-gravity--log 'info "Pi: new_session")
-      (claude-gravity--send-to-server
-       `((type . "pi.new-session")
-         (sessionId . ,claude-gravity--pi-session-id))))))
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (when (yes-or-no-p "Pi: start a fresh session (current conversation will be cleared)? ")
+    (claude-gravity--log 'info "Pi[%s]: new_session" session-id)
+    (claude-gravity--send-to-server
+     `((type . "pi.new-session")
+       (sessionId . ,session-id)))))
 
 (defun claude-gravity--pi-resume (session-id)
   "Resume a pi session by SESSION-ID.
 Looks up the gravity Session for SESSION-ID, reads `:pi-session-file'
 (set by gravity-server after spawn), and asks the server to load that
 file via pi's `switch_session' RPC (`pi.resume' terminal message).
-If no pi process is running, gravity-server will spawn one and pass
-the path via `--session <path>'."
+
+If a live pi driver exists for SESSION-ID, the server swaps that
+driver's working session to the recorded path. Otherwise the server
+spawns a fresh pi process resuming the path."
   (let* ((session (gethash session-id claude-gravity--sessions))
          (path (and session (plist-get session :pi-session-file))))
     (cond
@@ -626,9 +604,10 @@ the path via `--session <path>'."
      ((null path)
       (user-error "No pi-session-file recorded for %s (resume not possible)" session-id))
      (t
-      (claude-gravity--log 'info "Pi: resume sessionPath=%s" path)
+      (claude-gravity--log 'info "Pi[%s]: resume sessionPath=%s" session-id path)
       (claude-gravity--send-to-server
        `((type . "pi.resume")
+         (sessionId . ,session-id)
          (sessionPath . ,path)))))))
 
 
@@ -999,14 +978,6 @@ MSG contains sessionId and full session state."
             (accept-process-output nil 0.005)))))
     ;; Store session
     (puthash session-id session claude-gravity--sessions)
-    ;; Recover pi session id from snapshot. Pi is a server-side singleton,
-    ;; so any active pi session in a snapshot is THE pi session. This makes
-    ;; Emacs restart resilient — pi-prompt etc. work without manual recovery.
-    (when (and (equal (plist-get session :source) "pi")
-               (eq (plist-get session :status) 'active)
-               (not (equal claude-gravity--pi-session-id session-id)))
-      (claude-gravity--log 'info "Pi: recovering session id from snapshot: %s" session-id)
-      (setq claude-gravity--pi-session-id session-id))
     ;; Register tmux mapping if present
     (let ((tmux-name (plist-get session :tmux-session)))
       (when (and tmux-name (not (gethash session-id claude-gravity--tmux-sessions)))
@@ -1358,12 +1329,7 @@ Also prunes orphan sessions that the server no longer knows about."
               (when (and buf (buffer-live-p buf))
                 (kill-buffer buf)))))
         (remhash sid claude-gravity--sessions)
-        (remhash sid claude-gravity--client-subscribed-sessions)
-        ;; Clear pi-session-id if its session was orphaned (server forgot about it,
-        ;; e.g. after a server restart). Otherwise pi-prompt would target a dead id.
-        (when (equal claude-gravity--pi-session-id sid)
-          (claude-gravity--log 'info "Pi: clearing stale session id %s" sid)
-          (setq claude-gravity--pi-session-id nil))))
+        (remhash sid claude-gravity--client-subscribed-sessions)))
     ;; Render overview
     (claude-gravity--schedule-refresh)))
 
@@ -1378,8 +1344,6 @@ Also prunes orphan sessions that the server no longer knows about."
       (let ((buf (plist-get session :buffer)))
         (when (and buf (buffer-live-p buf))
           (kill-buffer buf))))
-    (when (equal claude-gravity--pi-session-id session-id)
-      (setq claude-gravity--pi-session-id nil))
     (remhash session-id claude-gravity--sessions)
     (remhash session-id claude-gravity--client-subscribed-sessions)
     (claude-gravity--schedule-refresh)))
@@ -1507,22 +1471,21 @@ Also prunes orphan sessions that the server no longer knows about."
 ;; avoiding UI freezes when the user is doing heavy work.
 
 (defun claude-gravity--handle-pi-session (msg)
-  "Handle pi.session messages from gravity-server.
-MSG contains session state updates for pi sessions.
-Updates `claude-gravity--pi-session-id' and triggers UI refresh."
+  "Handle pi.session control messages from gravity-server.
+MSG.event is one of started | stopped | rejected | update. With
+multi-session pi, started/stopped are informational — the actual
+session state arrives via session.snapshot/session.update like any
+other source. We just log and refresh the UI."
   (let* ((session-id (alist-get 'sessionId msg))
          (event (alist-get 'event msg))
          (cwd (alist-get 'cwd msg))
          (reason (alist-get 'reason msg)))
     (cond
      ((equal event "started")
-      (setq claude-gravity--pi-session-id session-id)
       (claude-gravity--log 'info "Pi: session started: %s (cwd=%s)" session-id cwd)
       (claude-gravity--schedule-refresh))
      ((equal event "stopped")
       (claude-gravity--log 'info "Pi: session stopped: %s" session-id)
-      (when (equal claude-gravity--pi-session-id session-id)
-        (setq claude-gravity--pi-session-id nil))
       (claude-gravity--schedule-refresh))
      ((equal event "rejected")
       (claude-gravity--log 'warn "Pi: start rejected: %s" (or reason "no reason given"))

@@ -36,6 +36,7 @@ import {
   accUserPromptMessage,
   accAgentEnd,
   accSetEffortLevel,
+  accSetBranch,
 } from "./turn-accumulator.js";
 
 const stamp = (state: AccState, r: TranslationResult): TranslationResult =>
@@ -197,6 +198,14 @@ export function translatePiEvent(
       return { kind: "noop" };
     }
 
+    case "branch_update": {
+      // Pi reports a git branch change. Update accumulator state so
+      // the next SessionStart carries the correct branch field.
+      const e = event as { branch: string | null };
+      accSetBranch(state, e.branch);
+      return { kind: "noop" };
+    }
+
     default:
       return { kind: "noop" };
   }
@@ -225,6 +234,7 @@ export function createSessionStart(state: AccState): TranslationResult {
     hookData: {
       session_id: state.sessionId,
       cwd: state.cwd,
+      branch: state.branch ?? undefined,
       model: state.modelName ?? undefined,
       effort_level: state.effortLevel,
     },

@@ -155,11 +155,12 @@ const program = Effect.gen(function* () {
     }
     const method = request.method;
     const sendResponse = (payload: { value?: string; confirmed?: boolean; cancelled?: boolean }): void => {
-      if (!activePiDriver) {
-        logMsg(`pi extension_ui_response: no active driver to send to (request id=${request.id})`, "warn");
+      const driver = piDrivers.get(sessionId);
+      if (!driver) {
+        logMsg(`pi extension_ui_response: no driver for session ${sessionId} (request id=${request.id})`, "warn");
         return;
       }
-      activePiDriver.sendExtensionUIResponse({ id: request.id, ...payload });
+      driver.sendExtensionUIResponse({ id: request.id, ...payload });
     };
 
     switch (method) {
@@ -181,7 +182,7 @@ const program = Effect.gen(function* () {
             pi_ui: { method, id: request.id, options: ["Allow", "Block"] },
           },
         );
-        pendingPiUIResponses.set(item.id, { piRequestId: request.id, method });
+        pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request.id, method });
         terminals.broadcast({ type: "inbox.added", item });
         break;
       }
@@ -204,7 +205,7 @@ const program = Effect.gen(function* () {
             pi_ui: { method, id: request.id, options },
           },
         );
-        pendingPiUIResponses.set(item.id, { piRequestId: request.id, method });
+        pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request.id, method });
         terminals.broadcast({ type: "inbox.added", item });
         break;
       }
@@ -240,6 +241,65 @@ const program = Effect.gen(function* () {
    * already covered by Stop's hookData.token_usage; we don't overwrite it
    * here to avoid double-counting.
    */
+  /**
+   * Extract git branch from pi's session file (first JSONL line has gitBranch)
+   * and update both the session and the driver's accumulator state.
+   * Retries until the session file has content or max attempts reached.
+   */
+  const captureBranch = (sessionId: string, sessionFile: string, driver: PiDriver): void => {
+    const attemptRead = (attempt = 0): void => {
+      if (piDrivers.get(sessionId) !== driver) return;
+      try {
+        // Read just the first line — that's where gitBranch lives
+        const { readFileSync } = require("fs") as { readFileSync: (path: string, enc: string) => string };
+        let branch: string | null = null;
+        try {
+          const fd = require("fs").openSync(sessionFile, "r");
+          const buf = Buffer.alloc(64 * 1024);
+          const n = require("fs").readSync(fd, buf, 0, buf.length, 0);
+          require("fs").closeSync(fd);
+          if (n > 0) {
+            const firstLine = buf.toString("utf-8", 0, n).split("\n")[0];
+            if (firstLine) {
+              const obj = JSON.parse(firstLine) as { gitBranch?: string | null };
+              branch = obj.gitBranch ?? null;
+            }
+          }
+        } catch {
+          // File not ready yet — retry
+        }
+        if (branch === null && attempt < 5) {
+          setTimeout(() => attemptRead(attempt + 1), 200 * (attempt + 1));
+          return;
+        }
+        // Update accumulator so subsequent SessionStarts carry branch
+        if (branch !== null) {
+          const accState = driver.getAccState();
+          accState.branch = branch;
+        }
+        // Update session metadata
+        const session = store.get(sessionId);
+        if (session && branch !== null) {
+          const patches = updateMeta(session, { branch });
+          if (patches.length > 0) {
+            if (PULL_MODE) {
+              const stored = store.appendPatches(sessionId, patches);
+              const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+              terminals.signalChanged("session", sessionId, seq);
+            } else {
+              terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+            }
+          }
+        }
+      } catch (err) {
+        if (attempt < 3) {
+          setTimeout(() => attemptRead(attempt + 1), 200 * (attempt + 1));
+        }
+      }
+    };
+    setImmediate(() => attemptRead());
+  };
+
   const applyPiSessionStats = (sessionId: string, stats: PiSessionStats): void => {
     const session = store.get(sessionId);
     if (!session) return;
@@ -299,28 +359,28 @@ const program = Effect.gen(function* () {
 
   // ── Pi driver session management ───────────────────────────────
 
-  // Mutable reference to the active pi driver (null if not running)
-  let activePiDriver: ReturnType<typeof startPiDriver> | null = null;
+  // Map of sessionId → pi driver. N concurrent pi processes are supported,
+  // one per gravity session. Each entry is owned exclusively by the lifecycle
+  // callback for that driver (which adds on start and removes on stop/error).
+  type PiDriver = ReturnType<typeof startPiDriver>;
+  const piDrivers = new Map<string, PiDriver>();
 
   /**
-   * Maps gravity inbox item id → pi extension_ui_request id + method.
-   * Populated when pi emits an `extension_ui_request`; consumed by the
-   * `action.permission` / `action.question` handlers to format and send
-   * the `extension_ui_response` back to pi (instead of writing to a
-   * hook socket like Claude Code's bidirectional flow does).
+   * Maps gravity inbox item id → originating pi session id + extension_ui
+   * request id + method. Populated when pi emits an `extension_ui_request`;
+   * consumed by the `action.permission` / `action.question` handlers to
+   * format and send the `extension_ui_response` back to the *correct* pi
+   * driver (instead of writing to a hook socket like Claude Code's
+   * bidirectional flow does).
    */
   const pendingPiUIResponses = new Map<number, {
+    sessionId: string;
     piRequestId: string;
     method: string;
   }>();
 
   /** Start a new pi session (called via terminal message). */
   const startPiSession = (options: { cwd?: string; thinkingLevel?: string; resumeSession?: string }): string | null => {
-    if (activePiDriver) {
-      logMsg(`Pi session already running — use pi.abort first`, "warn");
-      return null;
-    }
-
     const sessionId = generateSessionId();
     const cwd = options.cwd ?? process.cwd();
     const thinking = options.thinkingLevel ?? "medium";
@@ -365,8 +425,9 @@ const program = Effect.gen(function* () {
         if (result.hookEvent === "Stop") {
           // Defer to next tick so the Stop patch lands first.
           setImmediate(() => {
-            if (!activePiDriver) return;
-            activePiDriver.getSessionStats().then(
+            const d = piDrivers.get(sessionId);
+            if (!d) return;
+            d.getSessionStats().then(
               (stats) => applyPiSessionStats(sessionId, stats),
               (err) => logMsg(`pi get_session_stats failed: ${err.message}`, "warn"),
             );
@@ -379,31 +440,32 @@ const program = Effect.gen(function* () {
         } else if (event === "stop" || event === "error") {
           if (event === "error") logMsg(`Pi session error`, "error");
           else logMsg(`Pi session ended: ${sessionId}`);
-          // Cancel any pending pi UI dialogs — pi is gone, so no one to
-          // answer to. Drop the inbox items so the user isn't stuck
-          // staring at allow/deny buttons that go nowhere.
-          for (const [itemId] of pendingPiUIResponses) {
+          // Cancel only THIS driver's pending pi UI dialogs — other pi
+          // sessions' dialogs must remain intact. Iterate by entry so we
+          // can match on sessionId.
+          for (const [itemId, entry] of pendingPiUIResponses) {
+            if (entry.sessionId !== sessionId) continue;
             inbox.remove(itemId);
             terminals.broadcast({ type: "inbox.removed", itemId });
+            pendingPiUIResponses.delete(itemId);
           }
-          pendingPiUIResponses.clear();
           terminals.broadcast({
             type: "pi.session",
             sessionId,
             event: "stopped",
           } as ServerMessage);
-          activePiDriver = null;
+          piDrivers.delete(sessionId);
         }
       },
     });
 
-    activePiDriver = driver;
+    piDrivers.set(sessionId, driver);
 
     // Capture pi's on-disk session file once pi is ready. Retry a few
     // times because get_state may race with pi's session-init (it returns
     // sessionFile=null until the session is loaded). Fire-and-forget.
     const captureSessionFile = (attempt = 0): void => {
-      if (!activePiDriver || activePiDriver !== driver) return;
+      if (piDrivers.get(sessionId) !== driver) return;
       driver.getState().then((state) => {
         const f = (state as { sessionFile?: unknown }).sessionFile;
         if (typeof f === "string" && f.length > 0) {
@@ -418,6 +480,8 @@ const program = Effect.gen(function* () {
               terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
             }
           }
+          // Also extract gitBranch from the session file and update session + accumulator.
+          captureBranch(sessionId, f, driver);
         } else if (attempt < 3) {
           setTimeout(() => captureSessionFile(attempt + 1), 500 * (attempt + 1));
         }
@@ -434,60 +498,58 @@ const program = Effect.gen(function* () {
     return sessionId;
   };
 
-  /** Send a prompt to the active pi session. */
-  const piSessionPrompt = (text: string, images?: string[]): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
+  /** Look up a pi driver by sessionId, logging a warning if not found. */
+  const getPiDriver = (sessionId: string, op: string): PiDriver | null => {
+    const d = piDrivers.get(sessionId);
+    if (!d) {
+      logMsg(`${op}: no pi driver for session ${sessionId}`, "warn");
+      return null;
     }
-    activePiDriver.prompt(text, images).catch((err) => {
+    return d;
+  };
+
+  /** Send a prompt to a specific pi session. */
+  const piSessionPrompt = (sessionId: string, text: string, images?: string[]): void => {
+    const d = getPiDriver(sessionId, "pi.prompt");
+    if (!d) return;
+    d.prompt(text, images).catch((err) => {
       logMsg(`pi.prompt error: ${err.message}`, "error");
     });
   };
 
-  /** Send steering message to active pi session. */
-  const piSessionSteer = (text: string): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
-    }
-    activePiDriver.steer(text);
+  /** Send steering message to a specific pi session. */
+  const piSessionSteer = (sessionId: string, text: string): void => {
+    const d = getPiDriver(sessionId, "pi.steer");
+    if (!d) return;
+    d.steer(text);
   };
 
-  /** Abort the active pi session. */
-  const piSessionAbort = (): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session to abort`, "warn");
-      return;
-    }
-    activePiDriver.abort();
+  /** Abort the current turn of a specific pi session. */
+  const piSessionAbort = (sessionId: string): void => {
+    const d = getPiDriver(sessionId, "pi.abort");
+    if (!d) return;
+    d.abort();
   };
 
-  /** Set thinking level for active pi session. */
-  const piSessionSetThinking = (level: string): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
-    }
-    activePiDriver.setEffortLevel(level);
+  /** Set thinking level for a specific pi session. */
+  const piSessionSetThinking = (sessionId: string, level: string): void => {
+    const d = getPiDriver(sessionId, "pi.set-thinking");
+    if (!d) return;
+    d.setEffortLevel(level);
   };
 
-  /** Switch model for active pi session (pi `set_model` RPC). */
-  const piSessionSetModel = (provider: string, modelId: string): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
-    }
-    activePiDriver.setModel(provider, modelId);
+  /** Switch model for a specific pi session (pi `set_model` RPC). */
+  const piSessionSetModel = (sessionId: string, provider: string, modelId: string): void => {
+    const d = getPiDriver(sessionId, "pi.set-model");
+    if (!d) return;
+    d.setModel(provider, modelId);
   };
 
-  /** Manually compact pi's context (`compact` RPC). */
-  const piSessionCompact = (customInstructions?: string): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session to compact`, "warn");
-      return;
-    }
-    activePiDriver.compact(customInstructions).then(
+  /** Manually compact a specific pi session's context (`compact` RPC). */
+  const piSessionCompact = (sessionId: string, customInstructions?: string): void => {
+    const d = getPiDriver(sessionId, "pi.compact");
+    if (!d) return;
+    d.compact(customInstructions).then(
       (data) => {
         const summary = data.summary ? ` — ${data.summary.substring(0, 80)}…` : "";
         logMsg(`pi compact done (tokensBefore=${data.tokensBefore ?? "?"})${summary}`);
@@ -496,13 +558,11 @@ const program = Effect.gen(function* () {
     );
   };
 
-  /** Start a fresh pi session in the running process (`new_session` RPC). */
-  const piSessionNewSession = (): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session for new_session`, "warn");
-      return;
-    }
-    activePiDriver.newSession().then(
+  /** Start a fresh session inside a specific pi process (`new_session` RPC). */
+  const piSessionNewSession = (sessionId: string): void => {
+    const d = getPiDriver(sessionId, "pi.new-session");
+    if (!d) return;
+    d.newSession().then(
       (ok) => {
         if (!ok) logMsg(`pi new_session cancelled by extension`, "warn");
       },
@@ -511,39 +571,40 @@ const program = Effect.gen(function* () {
   };
 
   /**
-   * Resume a pi session by loading SESSION-PATH into the running pi process
-   * via the `switch_session` RPC. If no pi process is running, spawns one
-   * first (with `--session <path>`).
+   * Resume a pi session. If SESSION-ID identifies a live pi driver, swap its
+   * working session via `switch_session` to SESSION-PATH. Otherwise spawn a
+   * brand-new pi process resuming SESSION-PATH (`--session <path>`).
    */
-  const piSessionResume = (sessionPath: string): void => {
+  const piSessionResume = (sessionPath: string, sessionId?: string): void => {
     if (!sessionPath) {
       logMsg(`pi.resume called without sessionPath`, "warn");
       return;
     }
-    if (activePiDriver) {
-      activePiDriver.switchSession(sessionPath).then(
+    const driver = sessionId ? piDrivers.get(sessionId) : undefined;
+    if (driver) {
+      driver.switchSession(sessionPath).then(
         (ok) => {
           if (!ok) logMsg(`pi switch_session cancelled by extension`, "warn");
         },
         (err) => logMsg(`pi switch_session failed: ${err.message}`, "error"),
       );
     } else {
-      // No active pi — spawn a new one resuming the given path. Reuses the
-      // existing pi.start flow but with `resumeSession` set.
-      const sessionId = startPiSession({ resumeSession: sessionPath } as { cwd?: string; thinkingLevel?: string; resumeSession?: string });
-      if (sessionId) {
-        logMsg(`Pi session ${sessionId} spawned resuming ${sessionPath}`);
+      // No live driver for the given id (or no id given) — spawn a new pi
+      // process resuming the path.
+      const newId = startPiSession({ resumeSession: sessionPath } as { cwd?: string; thinkingLevel?: string; resumeSession?: string });
+      if (newId) {
+        logMsg(`Pi session ${newId} spawned resuming ${sessionPath}`);
       }
     }
   };
 
-  /** Stop the active pi session. */
-  const stopPiSession = async (): Promise<void> => {
-    if (!activePiDriver) {
-      return;
-    }
-    await activePiDriver.stop();
-    activePiDriver = null;
+  /** Stop a specific pi session — terminates the pi process. */
+  const stopPiSession = async (sessionId: string): Promise<void> => {
+    const d = piDrivers.get(sessionId);
+    if (!d) return;
+    await d.stop();
+    // The driver's onLifecycle("stop") callback removes from piDrivers and
+    // cleans up that session's UI requests. No need to do it here.
   };
 
   // ── Pi session control ────────────────────────────────────────────
@@ -778,10 +839,11 @@ const program = Effect.gen(function* () {
         // an extension_ui_response instead of writing to a hook socket.
         const piUi = pendingPiUIResponses.get(itemId);
         if (piUi) {
-          if (!activePiDriver) {
-            logMsg(`action.permission for pi UI ${piUi.piRequestId}: no active driver`, "warn");
+          const driver = piDrivers.get(piUi.sessionId);
+          if (!driver) {
+            logMsg(`action.permission for pi UI ${piUi.piRequestId}: no driver for session ${piUi.sessionId}`, "warn");
           } else {
-            activePiDriver.sendExtensionUIResponse({
+            driver.sendExtensionUIResponse({
               id: piUi.piRequestId,
               confirmed: decision === "allow",
             });
@@ -807,11 +869,12 @@ const program = Effect.gen(function* () {
         // {value: <choice>} (pi's select dialog uses string values).
         const piUi = pendingPiUIResponses.get(itemId);
         if (piUi) {
-          if (!activePiDriver) {
-            logMsg(`action.question for pi UI ${piUi.piRequestId}: no active driver`, "warn");
+          const driver = piDrivers.get(piUi.sessionId);
+          if (!driver) {
+            logMsg(`action.question for pi UI ${piUi.piRequestId}: no driver for session ${piUi.sessionId}`, "warn");
           } else {
             const value = answers[0];
-            activePiDriver.sendExtensionUIResponse({
+            driver.sendExtensionUIResponse({
               id: piUi.piRequestId,
               ...(value !== undefined ? { value } : { cancelled: true }),
             });
@@ -937,70 +1000,73 @@ const program = Effect.gen(function* () {
         if (sessionId) {
           logMsg(`Pi session started via terminal: ${sessionId}`);
         } else {
-          logMsg(`Pi session start failed — already running?`, "warn");
-          // Tell the requesting terminal so the user gets feedback instead of
-          // a silent no-op. (Singleton; reject reason fixed for now.)
+          // startPiSession only fails for non-singleton reasons now (it no
+          // longer rejects on an existing driver). Surface a generic error.
+          logMsg(`Pi session start failed`, "warn");
           terminals.sendTo(conn, {
             type: "pi.session",
             sessionId: "",
             event: "rejected",
-            reason: "Pi session already running. Stop it first (S k) or use claude-gravity--pi-start-replacing.",
+            reason: "Pi session start failed (see server log).",
           } as ServerMessage);
         }
         break;
       }
 
       case "pi.prompt": {
-        const m = msg as { text: string; images?: string[] };
-        piSessionPrompt(m.text, m.images);
+        const m = msg as { sessionId: string; text: string; images?: string[] };
+        piSessionPrompt(m.sessionId, m.text, m.images);
         break;
       }
 
       case "pi.steer": {
-        const m = msg as { text: string };
-        piSessionSteer(m.text);
+        const m = msg as { sessionId: string; text: string };
+        piSessionSteer(m.sessionId, m.text);
         break;
       }
 
       case "pi.abort": {
-        piSessionAbort();
+        const m = msg as { sessionId: string };
+        piSessionAbort(m.sessionId);
         break;
       }
 
       case "pi.set-thinking": {
-        const m = msg as { level: string };
-        piSessionSetThinking(m.level);
+        const m = msg as { sessionId: string; level: string };
+        piSessionSetThinking(m.sessionId, m.level);
         break;
       }
 
       case "pi.set-model": {
-        const m = msg as { provider: string; modelId: string };
-        piSessionSetModel(m.provider, m.modelId);
+        const m = msg as { sessionId: string; provider: string; modelId: string };
+        piSessionSetModel(m.sessionId, m.provider, m.modelId);
         break;
       }
 
       case "pi.resume": {
-        const m = msg as { sessionPath: string };
-        piSessionResume(m.sessionPath);
+        const m = msg as { sessionId?: string; sessionPath: string };
+        piSessionResume(m.sessionPath, m.sessionId);
         break;
       }
 
       case "pi.compact": {
-        const m = msg as { customInstructions?: string };
-        piSessionCompact(m.customInstructions);
+        const m = msg as { sessionId: string; customInstructions?: string };
+        piSessionCompact(m.sessionId, m.customInstructions);
         break;
       }
 
       case "pi.new-session": {
-        piSessionNewSession();
+        const m = msg as { sessionId: string };
+        piSessionNewSession(m.sessionId);
         break;
       }
 
       case "pi.stop": {
-        // Kill the pi process entirely (vs pi.abort which only interrupts
-        // the current LLM turn). The server-side onLifecycle("stop") path
-        // clears activePiDriver and broadcasts pi.session "stopped".
-        stopPiSession().catch((err) => logMsg(`pi.stop failed: ${err.message}`, "error"));
+        // Kill the targeted pi process entirely (vs pi.abort which only
+        // interrupts the current LLM turn). The driver's onLifecycle("stop")
+        // path removes it from piDrivers and broadcasts pi.session "stopped".
+        const m = msg as { sessionId: string };
+        stopPiSession(m.sessionId).catch((err) => logMsg(`pi.stop failed: ${err.message}`, "error"));
         break;
       }
     }
@@ -1130,7 +1196,7 @@ const program = Effect.gen(function* () {
       } else if (session.source === "pi") {
         // Pi sessions intentionally have no PID on the gravity Session
         // object — they're managed entirely by gravity-server (via
-        // activePiDriver and child.on("exit") in the pi-driver spawn
+        // piDrivers map and child.on("exit") in the pi-driver spawn
         // path). Skip the time-based staleness fallback: an idle pi
         // session is normal (pi waits for the next prompt indefinitely),
         // not a dead one. Pi termination is reported correctly via the

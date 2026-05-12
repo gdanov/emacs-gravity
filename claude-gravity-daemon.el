@@ -578,6 +578,7 @@ Returns non-nil if a daemon session was re-keyed."
 (declare-function claude-gravity-tmux-set-model "claude-gravity-tmux")
 (declare-function claude-gravity-tmux-set-permission-mode "claude-gravity-tmux")
 (declare-function claude-gravity--current-session-pi-p "claude-gravity-client")
+(declare-function claude-gravity--current-pi-session-id "claude-gravity-client")
 (declare-function claude-gravity--pi-set-model "claude-gravity-client")
 (declare-function claude-gravity--pi-resume "claude-gravity-client")
 (declare-function claude-gravity--pi-prompt "claude-gravity-client")
@@ -610,8 +611,9 @@ buffer for pi is a TODO (see design/pi-adapter.md)."
   "Stop the current session entirely (daemon, tmux, or pi).
 - Daemon: stops the daemon-managed session.
 - Tmux: kills the tmux pane.
-- Pi: terminates the pi process. Use `claude-gravity-unified-interrupt'
-  if you only want to abort the current turn while keeping pi alive."
+- Pi: terminates the pi process for the session at point. Use
+  `claude-gravity-unified-interrupt' if you only want to abort the
+  current turn while keeping pi alive."
   (interactive)
   (cond
    ((claude-gravity--current-session-daemon-p)
@@ -619,14 +621,14 @@ buffer for pi is a TODO (see design/pi-adapter.md)."
    ((claude-gravity--current-session-tmux-p)
     (claude-gravity-stop-session session-id))
    ((claude-gravity--current-session-pi-p)
-    (claude-gravity--pi-stop))
+    (claude-gravity--pi-stop (claude-gravity--current-pi-session-id)))
    (t (user-error "No managed session at point"))))
 
 (defun claude-gravity-unified-interrupt ()
   "Interrupt the current session's in-flight operation.
 - Daemon: interrupt.
 - Tmux: send Escape.
-- Pi: abort current LLM turn (pi stays alive)."
+- Pi: abort current LLM turn for the session at point (pi stays alive)."
   (interactive)
   (cond
    ((claude-gravity--current-session-daemon-p)
@@ -634,20 +636,20 @@ buffer for pi is a TODO (see design/pi-adapter.md)."
    ((claude-gravity--current-session-tmux-p)
     (claude-gravity-send-escape))
    ((claude-gravity--current-session-pi-p)
-    (claude-gravity--pi-abort))
+    (claude-gravity--pi-abort (claude-gravity--current-pi-session-id)))
    (t (user-error "No managed session at point"))))
 
 (defun claude-gravity-unified-reset ()
   "Reset/clear the current session's conversation.
 - Tmux: send /clear via `claude-gravity-reset-session'.
-- Pi: send `new_session' RPC via `claude-gravity--pi-new-session'.
+- Pi: send `new_session' RPC for the session at point.
 - Daemon: not supported."
   (interactive)
   (cond
    ((claude-gravity--current-session-tmux-p)
     (claude-gravity-reset-session))
    ((claude-gravity--current-session-pi-p)
-    (claude-gravity--pi-new-session))
+    (claude-gravity--pi-new-session (claude-gravity--current-pi-session-id)))
    ((claude-gravity--current-session-daemon-p)
     (user-error "Reset/clear is not supported for daemon sessions"))
    (t (user-error "No managed session at point"))))

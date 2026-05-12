@@ -188,6 +188,17 @@ export interface ErrorEvent extends PiBaseEvent {
 }
 
 /**
+ * Git branch changed (pi emits this when the user switches branches).
+ * Updates the accumulator's branch field so the next SessionStart
+ * carries the correct value.
+ */
+export interface BranchUpdateEvent extends PiBaseEvent {
+  type: "branch_update";
+  /** Git branch name, or null when leaving a git repo. */
+  branch: string | null;
+}
+
+/**
  * Pi extension UI request — extensions can call `ctx.ui.select`,
  * `ctx.ui.confirm`, `ctx.ui.input`, `ctx.ui.editor`, etc. Dialog methods
  * (select / confirm / input / editor) expect an `extension_ui_response`
@@ -248,6 +259,7 @@ export type PiEvent =
   | MessageUpdateEvent
   | ExtensionUIRequestEvent
   | ErrorEvent
+  | BranchUpdateEvent
   | PiBaseEvent; // fallback for unknown events
 
 // ── Translation result types ────────────────────────────────────────
@@ -296,6 +308,7 @@ export interface AccState {
   // Session context
   sessionId: string;
   cwd: string;
+  branch: string | null;  // git branch, populated after session init
   modelName: string | null;
   effortLevel: string;
 
@@ -511,4 +524,9 @@ export interface PiDriver {
    * Returns a promise that resolves when the subprocess exits.
    */
   stop(): Promise<void>;
+  /**
+   * Get the current accumulator state (branch, cwd, etc.).
+   * Used by gravity-server to update branch after session-file resolution.
+   */
+  getAccState(): AccState;
 }

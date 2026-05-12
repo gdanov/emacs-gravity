@@ -276,8 +276,6 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
       return driver.stop();
     },
 
-    getMetadata: () => {
-      return metadata;
-    },
+    getAccState: () => state,
   };
 }

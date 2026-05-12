@@ -24,6 +24,7 @@ export function createAccState(sessionId: string, cwd: string, effortLevel: stri
   return {
     sessionId,
     cwd,
+    branch: null,
     modelName: null,
     effortLevel,
     pendingAssistantText: "",
@@ -269,6 +270,7 @@ export function accAgentStart(state: AccState): TranslationResult[] {
       session_id: state.sessionId,
       cwd: state.cwd,
       source: "pi",
+      branch: state.branch ?? undefined,
       model: state.modelName ?? undefined,
       effort_level: state.effortLevel,
     },
@@ -324,5 +326,14 @@ export function accAgentEnd(
  */
 export function accSetEffortLevel(state: AccState, level: string): AccState {
   state.effortLevel = level;
+  return state;
+}
+
+/**
+ * Update the git branch in accumulator state. Called after the session
+ * file path is resolved, so we can read the transcript and extract branch.
+ */
+export function accSetBranch(state: AccState, branch: string | null): AccState {
+  state.branch = branch;
   return state;
 }
