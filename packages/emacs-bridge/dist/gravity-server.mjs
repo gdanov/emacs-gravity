@@ -105407,7 +105407,7 @@ function accTurnEnd(state, turnId) {
 function accToolStart(state, toolCallId, toolName, toolInput) {
   state.currentToolUseId = toolCallId;
   state.currentToolName = toolName;
-  state.currentToolInput = toolInput;
+  state.currentToolInput = normalizeToolInput(toolInput);
   state.currentToolStartTime = Date.now();
   state.currentToolPartial = void 0;
   const flushed = flushPendingAssistantContext(state);
@@ -105421,8 +105421,9 @@ function accToolEnd(state, toolCallId, toolName, toolResult, error) {
     return [];
   }
   const toolUseId = state.currentToolUseId;
-  const toolInput = state.currentToolInput ?? {};
-  const effectiveResult = toolResult === void 0 || toolResult === null ? state.currentToolPartial : toolResult;
+  const rawToolInput = state.currentToolInput ?? {};
+  const toolInput = normalizeToolInput(rawToolInput);
+  const effectiveResult = normalizeToolResult(toolName, toolResult ?? state.currentToolPartial);
   const assistantText = state.currentToolAssistantText;
   const assistantThinking = state.currentToolAssistantThinking;
   const hookData = {
@@ -105522,6 +105523,67 @@ function accAgentEnd(state, resultType, usage, error, stopReason) {
 function accSetBranch(state, branch) {
   state.branch = branch;
   return state;
+}
+function normalizeToolInput(input) {
+  if (!input || typeof input !== "object") return input;
+  const result3 = { ...input };
+  if ("oldText" in result3) {
+    result3.old_string = result3.oldText;
+    delete result3.oldText;
+  }
+  if ("newText" in result3) {
+    result3.new_string = result3.newText;
+    delete result3.newText;
+  }
+  if ("path" in result3 && !("file_path" in result3)) {
+    result3.file_path = result3.path;
+    delete result3.path;
+  }
+  return result3;
+}
+function normalizeToolResult(toolName, result3) {
+  if (toolName !== "Edit" || !result3 || typeof result3 !== "object") return result3;
+  const r = result3;
+  if ("structuredPatch" in r) return result3;
+  if ("diff" in r) {
+    const diff = r.diff;
+    if (typeof diff === "string" && diff.length > 0) {
+      return {
+        ...r,
+        // Synthesize structuredPatch from unified diff
+        structuredPatch: parseUnifiedDiff(diff),
+        // Also include old_string/new_string if available
+        oldString: r.oldString ?? r.old_string ?? "",
+        newString: r.newString ?? r.new_string ?? ""
+      };
+    }
+  }
+  return result3;
+}
+function parseUnifiedDiff(diff) {
+  const hunks = [];
+  const lines = diff.split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const hunkMatch = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (hunkMatch) {
+      const oldStart = parseInt(hunkMatch[1], 10);
+      const oldLines = parseInt(hunkMatch[2] ?? "1", 10);
+      const newStart = parseInt(hunkMatch[3], 10);
+      const newLines = parseInt(hunkMatch[4] ?? "1", 10);
+      const hunkLines = [];
+      i++;
+      while (i < lines.length && !lines[i].match(/^@@ /)) {
+        hunkLines.push(lines[i]);
+        i++;
+      }
+      hunks.push({ oldStart, oldLines, newStart, newLines, lines: hunkLines });
+    } else {
+      i++;
+    }
+  }
+  return hunks;
 }
 
 // src/pi-driver/hook-translator.ts

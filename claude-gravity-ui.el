@@ -1939,20 +1939,56 @@ When point is on a project section, returns the :cwd of the first matching sessi
         cwd)))))
 
 
-(defun claude-gravity-start-session-here ()
-  "Start a Claude session rooted at the current buffer's project.
-Detects project root via `project-current' or `vc-root-dir', then
-prompts to confirm the directory before starting."
-  (interactive)
-  (let* ((proj-root (or (and (fboundp 'project-root)
-                             (when-let ((proj (project-current)))
-                               (project-root proj)))
-                        (vc-root-dir)
-                        default-directory))
-         (dir (claude-gravity--read-project-dir
-               "Project directory: "
-               (expand-file-name proj-root))))
-    (claude-gravity-start-session dir)))
+;; Forward declarations for backend starters (loaded lazily)
+(defvar claude-gravity--last-project-dir)
+(declare-function claude-gravity-start-session "claude-gravity-tmux")
+(declare-function claude-gravity-daemon-start-session "claude-gravity-daemon")
+(declare-function claude-gravity--pi-start "claude-gravity-client")
+
+(defun claude-gravity--start-session-here--detect-dir ()
+  "Detect project root from current buffer.
+Used as the default directory for session starters."
+  (or (and (fboundp 'project-root)
+           (when-let ((proj (project-current)))
+             (project-root proj)))
+      (vc-root-dir)
+      default-directory))
+
+(defun claude-gravity-start-session-here (&optional backend)
+  "Start a coding-agent session rooted at the current buffer's project.
+Prompts for the project directory and the backend to use.
+
+BACKEND can be one of:
+- `tmux'  — Interactive Claude Code session in a tmux window
+- `pi'    — Pi coding agent (stateless, one prompt at a time)
+- `cloud' — Cloud-daemon session (uses the SDK bridge)
+
+If BACKEND is nil, prompts the user to pick one.  When called
+non-interactively, BACKEND must be provided.
+
+Detects project root via `project-current' or `vc-root-dir'."
+  (interactive
+   (list (let ((choices '(("tmux" . "tmux  — Interactive Claude in a tmux window")
+                          ("pi"   . "pi    — Pi coding agent (prompt-driven)")
+                          ("cloud". "cloud — Cloud daemon (SDK bridge)"))))
+           (pcase (completing-read
+                   "Session backend: "
+                   (mapcar #'cdr choices)
+                   nil t nil nil
+                   (cdar choices))
+             ((pred (string-match "^tmux" )) 'tmux)
+             ((pred (string-match "^pi"   )) 'pi)
+             ((pred (string-match "^cloud")) 'cloud)
+             (_ (user-error "Unknown backend"))))))
+  (let* ((dir-raw (claude-gravity--read-project-dir
+                  "Project directory: "
+                  (expand-file-name (claude-gravity--start-session-here--detect-dir))))
+         (dir (claude-gravity--normalize-cwd dir-raw)))
+    (pcase backend
+      ('tmux  (claude-gravity-start-session dir))
+      ('pi    (claude-gravity--pi-start dir))
+      ('cloud (claude-gravity-daemon-start-session dir))
+      (_      (user-error "Invalid backend: %S" backend)))))
 
 
 ;;; Commands
@@ -1971,8 +2007,8 @@ commands, etc.) all live under the `S' prefix and grey out via
    ["Session Lifecycle (S prefix)"
     ("S s" "Start (tmux)" claude-gravity-start-menu)
     ("S n" "Start (Cloud)" claude-gravity-daemon-start-menu)
-    ("S p" "Start (Pi)" claude-gravity--pi-start)
-    ("S h" "Start here" claude-gravity-start-session-here)
+    ("S p" "Start (Pi)"   claude-gravity--pi-start)
+    ("S h" "Start here"   claude-gravity-start-session-here)
     ("S r" "Resume session" claude-gravity-unified-resume)
     ("S w" "Resume (picker)" claude-gravity-resume-in-tmux)
     ("S ," "Rename session" claude-gravity-rename-session)]
