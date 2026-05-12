@@ -161,6 +161,33 @@ Steps are pre-computed — no dedup or grouping needed."
               (claude-gravity--insert-task-item task))))))))
 
 
+(defun claude-gravity--insert-partial-preview (partial)
+  "Insert a one-line preview of pi's streaming PARTIAL result.
+PARTIAL is whatever pi sends in `tool_execution_update.partialResult` —
+usually a string (bash output buffer), occasionally an object. We render
+the LAST non-empty line of strings (the leading edge of streaming
+output) and a `[partial]` placeholder otherwise. Truncated to fit on
+one screen line."
+  (let* ((text (cond ((stringp partial) partial)
+                     ((null partial) nil)
+                     (t (let ((print-length 80))
+                          (format "%S" partial)))))
+         (last-line
+          (when (and text (not (string-empty-p text)))
+            (let* ((trimmed (string-trim-right text "[ \t\n\r]+"))
+                   (nl (or (cl-position ?\n trimmed :from-end t) -1)))
+              (substring trimmed (1+ nl)))))
+         (preview (or last-line "[partial]"))
+         (max-cols (max 20 (- (or (window-width) 80) 8)))
+         (clipped (if (> (length preview) max-cols)
+                      (concat (substring preview 0 (- max-cols 1)) "…")
+                    preview)))
+    (insert (claude-gravity--indent 2)
+            (propertize "… " 'face 'claude-gravity-detail-label)
+            (propertize clipped 'face 'claude-gravity-tool-signature)
+            "\n")))
+
+
 (defun claude-gravity--insert-tool-item-from-tree (item)
   "Insert tool ITEM using tree-based agent lookup.
 If the tool has an 'agent pointer (from bidirectional link), renders as agent branch."
@@ -258,6 +285,13 @@ If the tool has an 'agent pointer (from bidirectional link), renders as agent br
                 (claude-gravity--insert-wrapped sig nil 'claude-gravity-tool-signature)))
             (insert "\n")
             (claude-gravity--insert-tool-detail name input result status)
+            ;; Pi streaming partial — show a one-line preview only while the
+            ;; tool is running. Once complete, `result` is authoritative and
+            ;; partial becomes stale.
+            (when (and (not done-p) (not error-p))
+              (let ((partial (alist-get 'partial item)))
+                (when partial
+                  (claude-gravity--insert-partial-preview partial))))
             ;; Post-tool text and thinking
             (let ((post-think (alist-get 'post_thinking item))
                   (post-text (alist-get 'post_text item)))
@@ -483,17 +517,37 @@ Deduplicates against the last tool's post_text/post_thinking."
           (let ((has-think (and stop-think (not (string-empty-p stop-think))))
                 (has-text (and stop-text (not (string-empty-p stop-text)))))
             (when (or has-think has-text)
-              (magit-insert-section (stop-message (alist-get 'turn-number turn-node) t)
-                (magit-insert-heading
-                  (format "%s%s\n"
-                          (claude-gravity--indent)
-                          (propertize (concat claude-gravity--margin-char " ⏹ ") 'face 'claude-gravity-agent-stop-text)))
-                (when has-think
-                  (claude-gravity--insert-wrapped-with-margin
-                   stop-think nil 'claude-gravity-thinking))
-                (when has-text
-                  (claude-gravity--insert-wrapped-with-margin
-                   stop-text nil 'claude-gravity-agent-stop-text))))))))))
+              (let* ((stop-reason (alist-get 'stop_reason turn-node))
+                     (reason-badge
+                      ;; Only badge unusual stop reasons. "stop" / "toolUse"
+                      ;; are normal endings and don't deserve visual noise.
+                      ;; CC turns leave stop_reason nil → no badge.
+                      (pcase stop-reason
+                        ("length"
+                         (propertize "  [length]"
+                                     'face 'claude-gravity-detail-label
+                                     'help-echo "Model stopped because the output budget was reached"))
+                        ("error"
+                         (propertize "  [error]"
+                                     'face 'error
+                                     'help-echo "Model errored — see stop text"))
+                        ("aborted"
+                         (propertize "  [aborted]"
+                                     'face 'warning
+                                     'help-echo "Generation aborted"))
+                        (_ ""))))
+                (magit-insert-section (stop-message (alist-get 'turn-number turn-node) t)
+                  (magit-insert-heading
+                    (format "%s%s%s\n"
+                            (claude-gravity--indent)
+                            (propertize (concat claude-gravity--margin-char " ⏹ ") 'face 'claude-gravity-agent-stop-text)
+                            reason-badge))
+                  (when has-think
+                    (claude-gravity--insert-wrapped-with-margin
+                     stop-think nil 'claude-gravity-thinking))
+                  (when has-text
+                    (claude-gravity--insert-wrapped-with-margin
+                     stop-text nil 'claude-gravity-agent-stop-text)))))))))))
 
 
 (defun claude-gravity--insert-task-item (task)
@@ -540,12 +594,52 @@ Shows stop_thinking and stop_text for all agents with status='done'."
            stop-text nil 'claude-gravity-agent-stop-text))))))
 
 
+(defun claude-gravity--format-token-count (n)
+  "Format N as a compact token count (1234 -> \"1.2k\", >1M -> \"1.2M\")."
+  (cond
+   ((not (numberp n)) "?")
+   ((>= n 1000000) (format "%.1fM" (/ n 1000000.0)))
+   ((>= n 1000) (format "%.1fk" (/ n 1000.0)))
+   (t (format "%d" n))))
+
+
+(defun claude-gravity--insert-compactions-for-turn (compactions turn-num)
+  "Insert any pi compaction markers from COMPACTIONS whose turn-number matches TURN-NUM.
+COMPACTIONS is the session-level :compactions list; markers are added in
+chronological order. Turn-0 compactions use turn-number -1 (sentinel).
+Aborted markers render dimmer."
+  (when compactions
+    (dolist (m compactions)
+      (when (equal (alist-get 'turn-number m) turn-num)
+        (let* ((reason (or (alist-get 'reason m) "unknown"))
+               (tokens-before (alist-get 'tokens-before m))
+               (aborted (alist-get 'aborted m))
+               (summary (alist-get 'summary m))
+               (label (if aborted
+                          (format "≈ Compaction attempted (%s) — aborted" reason)
+                        (if (numberp tokens-before)
+                            (format "≈ Compaction (%s) — freed ~%s tokens"
+                                    reason
+                                    (claude-gravity--format-token-count tokens-before))
+                          (format "≈ Compaction (%s)" reason))))
+               (face (if aborted 'claude-gravity-detail-label 'claude-gravity-phase-boundary)))
+          (magit-insert-section (compaction nil t)
+            (magit-insert-heading
+              (format "%s%s\n"
+                      (claude-gravity--indent)
+                      (propertize label 'face face)))
+            (when (and summary (not (string-empty-p summary)))
+              (claude-gravity--insert-wrapped-with-margin
+               summary nil 'claude-gravity-detail-label))))))))
+
+
 (defun claude-gravity-insert-turns (session)
   "Insert unified turns section for SESSION.
 Iterates the :turns tree directly — no grouping or hash construction needed."
   (let* ((turns-tl (plist-get session :turns))
          (turn-nodes (when turns-tl (claude-gravity--tlist-items turns-tl)))
-         (current-turn (or (plist-get session :current-turn) 0)))
+         (current-turn (or (plist-get session :current-turn) 0))
+         (compactions (plist-get session :compactions)))
     ;; Render if there are any turns with content
     (when (cl-some (lambda (tn)
                      (or (> (or (alist-get 'tool-count tn) 0) 0)
@@ -577,7 +671,9 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                   (propertize "Pre-prompt activity" 'face 'claude-gravity-detail-label)
                                   (claude-gravity--turn-counts-from-node turn-node)))
                         (claude-gravity--insert-turn-children-from-tree turn-node))
-                      (claude-gravity--insert-stop-text turn-node))
+                      (claude-gravity--insert-stop-text turn-node)
+                      ;; Turn-0 markers use sentinel -1 (no user turn yet).
+                      (claude-gravity--insert-compactions-for-turn compactions -1))
                   ;; Normal turns
                   (let* ((prompt-text (when prompt-entry
                                         (claude-gravity--prompt-text prompt-entry)))
@@ -647,6 +743,7 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                             (let ((sec section)
                                   (tn turn-node)
                                   (ta turn-agents)
+                                  (cm compactions)
                                   (washer-fn nil))
                               (setq washer-fn
                                     (lambda ()
@@ -655,7 +752,9 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                                  (oset sec hidden t))
                                         (claude-gravity--insert-turn-children-from-tree tn)
                                         (claude-gravity--insert-agent-completions ta)
-                                        (claude-gravity--insert-stop-text tn))))
+                                        (claude-gravity--insert-stop-text tn)
+                                        (claude-gravity--insert-compactions-for-turn
+                                         cm (alist-get 'turn-number tn)))))
                               (oset section washer washer-fn))))
                       (magit-insert-section (turn turn-num (not is-current))
                         (magit-insert-heading
@@ -667,7 +766,8 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                   (claude-gravity--format-turn-tokens turn-node)))
                         (claude-gravity--insert-turn-children-from-tree turn-node)
                         (claude-gravity--insert-agent-completions turn-agents))
-                      (claude-gravity--insert-stop-text turn-node))))))))
+                      (claude-gravity--insert-stop-text turn-node)
+                      (claude-gravity--insert-compactions-for-turn compactions turn-num))))))))
         (insert "\n")))))
 
 

@@ -696,7 +696,8 @@ SESSION-JSON is an alist from json-parse-string."
          (tool-index (make-hash-table :test 'equal))
          (agent-index (make-hash-table :test 'equal))
          (tasks-ht (make-hash-table :test 'equal))
-         (files-ht (make-hash-table :test 'equal)))
+         (files-ht (make-hash-table :test 'equal))
+         (compactions nil))
     ;; Convert turns
     (dolist (turn-json turns-json)
       (let ((turn-node (claude-gravity--json-turn-to-alist turn-json)))
@@ -720,6 +721,10 @@ SESSION-JSON is an alist from json-parse-string."
                      (list (cons 'ops (or (funcall jnil (alist-get 'ops entry)) nil))
                            (cons 'last-touched (alist-get 'lastTouched entry)))
                      files-ht)))))
+    ;; Convert compactions (pi only — empty list for CC sessions)
+    (setq compactions
+          (mapcar #'claude-gravity--json-compaction-to-alist
+                  (funcall jnil (alist-get 'compactions session-json))))
     ;; Build turn index from the populated turns tlist
     (let ((turn-index (make-hash-table :test 'eql)))
       (dolist (turn-node (claude-gravity--tlist-items turns-tl))
@@ -764,6 +769,7 @@ SESSION-JSON is an alist from json-parse-string."
             :agent-index agent-index
             :tasks tasks-ht
             :files files-ht
+            :compactions compactions
             :total-tool-count (or (alist-get 'totalToolCount session-json) 0)
             :header-line-cache nil
             :buffer nil
@@ -800,6 +806,10 @@ SESSION-JSON is an alist from json-parse-string."
           (cons 'frozen (eq (alist-get 'frozen turn-json) t))
           (cons 'stop_text (funcall jnil (alist-get 'stopText turn-json)))
           (cons 'stop_thinking (funcall jnil (alist-get 'stopThinking turn-json)))
+          ;; Pi-only: trailing AssistantMessage's stopReason from agent_end.
+          ;; Distinguishes "stop" / "length" / "toolUse" / "error" / "aborted".
+          ;; CC sessions leave this nil — CC's Stop hook doesn't carry it.
+          (cons 'stop_reason (funcall jnil (alist-get 'stopReason turn-json)))
           (cons 'token-in (funcall jnil (alist-get 'tokenIn turn-json)))
           (cons 'token-out (funcall jnil (alist-get 'tokenOut turn-json))))))
 
@@ -834,6 +844,10 @@ SESSION-JSON is an alist from json-parse-string."
           (cons 'parent_agent_id (funcall jnil (alist-get 'parentAgentId tool-json)))
           (cons 'ambiguous (eq (alist-get 'ambiguous tool-json) t))
           (cons 'candidate-agents (funcall jnil (alist-get 'candidateAgentIds tool-json)))
+          ;; Pi-only: latest partial result streamed via tool_execution_update.
+          ;; Replaced on each update; carries final-result fallback if pi's
+          ;; tool_execution_end provides no result. CC tools always nil.
+          (cons 'partial (funcall jnil (alist-get 'partial tool-json)))
           (cons 'agent nil))))  ; agent link populated during indexing
 
 (defun claude-gravity--json-agent-to-alist (agent-json)
@@ -867,6 +881,19 @@ SESSION-JSON is an alist from json-parse-string."
           (cons 'elapsed (funcall jnil (alist-get 'elapsed prompt-json)))
           (cons 'tool_use_id (funcall jnil (alist-get 'toolUseId prompt-json)))
           (cons 'answer (funcall jnil (alist-get 'answer prompt-json))))))
+
+(defun claude-gravity--json-compaction-to-alist (m)
+  "Convert a JSON CompactionMarker to an alist.
+Returns nil if M is nil (used by mapcar over a possibly-empty list)."
+  (when m
+    (let ((jnil #'claude-gravity--jnil))
+      (list (cons 'reason (or (funcall jnil (alist-get 'reason m)) "unknown"))
+            (cons 'turn-number (or (alist-get 'turnNumber m) -1))
+            (cons 'timestamp (claude-gravity--epoch-to-time
+                              (alist-get 'timestamp m)))
+            (cons 'tokens-before (funcall jnil (alist-get 'tokensBefore m)))
+            (cons 'summary (funcall jnil (alist-get 'summary m)))
+            (cons 'aborted (eq (alist-get 'aborted m) t))))))
 
 (defun claude-gravity--json-task-to-alist (task-json)
   "Convert a JSON Task to task alist."
@@ -1111,9 +1138,14 @@ MSG contains sessionId and patches array."
               (turn-node (claude-gravity--get-turn-node session turn-num)))
          (when turn-node
            (let ((st (alist-get 'stopText patch))
-                 (sth (alist-get 'stopThinking patch)))
+                 (sth (alist-get 'stopThinking patch))
+                 (sr (alist-get 'stopReason patch)))
              (when st (setf (alist-get 'stop_text turn-node) st))
-             (when sth (setf (alist-get 'stop_thinking turn-node) sth))))))
+             (when sth (setf (alist-get 'stop_thinking turn-node) sth))
+             ;; stop_reason was pre-allocated nil if turn-alist setup
+             ;; didn't include it (older snapshots); use cons-onto-front
+             ;; fallback by using setf alist-get's auto-prepend.
+             (when sr (setf (alist-get 'stop_reason turn-node) sr))))))
 
       ("set_turn_tokens"
        (let* ((turn-num (alist-get 'turnNumber patch))
@@ -1187,6 +1219,14 @@ MSG contains sessionId and patches array."
            (let ((pth (alist-get 'postThinking patch)))
              (when pth (setf (alist-get 'post_thinking tool) pth))))))
 
+      ("update_tool_partial"
+       ;; Pi streaming partial. Replaces tool.partial; final result takes
+       ;; over on complete_tool. No-op if tool unknown (snapshot lag).
+       (let* ((tid (alist-get 'toolUseId patch))
+              (tool (gethash tid (plist-get session :tool-index))))
+         (when tool
+           (setf (alist-get 'partial tool) (alist-get 'partial patch)))))
+
       ("add_agent"
        (let* ((agent-json (alist-get 'agent patch))
               (agent (claude-gravity--json-agent-to-alist agent-json))
@@ -1259,6 +1299,16 @@ MSG contains sessionId and patches array."
                      (float-time
                       (time-subtract (current-time)
                                      (alist-get 'submitted p)))))))))
+
+      ("add_compaction"
+       ;; Append-only chronological list of pi compaction events. Marker
+       ;; carries turnNumber=N (or -1 sentinel) so the renderer can group
+       ;; markers by the turn that was current when compaction completed.
+       (let* ((marker-json (alist-get 'marker patch))
+              (marker (claude-gravity--json-compaction-to-alist marker-json))
+              (existing (plist-get session :compactions)))
+         (plist-put session :compactions (append existing (list marker)))))
+
       (_
        ;; Unknown patch op — request full snapshot to recover
        (claude-gravity--log 'warn "Unknown patch op: %s — requesting snapshot" op)
