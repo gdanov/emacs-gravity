@@ -9,8 +9,9 @@ import {
   addTool,
   updateToolPartial,
   completeTool,
+  addCompaction,
 } from "../src/state/session.js";
-import type { PromptEntry, Tool } from "@gravity/shared";
+import type { CompactionMarker, PromptEntry, Tool } from "@gravity/shared";
 
 const makePrompt = (text: string): PromptEntry => ({
   type: "user",
@@ -267,6 +268,54 @@ describe("updateToolPartial", () => {
     const s = createSession("s4", "/tmp");
     const patches = updateToolPartial(s, "missing", "x");
     expect(patches).toEqual([]);
+  });
+});
+
+describe("addCompaction", () => {
+  const mkMarker = (overrides: Partial<CompactionMarker> = {}): CompactionMarker => ({
+    reason: "threshold",
+    turnNumber: 1,
+    timestamp: Date.now(),
+    tokensBefore: 50000,
+    summary: "Earlier conversation summarized.",
+    aborted: false,
+    ...overrides,
+  });
+
+  it("appends to session.compactions and emits add_compaction patch", () => {
+    const s = createSession("s1", "/tmp");
+    const m = mkMarker();
+    const patches = addCompaction(s, m);
+    expect(s.compactions).toHaveLength(1);
+    expect(s.compactions[0]).toEqual(m);
+    expect(patches).toHaveLength(1);
+    expect(patches[0].op).toBe("add_compaction");
+    // @ts-expect-error narrowing through patch union
+    expect(patches[0].marker).toEqual(m);
+  });
+
+  it("is append-only — multiple compactions all retained in order", () => {
+    const s = createSession("s2", "/tmp");
+    addCompaction(s, mkMarker({ reason: "threshold", tokensBefore: 100 }));
+    addCompaction(s, mkMarker({ reason: "manual", tokensBefore: 200 }));
+    addCompaction(s, mkMarker({ reason: "overflow", tokensBefore: 300 }));
+    expect(s.compactions.map((m) => m.reason)).toEqual([
+      "threshold",
+      "manual",
+      "overflow",
+    ]);
+  });
+
+  it("records aborted compactions with aborted=true and summary=null", () => {
+    const s = createSession("s3", "/tmp");
+    addCompaction(s, mkMarker({ aborted: true, summary: null }));
+    expect(s.compactions[0].aborted).toBe(true);
+    expect(s.compactions[0].summary).toBeNull();
+  });
+
+  it("createSession initialises compactions as an empty array", () => {
+    const s = createSession("s4", "/tmp");
+    expect(s.compactions).toEqual([]);
   });
 });
 

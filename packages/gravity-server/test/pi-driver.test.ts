@@ -523,6 +523,48 @@ describe("Hook translator", () => {
     accToolStart(state2, "call-b", "bash", {});
     expect(state2.currentToolPartial).toBeUndefined();
   });
+
+  it("compaction_end emits Compaction with reason/tokensBefore/summary/aborted on hookData", () => {
+    const state2 = createAccState("s", "/tmp", "medium");
+    const event = {
+      type: "compaction_end",
+      reason: "threshold",
+      aborted: false,
+      result: { tokensBefore: 50000, summary: "Earlier history summarized." },
+    } as unknown as PiEvent;
+    const result = translatePiEvent(event, state2);
+    expect(result.kind).toBe("emit");
+    if (result.kind === "emit") {
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].hookEvent).toBe("Compaction");
+      const hd = result.results[0].hookData as {
+        compaction_reason?: string;
+        compaction_aborted?: boolean;
+        compaction_tokens_before?: number | null;
+        compaction_summary?: string | null;
+      };
+      expect(hd.compaction_reason).toBe("threshold");
+      expect(hd.compaction_aborted).toBe(false);
+      expect(hd.compaction_tokens_before).toBe(50000);
+      expect(hd.compaction_summary).toBe("Earlier history summarized.");
+    }
+  });
+
+  it("compaction_end with missing fields defaults to unknown/null", () => {
+    const state2 = createAccState("s", "/tmp", "medium");
+    const event = { type: "compaction_end" } as unknown as PiEvent;
+    const result = translatePiEvent(event, state2);
+    if (result.kind === "emit") {
+      const hd = result.results[0].hookData as {
+        compaction_reason?: string;
+        compaction_tokens_before?: number | null;
+        compaction_summary?: string | null;
+      };
+      expect(hd.compaction_reason).toBe("unknown");
+      expect(hd.compaction_tokens_before).toBeNull();
+      expect(hd.compaction_summary).toBeNull();
+    }
+  });
 });
 
 // ── Session module tests ───────────────────────────────────────────

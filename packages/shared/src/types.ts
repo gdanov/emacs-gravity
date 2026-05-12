@@ -100,7 +100,8 @@ export type HookEventName =
   | "AskUserQuestionIntercept"
   | "TurnOpen"
   | "TurnClose"
-  | "ToolPartial";
+  | "ToolPartial"
+  | "Compaction";
 
 // ── View Model (session state tree) ──────────────────────────────────
 //
@@ -152,7 +153,44 @@ export interface Session {
   tasks: Record<string, Task>;
   files: Record<string, FileEntry>;
 
+  /**
+   * Chronological list of compactions that occurred during this session.
+   * Each entry is appended by `compaction_end`; never mutated thereafter.
+   * `marker.turnNumber` is the turn that was current when compaction
+   * completed — terminals can group markers by turn to render an inline
+   * banner without affecting turn-boundary semantics.
+   */
+  compactions: CompactionMarker[];
+
   totalToolCount: number;
+}
+
+/**
+ * One pi compaction event recorded on the session. Sourced from pi's
+ * `compaction_end` event. Pi summarizes older conversation history and
+ * discards it from the model's context window to free space; gravity
+ * records the marker so users can see "context was compacted here".
+ */
+export interface CompactionMarker {
+  /**
+   * Pi-side reason: `"manual"` (user-triggered via /compact),
+   * `"threshold"` (pi hit a context threshold mid-stream), or
+   * `"overflow"` (pi hit context overflow during a tool loop).
+   */
+  reason: string;
+  /**
+   * Turn number that was current when `compaction_end` fired. -1 if no
+   * user turn has been opened yet (compaction during turn 0).
+   */
+  turnNumber: number;
+  /** Unix-ms timestamp when the marker was recorded. */
+  timestamp: number;
+  /** Tokens in pi's context immediately before compaction. null if unreported. */
+  tokensBefore: number | null;
+  /** Pi's summary of the discarded history. null if unreported or aborted. */
+  summary: string | null;
+  /** True if pi aborted the compaction (no actual context savings). */
+  aborted: boolean;
 }
 
 /** Pointer to a tool's location in the turn tree. */
@@ -318,6 +356,7 @@ export type Patch =
   | { op: "add_tool"; turnNumber: number; stepIndex: number; agentId?: string; tool: Tool }
   | { op: "complete_tool"; toolUseId: string; result: unknown; status: "done" | "error"; duration?: number; postText?: string; postThinking?: string }
   | { op: "update_tool_partial"; toolUseId: string; partial: unknown }
+  | { op: "add_compaction"; marker: CompactionMarker }
   | { op: "add_agent"; agent: Agent }
   | { op: "complete_agent"; agentId: string; stopText?: string; stopThinking?: string; duration?: number; transcriptPath?: string }
   | { op: "update_task"; taskId: string; task: Task }

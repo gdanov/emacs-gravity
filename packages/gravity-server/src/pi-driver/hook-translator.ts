@@ -343,8 +343,22 @@ export function translatePiEvent(
       process.stderr.write(
         `[pi-adapter] compaction_end reason=${e.reason ?? "?"} aborted=${e.aborted ?? false} tokensBefore=${e.result?.tokensBefore ?? "?"}\n`,
       );
-      // TODO: surface the summary text on the turn tree (no spec yet).
-      return { kind: "noop" };
+      // Emit Compaction so gravity-server records a CompactionMarker on
+      // the session. Doesn't affect turn boundaries — the marker just
+      // captures the turn that was current when compaction completed.
+      const hookData: HookData = {
+        cwd: state.cwd,
+        compaction_reason: e.reason ?? "unknown",
+        compaction_aborted: e.aborted === true,
+        compaction_tokens_before:
+          typeof e.result?.tokensBefore === "number" ? e.result.tokensBefore : null,
+        compaction_summary:
+          typeof e.result?.summary === "string" ? e.result.summary : null,
+      };
+      return {
+        kind: "emit",
+        results: [{ hookEvent: "Compaction", hookData, sessionId: state.sessionId }],
+      };
     }
 
     case "auto_retry_start": {

@@ -39,6 +39,7 @@ import {
   addTool,
   completeTool,
   updateToolPartial,
+  addCompaction,
   addAgent,
   completeAgent,
   trackFile,
@@ -608,6 +609,48 @@ const handleAskUserQuestionIntercept = (ctx: EventContext) =>
   });
 
 /**
+ * Internal pi-driver event: pi completed a compaction. Records a
+ * `CompactionMarker` on the session capturing the reason, the turn that
+ * was current at the time, optional token-savings info, and pi's summary
+ * of the discarded history. Does NOT move turn boundaries; the marker is
+ * a session-level record terminals can render inline by `turnNumber`.
+ *
+ * Aborted compactions are still recorded (`aborted: true`) so the user
+ * sees the attempt; summary is typically null in that case.
+ */
+const handleCompaction = (ctx: EventContext) =>
+  Effect.gen(function* () {
+    const store = yield* Effect.service(SessionStore);
+    const session = ensureSession(
+      store,
+      ctx.sessionId,
+      ctx.cwd,
+      ctx.data.tmux_session,
+      ctx.data.source as string | undefined,
+    );
+    const reason = typeof ctx.data.compaction_reason === "string"
+      ? (ctx.data.compaction_reason as string)
+      : "unknown";
+    const tokensBefore = typeof ctx.data.compaction_tokens_before === "number"
+      ? (ctx.data.compaction_tokens_before as number)
+      : null;
+    const summary = stripSystemTags(ctx.data.compaction_summary as string) ?? null;
+    const aborted = ctx.data.compaction_aborted === true;
+
+    return addCompaction(session, {
+      reason,
+      // -1 sentinel if no user turn has been opened yet (compaction during
+      // turn 0 — the pre-prompt activity bucket). Terminals can render
+      // such markers as session-prelude entries.
+      turnNumber: session.currentTurn > 0 ? session.currentTurn : -1,
+      timestamp: Date.now(),
+      tokensBefore,
+      summary,
+      aborted,
+    });
+  });
+
+/**
  * Internal pi-driver event: streaming partial result from a running tool.
  * Emitted by the translator on pi's `tool_execution_update`. Replaces
  * `tool.partial` with the new value; no-op if the tool is unknown or
@@ -644,6 +687,7 @@ const dispatch: Record<string, Handler> = {
   TurnOpen: handleTurnOpen,
   TurnClose: handleTurnClose,
   ToolPartial: handleToolPartial,
+  Compaction: handleCompaction,
 };
 
 // ── Post-stop race detection ─────────────────────────────────────────

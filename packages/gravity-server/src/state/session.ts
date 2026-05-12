@@ -17,6 +17,7 @@ import type {
   FileEntry,
   ToolLocation,
   AgentLocation,
+  CompactionMarker,
 } from "@gravity/shared";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -74,6 +75,7 @@ export function createSession(sessionId: string, cwd: string, source?: string): 
     agentIndex: {},
     tasks: {},
     files: {},
+    compactions: [],
     totalToolCount: 0,
   };
 }
@@ -121,6 +123,7 @@ export function resetSession(s: Session): Patch[] {
   s.agentIndex = {};
   s.tasks = {};
   s.files = {};
+  s.compactions = [];
   s.totalToolCount = 0;
   s.plan = null;
   s.streamingText = null;
@@ -734,6 +737,23 @@ export function trackTask(
   }
 
   return [];
+}
+
+// ── Compaction ───────────────────────────────────────────────────────
+
+/**
+ * Record a pi compaction marker on the session. Append-only; never
+ * mutated thereafter. The marker captures the turn that was current at
+ * the time, so terminals can group markers by turn for inline rendering.
+ *
+ * Idempotent under repeated calls only insofar as duplicate markers are
+ * acceptable — the translator should emit one marker per `compaction_end`.
+ * Aborted compactions are still recorded (`aborted: true`) so the user
+ * sees the attempt.
+ */
+export function addCompaction(s: Session, marker: CompactionMarker): Patch[] {
+  s.compactions.push(marker);
+  return [{ op: "add_compaction", marker }];
 }
 
 // ── Token tracking helpers ───────────────────────────────────────────
