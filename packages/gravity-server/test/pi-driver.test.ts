@@ -443,6 +443,86 @@ describe("Hook translator", () => {
     expect(sessionStart.hookEvent).toBe("SessionStart");
     expect(sessionStart.hookData.model).toBe("claude-3");
   });
+
+  it("tool_execution_update emits ToolPartial and stashes the latest partial", () => {
+    // accToolStart registers the running tool; the next _update is matched
+    // by toolCallId and surfaces as a ToolPartial event.
+    const event = {
+      type: "tool_execution_update",
+      toolCallId: "call-1",
+      toolName: "bash",
+      partialResult: "line 1\nline 2\n",
+    } as unknown as PiEvent;
+
+    // First arm the accumulator with a running tool.
+    state.currentToolUseId = "call-1";
+
+    const result = translatePiEvent(event, state);
+    expect(result.kind).toBe("emit");
+    if (result.kind === "emit") {
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].hookEvent).toBe("ToolPartial");
+      const hd = result.results[0].hookData as { tool_use_id?: string; partial?: unknown };
+      expect(hd.tool_use_id).toBe("call-1");
+      expect(hd.partial).toBe("line 1\nline 2\n");
+    }
+    // Stash is kept on the accumulator for accToolEnd's fallback.
+    expect(state.currentToolPartial).toBe("line 1\nline 2\n");
+  });
+
+  it("tool_execution_update for a non-current tool does not stash (out-of-order safety)", () => {
+    // If pi sends an _update keyed by an id we're not tracking, the
+    // translator still emits ToolPartial (gravity may resolve the tool
+    // independently), but does not poison the current accumulator slot.
+    state.currentToolUseId = "current";
+    state.currentToolPartial = "current partial";
+
+    const event = {
+      type: "tool_execution_update",
+      toolCallId: "other",
+      partialResult: "other partial",
+    } as unknown as PiEvent;
+
+    translatePiEvent(event, state);
+    expect(state.currentToolPartial).toBe("current partial");
+  });
+
+  it("accToolEnd falls back to the stashed partial when toolResult is missing", () => {
+    // Simulate: tool_execution_start → 2 _update events → tool_execution_end
+    // with no result. The translator must surface the last partial as the
+    // effective result in both the hookData and the AccTool record.
+    const state2 = createAccState("s", "/tmp", "medium");
+    accTurnStart(state2, "t");
+    accToolStart(state2, "call-x", "bash", { command: "make build" });
+    state2.currentToolPartial = "compiling step 5/10\n";
+
+    const results = accToolEnd(state2, "call-x", "bash", null);
+    const post = results.find((r) => r.hookEvent === "PostToolUse");
+    expect(post).toBeDefined();
+    expect((post!.hookData as { tool_response?: unknown }).tool_response).toBe(
+      "compiling step 5/10\n",
+    );
+  });
+
+  it("accToolEnd prefers an explicit toolResult over the stashed partial", () => {
+    const state2 = createAccState("s", "/tmp", "medium");
+    accTurnStart(state2, "t");
+    accToolStart(state2, "call-x", "bash", { command: "ls" });
+    state2.currentToolPartial = "stale partial";
+
+    const results = accToolEnd(state2, "call-x", "bash", { stdout: "final" });
+    const post = results.find((r) => r.hookEvent === "PostToolUse");
+    expect((post!.hookData as { tool_response?: unknown }).tool_response).toEqual({ stdout: "final" });
+  });
+
+  it("accToolStart clears any partial left over from a previous tool", () => {
+    const state2 = createAccState("s", "/tmp", "medium");
+    accTurnStart(state2, "t");
+    accToolStart(state2, "call-a", "bash", {});
+    state2.currentToolPartial = "old";
+    accToolStart(state2, "call-b", "bash", {});
+    expect(state2.currentToolPartial).toBeUndefined();
+  });
 });
 
 // ── Session module tests ───────────────────────────────────────────

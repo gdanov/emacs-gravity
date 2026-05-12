@@ -6,8 +6,11 @@ import {
   closeTurn,
   addPrompt,
   finalizeLastPrompt,
+  addTool,
+  updateToolPartial,
+  completeTool,
 } from "../src/state/session.js";
-import type { PromptEntry } from "@gravity/shared";
+import type { PromptEntry, Tool } from "@gravity/shared";
 
 const makePrompt = (text: string): PromptEntry => ({
   type: "user",
@@ -196,6 +199,74 @@ describe("addPrompt = openTurn + attachPrompt", () => {
     const ops = patches.map((p) => p.op);
     expect(ops).toContain("add_turn");
     expect(ops).toContain("add_prompt");
+  });
+});
+
+describe("updateToolPartial", () => {
+  const mkTool = (toolUseId: string): Tool => ({
+    toolUseId,
+    name: "bash",
+    input: { command: "make build" },
+    status: "running",
+    result: null,
+    partial: null,
+    timestamp: Date.now(),
+    duration: null,
+    turn: 1,
+    assistantText: null,
+    assistantThinking: null,
+    postText: null,
+    postThinking: null,
+    parentAgentId: null,
+    ambiguous: false,
+    candidateAgentIds: null,
+    agentId: null,
+  });
+
+  it("writes partial to tool.partial and emits update_tool_partial", () => {
+    const s = createSession("s1", "/tmp");
+    openTurn(s);
+    addTool(s, mkTool("t1"));
+    const patches = updateToolPartial(s, "t1", "line 1\nline 2\n");
+    const t = s.toolIndex["t1"];
+    expect(t).toBeDefined();
+    // tool.partial is on the Tool object itself (located via toolIndex)
+    const turn = s.turns[1];
+    const stored = turn.steps[turn.steps.length - 1].tools.find((x) => x.toolUseId === "t1");
+    expect(stored?.partial).toBe("line 1\nline 2\n");
+    expect(patches).toHaveLength(1);
+    expect(patches[0].op).toBe("update_tool_partial");
+  });
+
+  it("replaces (does not append) on each update — cumulative-snapshot model", () => {
+    const s = createSession("s2", "/tmp");
+    openTurn(s);
+    addTool(s, mkTool("t1"));
+    updateToolPartial(s, "t1", "a");
+    updateToolPartial(s, "t1", "ab");
+    updateToolPartial(s, "t1", "abc");
+    const turn = s.turns[1];
+    const stored = turn.steps[turn.steps.length - 1].tools.find((x) => x.toolUseId === "t1");
+    expect(stored?.partial).toBe("abc");
+  });
+
+  it("is a no-op once the tool has completed (late _update arrives after _end)", () => {
+    const s = createSession("s3", "/tmp");
+    openTurn(s);
+    addTool(s, mkTool("t1"));
+    completeTool(s, "t1", { stdout: "final" }, "done");
+    const patches = updateToolPartial(s, "t1", "stale");
+    expect(patches).toEqual([]);
+    const turn = s.turns[1];
+    const stored = turn.steps[turn.steps.length - 1].tools.find((x) => x.toolUseId === "t1");
+    expect(stored?.partial).toBeNull(); // partial never set; result holds the final
+    expect(stored?.result).toEqual({ stdout: "final" });
+  });
+
+  it("is a no-op for unknown tool id", () => {
+    const s = createSession("s4", "/tmp");
+    const patches = updateToolPartial(s, "missing", "x");
+    expect(patches).toEqual([]);
   });
 });
 

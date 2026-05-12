@@ -38,6 +38,7 @@ import {
   finalizeLastPrompt,
   addTool,
   completeTool,
+  updateToolPartial,
   addAgent,
   completeAgent,
   trackFile,
@@ -408,6 +409,7 @@ const handlePreToolUse = (ctx: EventContext) =>
       input: (ctx.data.tool_input as Record<string, unknown>) || {},
       status: "running" as const,
       result: null as unknown,
+      partial: null as unknown,
       timestamp: Date.now(),
       duration: null,
       turn: session.currentTurn,
@@ -605,6 +607,23 @@ const handleAskUserQuestionIntercept = (ctx: EventContext) =>
     return patches;
   });
 
+/**
+ * Internal pi-driver event: streaming partial result from a running tool.
+ * Emitted by the translator on pi's `tool_execution_update`. Replaces
+ * `tool.partial` with the new value; no-op if the tool is unknown or
+ * already completed (late `_update` arriving after `_end` is dropped).
+ */
+const handleToolPartial = (ctx: EventContext) =>
+  Effect.gen(function* () {
+    const store = yield* Effect.service(SessionStore);
+    const session = store.get(ctx.sessionId);
+    if (!session) return [];
+    const toolUseId = ctx.data.tool_use_id as string | undefined;
+    if (!toolUseId) return [];
+    const partial = (ctx.data as Record<string, unknown>).partial;
+    return updateToolPartial(session, toolUseId, partial);
+  });
+
 // ── Dispatch map ─────────────────────────────────────────────────────
 
 type Handler = (ctx: EventContext) => Effect.Effect<Patch[], never, SessionStoreService | InboxService | FsService>;
@@ -624,6 +643,7 @@ const dispatch: Record<string, Handler> = {
   AskUserQuestionIntercept: handleAskUserQuestionIntercept,
   TurnOpen: handleTurnOpen,
   TurnClose: handleTurnClose,
+  ToolPartial: handleToolPartial,
 };
 
 // ── Post-stop race detection ─────────────────────────────────────────

@@ -502,6 +502,31 @@ export function completeTool(
   }];
 }
 
+/**
+ * Update a running tool's partial result (pi's `tool_execution_update`).
+ *
+ * Replaces `tool.partial` with the new value (cumulative-snapshot model,
+ * not append). Returns empty patches if the tool is unknown or already
+ * completed — late `_update`s arriving after `_end` are silently dropped.
+ *
+ * Terminals choose how to render `partial`: ignore for terminals that
+ * only show the final result, or surface live progress for long-running
+ * tools (bash builds, etc.).
+ */
+export function updateToolPartial(
+  s: Session,
+  toolUseId: string,
+  partial: unknown,
+): Patch[] {
+  const loc = s.toolIndex[toolUseId];
+  if (!loc) return [];
+  const tool = findToolByLocation(s, loc);
+  if (!tool) return [];
+  if (tool.status !== "running") return [];
+  tool.partial = partial;
+  return [{ op: "update_tool_partial", toolUseId, partial }];
+}
+
 export function findTool(s: Session, toolUseId: string): Tool | undefined {
   const loc = s.toolIndex[toolUseId];
   if (!loc) return undefined;

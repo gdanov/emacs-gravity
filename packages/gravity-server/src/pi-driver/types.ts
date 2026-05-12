@@ -163,13 +163,27 @@ export interface ToolExecutionEndEvent extends PiBaseEvent {
 
 /**
  * Pi emits this between `tool_execution_start` and `tool_execution_end`
- * for streaming partial results. The adapter ignores it currently.
+ * for streaming partial results (e.g. bash output as the command runs).
+ *
+ * Pi 0.74 wire shape per `docs/json.md`:
+ *   `{ toolCallId, toolName, args, partialResult }`
+ *
+ * The legacy `partial` field is retained for defensive parsing.
+ *
+ * `partialResult`'s shape is tool-specific. For bash it's typically the
+ * accumulated stdout/stderr buffer up to the moment the update was
+ * emitted; for other tools it can be any partial structure pi chooses
+ * to expose.
  */
 export interface ToolExecutionUpdateEvent extends PiBaseEvent {
   type: "tool_execution_update";
   toolCallId?: string;
-  // pi may attach partial result fragments here — shape varies, kept loose.
+  toolName?: string;
+  args?: Record<string, unknown>;
+  partialResult?: unknown;
+  // Legacy / defensive
   partial?: unknown;
+  tool_call_id?: string;
 }
 
 /**
@@ -460,6 +474,13 @@ export interface AccState {
    * preceding text starts fresh. accToolEnd consumes this. */
   currentToolAssistantText: string | undefined;
   currentToolAssistantThinking: string | undefined;
+  /**
+   * Latest `partialResult` from `tool_execution_update`. Replaced on every
+   * update (cumulative-snapshot model). `accToolEnd` uses this as a
+   * fallback for `result` if the final event carries no `result` of its
+   * own. Cleared at tool start.
+   */
+  currentToolPartial: unknown;
 
   // Turn tracking
   turns: AccTurn[];

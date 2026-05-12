@@ -79,11 +79,11 @@ export interface HookData {
 /** All hook event types supported by the bridge.
  *
  * The first group mirrors Claude Code's hook vocabulary (delivered via the
- * emacs-bridge shim). The trailing `TurnOpen` / `TurnClose` are internal
- * boundary events emitted by the pi-driver translator — they don't
- * correspond to any Claude Code hook. They exist so pi can drive turn
- * boundaries independently of the user-prompt-arrival event, which is the
- * only signal CC ever needs.
+ * emacs-bridge shim). The trailing `TurnOpen` / `TurnClose` / `ToolPartial`
+ * are internal boundary events emitted by the pi-driver translator — they
+ * don't correspond to any Claude Code hook. They exist so pi can drive
+ * turn boundaries and stream partial tool output independently of CC's
+ * coarser event vocabulary.
  */
 export type HookEventName =
   | "SessionStart"
@@ -99,7 +99,8 @@ export type HookEventName =
   | "PermissionRequest"
   | "AskUserQuestionIntercept"
   | "TurnOpen"
-  | "TurnClose";
+  | "TurnClose"
+  | "ToolPartial";
 
 // ── View Model (session state tree) ──────────────────────────────────
 //
@@ -204,6 +205,16 @@ export interface Tool {
   input: Record<string, unknown>;
   status: "running" | "done" | "error";
   result: unknown;
+  /**
+   * Streaming partial result, updated by pi's `tool_execution_update`
+   * events while the tool is running. Replaced on each update; cleared
+   * (left in place but no longer authoritative) once `result` is set on
+   * tool_execution_end. Terminals that want live progress can render
+   * this; terminals that only render the final result can ignore it.
+   * Null for Claude Code tools — CC delivers full output in one shot
+   * via PostToolUse.
+   */
+  partial: unknown;
   timestamp: number;
   duration: number | null;
   turn: number;
@@ -306,6 +317,7 @@ export type Patch =
   | { op: "add_step"; turnNumber: number; agentId?: string; step: StepNode }
   | { op: "add_tool"; turnNumber: number; stepIndex: number; agentId?: string; tool: Tool }
   | { op: "complete_tool"; toolUseId: string; result: unknown; status: "done" | "error"; duration?: number; postText?: string; postThinking?: string }
+  | { op: "update_tool_partial"; toolUseId: string; partial: unknown }
   | { op: "add_agent"; agent: Agent }
   | { op: "complete_agent"; agentId: string; stopText?: string; stopThinking?: string; duration?: number; transcriptPath?: string }
   | { op: "update_task"; taskId: string; task: Task }

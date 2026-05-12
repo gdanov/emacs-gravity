@@ -36,6 +36,7 @@ export function createAccState(sessionId: string, cwd: string, effortLevel: stri
     currentToolStartTime: null,
     currentToolAssistantText: undefined,
     currentToolAssistantThinking: undefined,
+    currentToolPartial: undefined,
     turns: [],
     currentTurn: -1,
     inTurn: false,
@@ -132,6 +133,8 @@ export function accToolStart(
   state.currentToolName = toolName;
   state.currentToolInput = toolInput;
   state.currentToolStartTime = Date.now();
+  // Clear stale partial from any prior tool — partials are per-tool.
+  state.currentToolPartial = undefined;
 
   // Snapshot whatever assistant text/thinking pi streamed BEFORE this tool
   // into per-tool slots. accToolEnd reads from these slots to populate the
@@ -170,6 +173,15 @@ export function accToolEnd(
   const toolUseId = state.currentToolUseId;
   const toolInput = state.currentToolInput ?? {};
 
+  // If pi sent tool_execution_update events but the final tool_execution_end
+  // carries no result of its own, fall back to the last accumulated partial.
+  // Pi's behavior is tool-dependent: some tools deliver the final payload
+  // on `_end`, others only stream via `_update` and end with `result: null`.
+  const effectiveResult =
+    toolResult === undefined || toolResult === null
+      ? state.currentToolPartial
+      : toolResult;
+
   // Use the assistant text/thinking that accToolStart snapshotted from the
   // pending accumulator. The pending accumulator may have received MORE
   // text after the tool started (rare for pi — usually streaming pauses
@@ -186,7 +198,7 @@ export function accToolEnd(
     tool_name: toolName,
     tool_use_id: toolUseId,
     tool_input: toolInput,
-    tool_response: toolResult,
+    tool_response: effectiveResult,
     assistant_text: assistantText,
     assistant_thinking: assistantThinking,
     post_tool_text: postText,
@@ -211,7 +223,7 @@ export function accToolEnd(
       assistantThinking: assistantThinking ?? undefined,
       startTime: state.currentToolStartTime ?? Date.now(),
       endTime: Date.now(),
-      result: toolResult,
+      result: effectiveResult,
       error: error ?? null,
       postText: postText ?? undefined,
       postThinking: postThinking ?? undefined,
@@ -226,6 +238,7 @@ export function accToolEnd(
   state.currentToolStartTime = null;
   state.currentToolAssistantText = undefined;
   state.currentToolAssistantThinking = undefined;
+  state.currentToolPartial = undefined;
 
   return results;
 }

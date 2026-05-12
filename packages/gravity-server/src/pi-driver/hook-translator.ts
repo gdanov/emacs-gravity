@@ -186,10 +186,40 @@ export function translatePiEvent(
       return { kind: "emit", results };
     }
 
-    // Pi emits streaming partial-result updates between start and end.
-    // No event for us to emit; just ignore.
-    case "tool_execution_update":
-      return { kind: "noop" };
+    case "tool_execution_update": {
+      // Pi emits streaming partial-result updates between start and end.
+      // Pi 0.74 wire fields: { toolCallId, toolName, args, partialResult }.
+      // The `partial` legacy name is also accepted defensively.
+      //
+      // We forward to the gravity ToolPartial event so terminals that want
+      // live progress (e.g. a running bash command's output) can render
+      // it. The accumulator also stashes the latest partial so accToolEnd
+      // can use it as a fallback if the tool_execution_end carries no
+      // result (pi behavior is tool-dependent).
+      const e = event as {
+        toolCallId?: string;
+        tool_call_id?: string;
+        partialResult?: unknown;
+        partial?: unknown;
+      };
+      const id = e.toolCallId ?? e.tool_call_id ?? "";
+      const partial = e.partialResult ?? e.partial;
+      if (!id || partial === undefined) return { kind: "noop" };
+      // Stash the latest partial on the accumulator. accToolEnd reads it
+      // if pi sends an empty `result` on the final event.
+      if (state.currentToolUseId === id) {
+        state.currentToolPartial = partial;
+      }
+      const hookData: HookData = {
+        tool_use_id: id,
+        partial,
+        cwd: state.cwd,
+      };
+      return {
+        kind: "emit",
+        results: [{ hookEvent: "ToolPartial", hookData, sessionId: state.sessionId }],
+      };
+    }
 
     // Pi 0.74 emits message_start / message_end as full snapshot events.
     // For user-role messages, this is where the prompt text lives — extract
