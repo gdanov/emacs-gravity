@@ -7,10 +7,7 @@ Design and implementation plan for integrating pi coding agent as a gravity-serv
 gravity-server manages session state and broadcasts patches to terminals (Emacs, macOS menu bar). Currently it receives events from Claude Code via a bridge shim. This design adds a **pi adapter** — gravity-server spawns and drives a pi subprocess, translating pi events into the same internal state mutations.
 
 **Why pi?**
-- Model-agnostic: works with Anthropic, OpenAI, Google, DeepSeek, etc.
-- Managed context: built-in compaction, session management
-- Extensible: skills, prompt templates, extensions
-- Active development with solid SDK
+Because we want to support it.
 
 **Key insight:** gravity-server's `handleEvent()` is event-format agnostic. The adapter translates pi events into `HookData` and calls `handleEvent()` directly — no new protocol needed.
 
@@ -52,64 +49,129 @@ gravity-server manages session state and broadcasts patches to terminals (Emacs,
 
 ## Event Mapping
 
-The adapter translates pi events to gravity-server's `HookData` format, then calls `handleEvent()`.
+The adapter translates pi events into gravity state mutations. Pi gives us **explicit, unambiguous boundary events** at three levels — the mapping uses each one directly. There is no boundary reconstruction from heuristics, no cross-event dependency, no "the next event will close this".
 
-### Event Translation Table
+### Pi's three boundary levels (per `pi-coding-agent/docs/json.md`)
 
-| Pi Event | Gravity Event | Notes |
-|----------|--------------|-------|
-| `agent_start` | `UserPromptSubmit` | On first pi turn after user sends prompt |
-| `tool_execution_start` | `PreToolUse` | Extracts assistant_text, assistant_thinking from streaming |
-| `tool_execution_end` | `PostToolUse` | Extracts post_tool_text, post_tool_thinking from result |
-| `tool_execution_end` (error) | `PostToolUseFailure` | Sets error flag |
-| `agent_end` | `Stop` | Finalizes turn, emits token usage |
-| — | `SessionStart` | On adapter startup (if not resuming) |
-| — | `SessionEnd` | On adapter shutdown |
+| Pi level | Pi events | Meaning |
+|---|---|---|
+| Process | (subprocess spawn / exit) | One pi binary runs, can serve N user prompts |
+| Agent run | `agent_start` / `agent_end` | One user-prompt cycle. Begins when pi starts processing a prompt, ends when the model stops calling tools |
+| Inner LLM call | `turn_start` / `turn_end` | One model invocation inside an agent run. An agent run loops through N inner turns until the model returns no more `tool_calls` |
+
+**`agent_start` is NOT a session lifetime event.** A long-lived pi process emits `agent_start` once per user prompt. This is the boundary signal we map to gravity's "turn".
+
+### Boundary mapping (the spine)
+
+| Pi boundary | Gravity action | Owned by |
+|---|---|---|
+| Subprocess spawn | `SessionStart` (synthesized eagerly by `startPiSession` in `gravity-server.ts`) | gravity-server |
+| `agent_start` | **Open new turn** (calls `state/session.openTurn(session)` — creates an empty TurnNode, freezes the previous one if any). Emits `add_turn` + (if applicable) `freeze_turn` patches. | translator |
+| `message_start` role=user (after `agent_start`) | **Attach prompt text** to the current turn (`state/session.attachPrompt(session, text)`). Emits `add_prompt` patch. Degrades cleanly: if the message never arrives or its text can't be parsed, the turn just shows up unlabeled — we don't lose the boundary. | translator |
+| `agent_end` | **Close current turn**: set `stop_text`/`stop_thinking`, mark `frozen=true`, set token usage. Emits `set_turn_stop` + `freeze_turn` + `set_turn_tokens` patches. Token usage is pulled from the trailing `AssistantMessage` in `agent_end.messages[]` (each AssistantMessage carries its own `usage`); there is **no** `agent_end.result.usage` field on the wire. | translator |
+| Subprocess exit | `SessionEnd` | mod.ts |
+
+### Tool & content events (within a turn)
+
+| Pi event | Gravity action | Notes |
+|---|---|---|
+| `tool_execution_start` | snapshot pending text/thinking into per-tool slot | no patch yet |
+| `tool_execution_end` | emit `PreToolUse` + `PostToolUse` (or `PostToolUseFailure`) with the snapshotted assistant text and the post-tool text/thinking | both events emitted on END so post-text is captured |
+| `message_update` text_delta | accumulate into `pendingAssistantText` | flushed by next `tool_execution_start` or by `agent_end` |
+| `message_update` thinking_delta | accumulate into `pendingAssistantThinking` | flushed by next `tool_execution_start` or by `agent_end` |
+| `message_start` role=assistant | (no-op) | content arrives via `message_update` deltas |
+| `message_end` role=assistant | (no-op for now) | per `docs/rpc.md`, this carries the *final* assistant message including `usage` and `stopReason`. The current spine derives turn token usage from `agent_end.messages[]` instead; if/when we want per-step token accounting, this is where it lives. |
+| `turn_start` / `turn_end` | (no-op) | pi's inner LLM-call boundary has no gravity equivalent |
+| `model_select` | emit `set_meta { modelName }` patch | **not in pi's documented event vocabulary** (`docs/json.md`, `docs/rpc.md`). Either an RPC-private/undocumented event or dead code. TODO: verify with a pi smoke run before relying on it. |
+| `branch_update` | update accumulator state; next turn carries the branch | **not in pi's documented event vocabulary**. Same caveat as `model_select`. |
+| `error` | log; no patch | |
+| `queue_update`, `compaction_start` / `compaction_end`, `auto_retry_start` / `auto_retry_end`, `extension_error` | (no-op today) | Documented in `docs/rpc.md` but not mapped. `compaction_*` is the most gravity-relevant — pi compaction resets token accounting and inserts a summary; currently invisible to gravity. TODO: at minimum log compaction; ideally emit a `set_turn_tokens` reset and a synthetic prompt-like marker. |
+| `tool_execution_update` | (no-op) | streaming partial results, not surfaced. **Parity gap with Claude Code**: CC's `PostToolUse` delivers full bash output as one payload, so the user sees it; pi streams it in `_update` events that we drop. TODO: decide whether to surface streaming output (e.g. into a tool's `result` accumulator) or accept the gap. |
+
+### Why this mapping (vs the old one)
+
+Pi already tells us, at zero ambiguity, where every gravity boundary lives. The old design routed `agent_start` → `SessionStart` and reconstructed the turn boundary downstream from `message_start` content shape. That had two structural problems:
+
+1. **`agent_start`'s information was discarded.** `SessionStart` is conceptually wrong (pi can emit `agent_start` N times in one process lifetime), and the server had to special-case "skip reset for pi" to keep it benign. The actual turn boundary was reconstructed in a different code path entirely.
+2. **`agent_end` didn't close the turn.** Stop set `stop_text` but never marked the turn frozen. Freezing happened lazily in `addPrompt` of the *next* prompt — meaning a pi process that emitted `agent_end` and waited for the user (or never received another prompt) would leave the turn open indefinitely. Subsequent activity on the same un-frozen turn (e.g. a second prompt whose `message_start` parsing failed) would silently extend the previous turn instead of starting a new one. This was observed in practice: pi emitted Stop, the user sent a second prompt whose user-message content arrived as a string (translator only handled array form), no `UserPromptSubmit` fired, `agent_start` was a no-op `SessionStart`, and 46 tools from the second prompt landed in the first prompt's still-open turn. The first prompt's `stop_text` was overwritten by the second's.
+
+The new mapping makes each gravity state mutation owned by exactly one pi event, with no cross-event dependency:
+
+- `agent_start` always opens a turn, even before any prompt text arrives.
+- `agent_end` always closes the turn, regardless of what comes next.
+- `message_start` only *enriches* the turn with a label; missing prompt text degrades to "untitled turn", not "lost turn".
+
+Result: the state machine is monotonically correct. Malformed or missing pi events degrade locally instead of corrupting structure.
 
 ### Content Extraction
 
-pi exposes token-by-token streaming via `message_update` events:
+Pi exposes token-by-token streaming via `message_update` events:
 
 ```typescript
 // message_update: text_delta
 { assistantMessageEvent: { type: "text_delta", delta: "Hello " } }
 
-// message_update: thinking_delta  
+// message_update: thinking_delta
 { assistantMessageEvent: { type: "thinking_delta", delta: "Let me check" } }
 ```
 
-The adapter accumulates these deltas and attaches them to the next tool as `assistant_text` / `assistant_thinking`.
+The adapter accumulates deltas and attaches them to the next tool as `assistant_text` / `assistant_thinking`. Tool results may also carry post-tool thinking, extracted as `post_tool_text` / `post_tool_thinking`. Any deltas left in the accumulator at `agent_end` become the turn's `stop_text` / `stop_thinking`.
 
-Similarly, tool results may include thinking content that the adapter extracts as `post_tool_text` / `post_tool_thinking`.
+### User message text extraction
 
-### Turn Alignment
+Pi's `UserMessage.content` is `string | (TextContent | ImageContent)[]` (per `pi-coding-agent/docs/session.md`). The translator must accept **both** forms:
 
-| Concept | Pi | Gravity |
-|---------|-----|---------|
-| Turn boundary | `turn_end` (one assistant response) | `addPrompt` → `Stop` (user prompt → response cycle) |
-| Steps | N/A | `StepNode` = one assistant response |
+```typescript
+case "message_start": {
+  const msg = e.message;
+  if (msg?.role === "user") {
+    const text =
+      typeof msg.content === "string"
+        ? msg.content
+        : Array.isArray(msg.content)
+          ? msg.content.filter(c => c?.type === "text" && typeof c.text === "string")
+                       .map(c => c.text as string)
+                       .join("")
+          : "";
+    if (text) attachPromptText(state, text);   // attach to current turn (already opened by agent_start)
+  }
+  return { kind: "noop" };
+}
+```
 
-**One gravity turn** = one user prompt + zero or more pi turns (tool calls within that response cycle).
+If `text` is empty, the turn stays unlabeled — the boundary is still in place because `agent_start` already opened it.
+
+### Turn lifecycle: the full picture
 
 ```
-pi: agent_start (user prompt)
-    ↓
-pi: turn_start (pi turn 1)
-    ↓
-pi: tool_execution_start (bash ls)
-    ↓
-pi: tool_execution_end
-    ↓
-pi: turn_end
-    ↓
-pi: turn_start (pi turn 2 — only if more tool calls)
-    ↓
-... (more pi turns)
-    ↓
-pi: agent_end (done)
-    ↓
-adapter: emit gravity turn (combines all pi turns since agent_start)
+┌─ pi process spawn ─────────────────────────────┐  → SessionStart (eager, server-side)
+│                                                 │
+│  ┌─ agent_start ──────────────────────────────┐ │  → openTurn(s)               [add_turn, freeze_turn(prev)]
+│  │   message_start role=user content=…        │ │  → attachPromptText(s, text) [add_prompt]
+│  │   turn_start                                │ │  → (no-op)
+│  │     message_start role=assistant            │ │  → (no-op)
+│  │     message_update text_delta "Let me…"    │ │  → accumulate
+│  │     tool_execution_start  Read /foo        │ │  → snapshot pending text
+│  │     tool_execution_end    {…}              │ │  → emit PreToolUse + PostToolUse
+│  │     message_update text_delta "Now I…"     │ │  → accumulate
+│  │     tool_execution_start  Edit /foo        │ │
+│  │     tool_execution_end    {…}              │ │  → emit PreToolUse + PostToolUse
+│  │     …                                       │ │
+│  │   turn_end                                  │ │  → (no-op)
+│  │   turn_start                                │ │  → (no-op — pi's inner loop iteration)
+│  │     …more tools…                            │ │
+│  │   turn_end                                  │ │
+│  └─ agent_end messages=[…AssistantMessage]    ─┘ │  → closeTurn(s, stopText, stopThinking, usage)
+│                                                  │     usage = trailing AssistantMessage.usage
+│                                                  │     [set_turn_stop, freeze_turn, set_turn_tokens]
+│                                                  │
+│  ┌─ agent_start (next prompt) ──────────────── ┐ │  → openTurn(s)               [add_turn]  (prev already frozen)
+│  │   …                                          │ │
+│  └─ agent_end ────────────────────────────────  ┘ │  → closeTurn
+└─ pi process exit ──────────────────────────────── ┘  → SessionEnd
 ```
+
+Three crisp boundaries (process / agent / tool), one event per boundary, no reconstruction.
 
 ## Effort Level Control
 
@@ -251,21 +313,49 @@ Emacs client communicates with gravity-server via terminal socket messages:
 { type: "pi.set-thinking", sessionId: string, level: string }
 ```
 
-## Status: Complete
+## Status
 
-All core functionality is implemented and tested:
+Implemented:
 
 - [x] **pi-driver/types.ts** — PiEvent union type, TranslationResult, AccState
-- [x] **pi-driver/hook-translator.ts** — translatePiEvent() with content accumulation
-- [x] **pi-driver/turn-accumulator.ts** — State machine for batching pi turns
 - [x] **pi-driver/protocol.ts** — JSONL parser and RPC command formatter
 - [x] **pi-driver/spawn.ts** — Subprocess spawning with lifecycle management
 - [x] **pi-driver/session.ts** — Effort level mapping and metadata sync
 - [x] **pi-driver/mod.ts** — startPiDriver() composition
 - [x] **pi-driver/index.ts** — Re-export startPiDriver
-- [x] **Wire into gravity-server.ts** — `--pi` flag and terminal message handlers
-- [x] **Emacs client functions** — claude-gravity--pi-start, claude-gravity--pi-prompt, etc.
-- [x] **Unit tests** — 40 tests covering all modules
+- [x] **Wire into gravity-server.ts** — `--pi` flag, terminal message handlers, multi-driver `Map<sessionId, Driver>`
+- [x] **Emacs client functions** — `claude-gravity--pi-start`, `claude-gravity--pi-prompt`, etc., per-session
+- [x] **Multi-session pi** — N concurrent pi processes, one per gravity session
+- [x] **Extension UI bridge** — `confirm`/`select` routed through gravity inbox
+
+### Required primitives (prerequisite — not yet implemented)
+
+The boundary mapping above names three primitives that **do not exist in `state/session.ts` today**:
+
+- `openTurn(session)` — create an empty `TurnNode`, append to `session.turns`, freeze the previous turn if any. Emits `add_turn` (+ `freeze_turn` for prev).
+- `attachPrompt(session, text)` — set `prompt` on the current (last) turn. Emits `add_prompt`. Idempotent / late-arrival safe: if called twice for the same turn, second call wins (or no-ops if text already set).
+- `closeTurn(session, stopText, stopThinking, usage)` — set `stop_text`/`stop_thinking`/`token_in`/`token_out`, set `frozen=true`. Emits `set_turn_stop` + `set_turn_tokens` + `freeze_turn`.
+
+Today's `addPrompt` (creates turn AND attaches prompt — entangled) and `finalizeLastPrompt` (sets stop_text, **does not freeze**) cover overlapping ground but with the wrong shape for the new mapping. The pending items below assume these primitives exist; introducing them is step 0 of the migration.
+
+Pending (matches the boundary mapping in this doc):
+
+- [ ] **Introduce `openTurn` / `attachPrompt` / `closeTurn` in `state/session.ts`** — see above. Step 0 for everything else here.
+- [ ] **`agent_start` opens a turn directly** — replace `accAgentStart` → `SessionStart` emission with a real `openTurn` mutation. Stop using `SessionStart` as a per-prompt boundary signal.
+- [ ] **`agent_end` freezes the turn** — `accAgentEnd` (→ Stop) must call `closeTurn(stopText, stopThinking, usage)` which sets `frozen=true` and emits `freeze_turn`. Do not rely on the next `addPrompt` to freeze. **Token usage source**: walk `agent_end.messages[]` and read `usage` off the trailing `AssistantMessage` — there is no `agent_end.result.usage` (current code reads `e.result?.usage`, which is always undefined).
+- [ ] **`message_start` accepts `content: string`** — current translator only handles array form, silently drops string-form user messages. With the new mapping the boundary survives the drop, but the prompt label is still missed.
+- [ ] **Remove the `isPi` special case** in `event-handler.ts:handleSessionStart` once `SessionStart` no longer fires per pi prompt.
+- [ ] **Apply `freeze on Stop` to Claude Code too** — same latent bug, masked by CC's tight prompt cadence.
+
+### Gaps and parity TODOs (not blocking the spine, but tracked here)
+
+- [ ] **Restart / crash recovery.** Spec the behavior when a pi subprocess dies mid-turn and is respawned. With the `isPi` gate skipping `SessionStart` reset, the next spawn's first `agent_start` would land on top of a still-open stale turn — the exact bug the new spine claims to fix returns under restart. Options: (a) on subprocess exit, synthesize a `closeTurn` for any unfrozen turn; (b) on subprocess respawn, treat the first `agent_start` as a hard reset; (c) make `openTurn` itself freeze a prior unfrozen turn defensively. Option (c) is cheapest and most local.
+- [ ] **Pending UI dialog cleanup on pi exit.** The doc claims "any pending UI dialogs are dropped from the inbox" on pi exit. Verify (or implement) explicit cleanup in `spawn.ts`/`mod.ts` exit handlers — currently not obvious from the code.
+- [ ] **`agent_end.messages[]` source-of-truth.** Beyond token usage, the trailing `AssistantMessage` also carries `stopReason`. Decide whether gravity surfaces `stopReason` (e.g. to distinguish "model stopped" from "budget exhausted" from "abort").
+- [ ] **`message_end role=assistant` → per-step token accounting.** Pi emits `message_end` with full `usage` and `stopReason` for every inner LLM call. If we ever want per-step (not just per-turn) token attribution, this is the hook. Not needed for spine.
+- [ ] **Undocumented events `model_select` / `branch_update`.** Translator handles them but they don't appear in pi's documented vocabulary. Either confirm they exist (RPC-private?) and document, or delete the handlers.
+- [ ] **Unmapped documented events: `queue_update`, `compaction_start` / `compaction_end`, `auto_retry_start` / `auto_retry_end`, `extension_error`.** All in `docs/rpc.md`, none in the translator. Most gravity-relevant: `compaction_*` resets token accounting and inserts a summary — currently invisible. Minimum: log. Better: emit a `set_turn_tokens` reset and a synthetic prompt-like marker so the turn tree shows a compaction boundary.
+- [ ] **`tool_execution_update` streaming output.** Currently dropped. Claude Code's `PostToolUse` delivers full bash output as one payload, so users see it; in pi the streaming `_update` events are the only delivery path and we ignore them. Decide: surface into `tool.result` accumulator, or accept the visibility gap.
 
 ## Feature Parity with Claude Code
 
@@ -295,9 +385,12 @@ This means **pi extensions that use `ctx.ui.confirm` / `ctx.ui.select` get the s
 
 ## Non-Goals (Deferred)
 
-- Multiple concurrent pi sessions — single session per adapter instance (singleton `activePiDriver` in `gravity-server.ts`)
 - pi session file compatibility — adapter owns session
 - Explicit provider/model override — pi uses its configured defaults
+
+## No longer non-goals (now supported)
+
+- **Multiple concurrent pi sessions.** N pi processes can run in parallel, one per gravity session. Server tracks them in `piDrivers: Map<sessionId, Driver>`; every pi RPC takes a `sessionId`. See the multi-session refactor for details.
 
 ## Alternatives Considered
 
