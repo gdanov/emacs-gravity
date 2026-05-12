@@ -2260,21 +2260,29 @@ summary.  Otherwise expands the last turn and its last step."
                     (with-selected-window win
                       (goto-char (oref last-stop start))
                       (recenter -3)))))
-            ;; No stop message: expand last turn and its last step
+            ;; No top-level stop message: expand last turn and its last step.
+            ;; For frozen turns (e.g. pi sessions) the stop-message is nested
+            ;; inside the turn — show it too.
             (when last-turn
               (magit-section-show last-turn)
-              (let ((last-step nil))
+              (let ((last-step nil)
+                    (nested-stop nil))
                 (dolist (child (oref last-turn children))
-                  (when (eq (oref child type) 'response-step)
-                    (magit-section-hide child)
-                    (setq last-step child)))
+                  (pcase (oref child type)
+                    ('response-step
+                     (magit-section-hide child)
+                     (setq last-step child))
+                    ('stop-message
+                     (setq nested-stop child))))
                 (when last-step
-                  (magit-section-show last-step)))
-              (let ((win (get-buffer-window (current-buffer))))
-                (when win
-                  (with-selected-window win
-                    (goto-char (1- (oref last-turn end)))
-                    (recenter -3)))))))))))
+                  (magit-section-show last-step))
+                (when nested-stop
+                  (magit-section-show nested-stop))
+                (let ((win (get-buffer-window (current-buffer))))
+                  (when win
+                    (with-selected-window win
+                      (goto-char (1- (oref last-turn end)))
+                      (recenter -3))))))))))))
 
 
 (defun claude-gravity-return-to-overview (&optional bury)

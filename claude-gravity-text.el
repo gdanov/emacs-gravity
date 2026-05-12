@@ -103,10 +103,11 @@ Cells that exceed their column's width are truncated with `…'."
                     (concat "│"
                             (mapconcat
                              (lambda (pair)
-                               (let* ((cell (funcall truncate-cell (car pair) (cdr pair)))
+                               (let* ((raw (funcall truncate-cell (car pair) (cdr pair)))
+                                      (cell (funcall strip-markup raw))
                                       (w (cdr pair)))
                                  (concat " " cell
-                                         (make-string (max 0 (- w (funcall display-width cell))) ?\s)
+                                         (make-string (max 0 (- w (length cell))) ?\s)
                                          " ")))
                              (cl-mapcar #'cons row widths) "│")
                             "│"))))

@@ -292,6 +292,8 @@
      (claude-gravity--md-fontify-mermaid-block)
      (claude-gravity--md-fontify-rendered-table))
    'append)
+  (add-hook 'window-size-change-functions
+            #'claude-gravity--md-schedule-resize-check)
   (claude-gravity--log 'debug "gravity md render enabled"))
 
 (defun claude-gravity-teardown-md-render ()
@@ -306,6 +308,43 @@
   (claude-gravity--log 'debug "gravity md render disabled"))
 
 (add-hook 'markdown-mode-hook #'claude-gravity-setup-md-render)
+
+;;;; Window resize → re-fontify tables/diagrams
+
+(defvar-local claude-gravity--md-last-render-width nil
+  "Width (columns) used the last time this buffer was font-locked.
+Used by `claude-gravity--md-process-resize' to decide whether the
+table-rendering matcher needs to refire.")
+
+(defvar claude-gravity--md-resize-timer nil
+  "Pending idle timer that will run `claude-gravity--md-process-resize'.
+Replaced on every size-change event so dragging the frame coalesces
+into a single re-render.")
+
+(defun claude-gravity--md-schedule-resize-check (&rest _)
+  "Debounce window-size-change events into a single idle-time check."
+  (when (and claude-gravity--md-resize-timer
+             (timerp claude-gravity--md-resize-timer))
+    (cancel-timer claude-gravity--md-resize-timer))
+  (setq claude-gravity--md-resize-timer
+        (run-with-idle-timer 0.2 nil
+                             #'claude-gravity--md-process-resize)))
+
+(defun claude-gravity--md-process-resize ()
+  "Flush font-lock in markdown buffers whose displaying window changed width."
+  (setq claude-gravity--md-resize-timer nil)
+  (walk-windows
+   (lambda (win)
+     (let ((buf (window-buffer win)))
+       (when (buffer-live-p buf)
+         (with-current-buffer buf
+           (when (and claude-gravity--markdown-render-mode
+                      (derived-mode-p 'markdown-mode))
+             (let ((new-width (window-width win)))
+               (unless (eql new-width claude-gravity--md-last-render-width)
+                 (setq claude-gravity--md-last-render-width new-width)
+                 (font-lock-flush))))))))
+   nil 'visible))
 
 ;;;; Cache management
 
