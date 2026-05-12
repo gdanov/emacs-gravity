@@ -12,10 +12,9 @@ import type {
   AccState,
   AccTurn,
   AccTool,
-  TranslateEventResult,
   TranslationResult,
 } from "./types.js";
-import type { HookData, HookEventName, TokenUsage } from "@gravity/shared";
+import type { HookData, TokenUsage } from "@gravity/shared";
 
 /**
  * Create initial accumulator state for a new session.
@@ -286,6 +285,14 @@ export function accAgentStart(state: AccState): TranslationResult[] {
 /**
  * Called on `message_start` (or `message_end`) with role "user". Emits the
  * gravity UserPromptSubmit event for that prompt. No-op if text is empty.
+ *
+ * Sets `source: "pi"` on the hookData so `handleUserPromptSubmit` routes
+ * the event into `attachPrompt` (attach to the pre-opened pi turn) rather
+ * than `addPrompt` (create a new turn). Without `source` the handler falls
+ * back to checking `session.source`, which works as long as the eager
+ * SessionStart from `startPiSession` has run first — but belt-and-
+ * suspenders: any future pi path that bypasses that ordering would
+ * otherwise silently degrade to "create new turn" + miss the boundary.
  */
 export function accUserPromptMessage(state: AccState, promptText: string): TranslationResult[] {
   if (!promptText) return [];
@@ -294,6 +301,7 @@ export function accUserPromptMessage(state: AccState, promptText: string): Trans
     hookData: {
       prompt: promptText,
       cwd: state.cwd,
+      source: "pi",
     },
     sessionId: state.sessionId,
   }];

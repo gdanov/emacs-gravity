@@ -233,9 +233,16 @@ const handleUserPromptSubmit = (ctx: EventContext) =>
         // already-opened, still-empty turn instead of creating a new one.
         // Claude Code's UserPromptSubmit is atomic (open + attach), so it
         // falls through to addPrompt.
+        //
+        // Guard against attaching to turn 0 (pre-prompt activity): if pi
+        // ever emits `message_start role=user` before `agent_start` the
+        // "current" turn is turn 0, which by convention has no prompt.
+        // Attaching there would orphan the prompt off the pre-prompt
+        // bucket and skip actual turn creation.
         const attachToOpen =
           (ctx.data.source === "pi" || session.source === "pi") &&
-          lastTurn && !lastTurn.prompt && !lastTurn.frozen;
+          lastTurn && !lastTurn.prompt && !lastTurn.frozen &&
+          lastTurn.turnNumber !== 0;
         if (attachToOpen) {
           patches.push(...attachPrompt(session, entry));
         } else {

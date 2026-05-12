@@ -68,7 +68,7 @@ The adapter translates pi events into gravity state mutations. Pi gives us **exp
 | Subprocess spawn | `SessionStart` (synthesized eagerly by `startPiSession` in `gravity-server.ts`) | gravity-server |
 | `agent_start` | **Open new turn** (calls `state/session.openTurn(session)` — creates an empty TurnNode, freezes the previous one if any). Emits `add_turn` + (if applicable) `freeze_turn` patches. | translator |
 | `message_start` role=user (after `agent_start`) | **Attach prompt text** to the current turn (`state/session.attachPrompt(session, text)`). Emits `add_prompt` patch. Degrades cleanly: if the message never arrives or its text can't be parsed, the turn just shows up unlabeled — we don't lose the boundary. | translator |
-| `agent_end` | **Close current turn**: set `stop_text`/`stop_thinking`, mark `frozen=true`, set token usage. Emits `set_turn_stop` + `freeze_turn` + `set_turn_tokens` patches. Token usage is pulled from the trailing `AssistantMessage` in `agent_end.messages[]` (each AssistantMessage carries its own `usage`); there is **no** `agent_end.result.usage` field on the wire. | translator |
+| `agent_end` | **Close current turn**: set `stop_text`/`stop_thinking`, mark `frozen=true`, set token usage. Emits `set_turn_stop` + `freeze_turn` + `set_turn_tokens` patches. Token usage is **summed across all `AssistantMessage` entries** in `agent_end.messages[]` — each inner LLM call carries its own `usage`, and the gravity turn = the whole agent run, so the turn total is the sum. Read `stopReason` from the trailing `AssistantMessage`. There is **no** `agent_end.result.usage` field on the wire (legacy shape, kept defensively). | translator |
 | Subprocess exit | `SessionEnd` | mod.ts |
 
 ### Tool & content events (within a turn)
