@@ -23,6 +23,10 @@ export type {
   InboxItem,
   InboxItemType,
 
+  // Pi
+  CompactionMarker,
+  PiCommandDescriptor,
+
   // Patches
   Patch,
 

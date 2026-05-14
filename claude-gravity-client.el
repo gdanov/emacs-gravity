@@ -576,6 +576,18 @@ prompts for custom instructions to guide the summary."
      ,@(when (and custom-instructions (not (string-empty-p custom-instructions)))
          `((customInstructions . ,custom-instructions))))))
 
+(defun claude-gravity--pi-refresh-commands (session-id)
+  "Refresh pi's command inventory for SESSION-ID (`get_commands' RPC).
+Asks gravity-server to re-fetch extension commands, prompt templates,
+and skills from the running pi process and broadcast a fresh
+set_pi_commands patch.  Use this after dropping a new .pi/prompts/foo.md
+or reloading an extension while the session is running."
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (claude-gravity--log 'info "Pi[%s]: refresh-commands" session-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.refresh-commands")
+     (sessionId . ,session-id))))
+
 (defun claude-gravity--pi-new-session (session-id)
   "Start a fresh session inside pi process for SESSION-ID (`new_session' RPC).
 The pi process is reused; only the conversation state is reset.
@@ -770,6 +782,10 @@ SESSION-JSON is an alist from json-parse-string."
             :tasks tasks-ht
             :files files-ht
             :compactions compactions
+            :pi-commands (let ((pc (funcall jnil (alist-get 'piCommands session-json))))
+                           (and pc
+                                (mapcar #'claude-gravity--json-pi-command-to-alist
+                                        (if (vectorp pc) (append pc nil) pc))))
             :total-tool-count (or (alist-get 'totalToolCount session-json) 0)
             :header-line-cache nil
             :buffer nil
@@ -894,6 +910,18 @@ Returns nil if M is nil (used by mapcar over a possibly-empty list)."
             (cons 'tokens-before (funcall jnil (alist-get 'tokensBefore m)))
             (cons 'summary (funcall jnil (alist-get 'summary m)))
             (cons 'aborted (eq (alist-get 'aborted m) t))))))
+
+(defun claude-gravity--json-pi-command-to-alist (c)
+  "Convert a JSON PiCommandDescriptor to an alist.
+Pi emits: { name, description?, source, location?, path? }. Returns
+nil for nil input (used by mapcar over a possibly-empty list)."
+  (when c
+    (let ((jnil #'claude-gravity--jnil))
+      (list (cons 'name (or (funcall jnil (alist-get 'name c)) ""))
+            (cons 'description (funcall jnil (alist-get 'description c)))
+            (cons 'source (or (funcall jnil (alist-get 'source c)) "extension"))
+            (cons 'location (funcall jnil (alist-get 'location c)))
+            (cons 'path (funcall jnil (alist-get 'path c)))))))
 
 (defun claude-gravity--json-task-to-alist (task-json)
   "Convert a JSON Task to task alist."
@@ -1299,6 +1327,18 @@ MSG contains sessionId and patches array."
                      (float-time
                       (time-subtract (current-time)
                                      (alist-get 'submitted p)))))))))
+
+      ("set_pi_commands"
+       ;; Pi only: snapshot of `get_commands` (extension commands, prompt
+       ;; templates, skills) usable as /<name> in the compose buffer.
+       ;; Each entry is normalized to an alist with symbol keys so CAPF
+       ;; can read it without case-mapping.
+       (let* ((cmds-json (alist-get 'commands patch))
+              (cmds (mapcar #'claude-gravity--json-pi-command-to-alist
+                            (if (vectorp cmds-json)
+                                (append cmds-json nil)
+                              cmds-json))))
+         (plist-put session :pi-commands cmds)))
 
       ("add_compaction"
        ;; Append-only chronological list of pi compaction events. Marker

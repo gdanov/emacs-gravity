@@ -18,6 +18,7 @@ import type {
   ThinkingLevel,
   PiProtocolEvent,
   PiSessionStats,
+  PiCommandDescriptor,
   ExtensionUIResponsePayload,
 } from "./types.js";
 
@@ -191,6 +192,16 @@ export function spawnPiSync(
         throw new Error(`pi get_state failed: ${response.error ?? "unknown error"}`);
       }
       return (response.data ?? {}) as Record<string, unknown>;
+    },
+
+    getCommands: async (): Promise<PiCommandDescriptor[]> => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_commands" });
+      if (!response.success) {
+        throw new Error(`pi get_commands failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = (response.data ?? {}) as { commands?: PiCommandDescriptor[] };
+      return Array.isArray(data.commands) ? data.commands : [];
     },
 
     switchSession: async (sessionPath: string): Promise<boolean> => {

@@ -18,6 +18,7 @@ import type {
   ToolLocation,
   AgentLocation,
   CompactionMarker,
+  PiCommandDescriptor,
 } from "@gravity/shared";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -77,6 +78,7 @@ export function createSession(sessionId: string, cwd: string, source?: string): 
     files: {},
     compactions: [],
     totalToolCount: 0,
+    piCommands: null,
   };
 }
 
@@ -175,6 +177,19 @@ export function setContextUsage(
 export function setPlan(s: Session, plan: Plan | null): Patch[] {
   s.plan = plan;
   return [{ op: "set_plan", plan }];
+}
+
+/**
+ * Replace pi's command inventory snapshot. Project-scoped — survives turn
+ * resets but is cleared on session purge. Callers should fetch via
+ * `driver.getCommands()` and feed the result here.
+ */
+export function setPiCommands(
+  s: Session,
+  commands: PiCommandDescriptor[],
+): Patch[] {
+  s.piCommands = commands;
+  return [{ op: "set_pi_commands", commands }];
 }
 
 export function updateMeta(

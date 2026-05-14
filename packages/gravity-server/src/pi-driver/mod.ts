@@ -28,6 +28,7 @@ import type {
   TranslationResult,
   ThinkingLevel,
   PiSessionStats,
+  PiCommandDescriptor,
   ExtensionUIRequestEvent,
   ExtensionUIResponsePayload,
 } from "./types.js";
@@ -108,6 +109,8 @@ export interface PiDriverInstance {
   getSessionStats(): Promise<PiSessionStats>;
   /** Request `get_state` from pi (sessionFile, sessionId, model, etc.). */
   getState(): Promise<Record<string, unknown>>;
+  /** Request `get_commands` from pi (extension commands, prompt templates, skills). */
+  getCommands(): Promise<PiCommandDescriptor[]>;
   /** Load a different session file into the running pi process. */
   switchSession(sessionPath: string): Promise<boolean>;
   /** Send an `extension_ui_response` back to pi for a dialog request id. */
@@ -118,8 +121,12 @@ export interface PiDriverInstance {
   newSession(parentSession?: string): Promise<boolean>;
   /** Stop the pi subprocess and clean up. */
   stop(): Promise<void>;
-  /** Get current session metadata. */
-  getMetadata(): SessionMetadata;
+  /**
+   * Get the live accumulator state — primarily so gravity-server can update
+   * `branch` after pi's session file resolves. Internal hook, not intended
+   * for general client use.
+   */
+  getAccState(): AccState;
 }
 
 /**
@@ -262,6 +269,8 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
     getSessionStats: () => driver.getSessionStats(),
 
     getState: () => driver.getState(),
+
+    getCommands: () => driver.getCommands(),
 
     switchSession: (sessionPath: string) => driver.switchSession(sessionPath),
 

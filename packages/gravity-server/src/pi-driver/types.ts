@@ -533,10 +533,30 @@ export type PiCommand =
   | { type: "set_model"; provider: string; modelId: string }
   | { type: "get_session_stats" }
   | { type: "get_state" }
+  | { type: "get_commands" }
   | { type: "switch_session"; sessionPath: string }
   | { type: "compact"; customInstructions?: string }
   | { type: "new_session"; parentSession?: string }
   | ({ type: "extension_ui_response" } & ExtensionUIResponsePayload);
+
+/**
+ * One entry in pi's `get_commands` response — extension command, prompt
+ * template, or skill. Invoke by sending `/<name>` (or `/skill:<name>`) as a
+ * regular `prompt` message; pi handles the expansion. See pi `docs/rpc.md`
+ * `get_commands`.
+ */
+export interface PiCommandDescriptor {
+  /** Command name without the leading slash. Skills carry the `skill:` prefix. */
+  name: string;
+  /** Human-readable description (optional for extension commands). */
+  description?: string;
+  /** Origin of the command. */
+  source: "extension" | "prompt" | "skill";
+  /** Where it was loaded from (absent for extensions). */
+  location?: "user" | "project" | "path";
+  /** Absolute path of the backing file (optional). */
+  path?: string;
+}
 
 /** Event emitted by protocol.ts for parsed pi events. */
 export type PiProtocolEvent = {
@@ -649,6 +669,13 @@ export interface PiDriver {
    */
   getState(): Promise<Record<string, unknown>>;
   /**
+   * Request `get_commands` from pi (`docs/rpc.md`). Returns the unioned list
+   * of extension commands, prompt templates, and skills available in the
+   * current pi process. The list is project-scoped: switching sessions or
+   * editing `.pi/{prompts,skills,extensions}` requires a refresh call.
+   */
+  getCommands(): Promise<PiCommandDescriptor[]>;
+  /**
    * Switch the running pi process to a different session file
    * (`switch_session` RPC). Pi reloads the .jsonl at `sessionPath`.
    * Returns whether the switch was accepted (it can be cancelled by a
@@ -677,9 +704,4 @@ export interface PiDriver {
    * Returns a promise that resolves when the subprocess exits.
    */
   stop(): Promise<void>;
-  /**
-   * Get the current accumulator state (branch, cwd, etc.).
-   * Used by gravity-server to update branch after session-file resolution.
-   */
-  getAccState(): AccState;
 }

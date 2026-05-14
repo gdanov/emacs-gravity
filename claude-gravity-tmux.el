@@ -578,6 +578,9 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
       ;; C-g support: post-command-hook detects keyboard-quit
       (add-hook 'post-command-hook
                 #'claude-gravity--compose-quit-hook nil t)
+      ;; Pi slash-command autocomplete (no-op for non-pi sessions)
+      (add-hook 'completion-at-point-functions
+                #'claude-gravity--pi-slash-capf nil t)
       ;; Place point at end (compose area)
       (goto-char (point-max)))
     ;; Display in side window
@@ -607,6 +610,84 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
           (claude-gravity--send-prompt-core text (car resolved) (cdr resolved))
           (claude-gravity--compose-cleanup)
           (message "Prompt sent"))))))
+
+
+;;; ── Pi slash-command autocomplete ──────────────────────────────────
+;;
+;; CAPF that completes `/foo` against pi's `get_commands` inventory
+;; (extension commands, prompt templates, skills). The completion table
+;; reads `:pi-commands` from the session plist on every invocation so
+;; mid-session refreshes via `claude-gravity--pi-refresh-commands` are
+;; picked up automatically.
+
+(defvar claude-gravity--pi-source-order
+  '(("extension" . 0) ("prompt" . 1) ("skill" . 2))
+  "Display order for pi command sources in completion.")
+
+(defun claude-gravity--pi-source-rank (cmd)
+  "Sort key for a pi command alist CMD."
+  (or (alist-get (alist-get 'source cmd) claude-gravity--pi-source-order
+                 nil nil #'equal)
+      99))
+
+(defun claude-gravity--pi-cmd-annotation (commands cand)
+  "Annotation string for CAND in a completion table built from COMMANDS."
+  (let* ((name (if (string-prefix-p "/" cand) (substring cand 1) cand))
+         (cmd (seq-find (lambda (c) (equal (alist-get 'name c) name))
+                        commands))
+         (src (and cmd (alist-get 'source cmd)))
+         (desc (and cmd (alist-get 'description cmd))))
+    (when cmd
+      (concat "  "
+              (when src (propertize (format "[%s]" src)
+                                    'face 'shadow))
+              (when desc (concat " — " desc))))))
+
+(defun claude-gravity--pi-slash-capf ()
+  "Completion-at-point function for pi slash commands.
+Active when point is inside the compose area of a pi-backed session and
+the current token starts with `/'.  Returns nil otherwise so other
+CAPFs may run."
+  (when (and (bound-and-true-p claude-gravity--compose-session-id)
+             claude-gravity--compose-separator
+             (>= (point) (marker-position claude-gravity--compose-separator)))
+    (let* ((sid claude-gravity--compose-session-id)
+           (session (and sid (gethash sid claude-gravity--sessions)))
+           (commands (and session (plist-get session :pi-commands))))
+      (when (and (equal (plist-get session :source) "pi")
+                 commands)
+        (save-excursion
+          (let* ((end (point))
+                 (bol (line-beginning-position))
+                 (beg
+                  (save-excursion
+                    (when (re-search-backward
+                           "\\(?:^\\|[[:space:]]\\)\\(/[A-Za-z0-9:_./-]*\\)"
+                           bol t)
+                      (match-beginning 1)))))
+            (when beg
+              (let* ((sorted (sort (copy-sequence commands)
+                                   (lambda (a b)
+                                     (let ((ra (claude-gravity--pi-source-rank a))
+                                           (rb (claude-gravity--pi-source-rank b)))
+                                       (if (= ra rb)
+                                           (string<
+                                            (alist-get 'name a)
+                                            (alist-get 'name b))
+                                         (< ra rb))))))
+                     (cands (mapcar (lambda (c)
+                                      (concat "/" (alist-get 'name c)))
+                                    sorted)))
+                (list beg end
+                      (lambda (probe pred action)
+                        (complete-with-action action cands probe pred))
+                      :exclusive 'no
+                      :annotation-function
+                      (lambda (cand)
+                        (claude-gravity--pi-cmd-annotation sorted cand))
+                      :company-kind (lambda (_) 'snippet))))))))))
+
+(declare-function claude-gravity--pi-slash-capf nil)
 
 
 (defun claude-gravity-compose-cancel ()

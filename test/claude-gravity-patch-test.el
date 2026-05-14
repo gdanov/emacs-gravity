@@ -1067,5 +1067,111 @@ ensure setf alist-get works in-place."
   "text-subsumes-p requires double newline, not single."
   (should-not (claude-gravity--text-subsumes-p "hello\nworld" "hello")))
 
+;;; ═══════════════════════════════════════════════════════════════════
+;;; Pi commands (set_pi_commands + slash-command CAPF)
+;;; ═══════════════════════════════════════════════════════════════════
+
+(defun cgp--pi-cmd (name source &optional description location path)
+  "Build a wire-shape pi command alist (as it arrives from JSON)."
+  (let ((c `((name . ,name) (source . ,source))))
+    (when description (setq c (append c `((description . ,description)))))
+    (when location    (setq c (append c `((location . ,location)))))
+    (when path        (setq c (append c `((path . ,path)))))
+    c))
+
+(ert-deftest cgp-set-pi-commands-stores-on-session ()
+  "set_pi_commands replaces :pi-commands with a list of alists."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "review" "prompt" "Review staged changes" "project" "/p/review.md")
+                                 ,(cgp--pi-cmd "skill:brave-search" "skill" "Web search" "user" "/u/s/SKILL.md")
+                                 ,(cgp--pi-cmd "stats" "extension")])))
+    (let ((cmds (plist-get s :pi-commands)))
+      (should (= 3 (length cmds)))
+      (should (equal "review" (alist-get 'name (nth 0 cmds))))
+      (should (equal "prompt" (alist-get 'source (nth 0 cmds))))
+      (should (equal "Review staged changes" (alist-get 'description (nth 0 cmds))))
+      (should (equal "skill:brave-search" (alist-get 'name (nth 1 cmds))))
+      (should (equal "stats" (alist-get 'name (nth 2 cmds))))
+      ;; Extension entries may lack description/location/path — must round-trip as nil.
+      (should-not (alist-get 'description (nth 2 cmds)))
+      (should-not (alist-get 'location (nth 2 cmds))))))
+
+(ert-deftest cgp-set-pi-commands-empty-array-clears ()
+  "set_pi_commands with empty vector yields an empty list (not nil)."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s '((op . "set_pi_commands") (commands . [])))
+    (should (equal '() (plist-get s :pi-commands)))))
+
+(ert-deftest cgp-set-pi-commands-list-form ()
+  "set_pi_commands accepts a list (not vector) of commands too."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . (,(cgp--pi-cmd "foo" "prompt")))))
+    (let ((cmds (plist-get s :pi-commands)))
+      (should (= 1 (length cmds)))
+      (should (equal "foo" (alist-get 'name (nth 0 cmds)))))))
+
+(ert-deftest cgp-pi-slash-capf-returns-nil-for-non-pi-session ()
+  "CAPF must be inert when the compose buffer's session isn't pi-backed."
+  (require 'claude-gravity-tmux)
+  (let* ((s (cgp--fresh-session)))
+    (plist-put s :source "claude-code")
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "foo" "prompt")])))
+    (with-temp-buffer
+      (setq-local claude-gravity--compose-session-id (plist-get s :session-id))
+      (setq-local claude-gravity--compose-separator (point-marker))
+      (insert "/fo")
+      (should-not (claude-gravity--pi-slash-capf)))))
+
+(ert-deftest cgp-pi-slash-capf-completes-from-inventory ()
+  "CAPF on `/' returns sorted candidates with annotations."
+  (require 'claude-gravity-tmux)
+  (let* ((s (cgp--fresh-session)))
+    (plist-put s :source "pi")
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "review" "prompt" "Review code")
+                                 ,(cgp--pi-cmd "skill:web" "skill" "Web search")
+                                 ,(cgp--pi-cmd "stats" "extension" "Show stats")])))
+    (with-temp-buffer
+      (setq-local claude-gravity--compose-session-id (plist-get s :session-id))
+      (setq-local claude-gravity--compose-separator (point-marker))
+      (insert "/")
+      (let* ((result (claude-gravity--pi-slash-capf))
+             (table (nth 2 result))
+             (annot (plist-get (nthcdr 3 result) :annotation-function))
+             (matches (all-completions "/" table)))
+        (should result)
+        ;; All three commands are visible
+        (should (= 3 (length matches)))
+        (should (member "/review" matches))
+        (should (member "/stats" matches))
+        (should (member "/skill:web" matches))
+        ;; Source ordering: extension → prompt → skill
+        (should (equal '("/stats" "/review" "/skill:web") matches))
+        ;; Annotations show source + description
+        (should (string-match-p "extension" (funcall annot "/stats")))
+        (should (string-match-p "Show stats" (funcall annot "/stats")))))))
+
+(ert-deftest cgp-pi-slash-capf-respects-separator ()
+  "CAPF must not fire above the compose separator (history area)."
+  (require 'claude-gravity-tmux)
+  (let* ((s (cgp--fresh-session)))
+    (plist-put s :source "pi")
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "foo" "prompt")])))
+    (with-temp-buffer
+      (setq-local claude-gravity--compose-session-id (plist-get s :session-id))
+      (insert "history above\n")
+      (setq-local claude-gravity--compose-separator (point-marker))
+      (insert "compose below\n/fo")
+      ;; Point is in compose area — CAPF should fire
+      (should (claude-gravity--pi-slash-capf))
+      ;; Move to history area — CAPF should be silent
+      (goto-char (point-min))
+      (should-not (claude-gravity--pi-slash-capf)))))
+
+
 (provide 'claude-gravity-patch-test)
 ;;; claude-gravity-patch-test.el ends here

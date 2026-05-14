@@ -46,6 +46,8 @@ export interface HookData {
   effort_level?: string;
   slug?: string | null;
   branch?: string | null;
+  /** Driver that produced the event: "claude-code", "pi", "opencode", … */
+  source?: string;
 
   // Agent tracking
   agent_transcript_path?: string;
@@ -163,6 +165,32 @@ export interface Session {
   compactions: CompactionMarker[];
 
   totalToolCount: number;
+
+  /**
+   * Pi only: snapshot of `get_commands` for the current pi process —
+   * extension commands, prompt templates, and skills the user can invoke
+   * via `/<name>`. Null means "not yet fetched / unknown"; an explicit
+   * empty array means "fetched, none available". Refreshed when the pi
+   * process starts and on `pi.refresh-commands` from a terminal.
+   */
+  piCommands: PiCommandDescriptor[] | null;
+}
+
+/**
+ * One entry from pi's `get_commands` RPC. Mirrors the shape pi emits in
+ * `response.data.commands[]`. See pi `docs/rpc.md` `get_commands`.
+ */
+export interface PiCommandDescriptor {
+  /** Command name without the leading slash. Skills carry the `skill:` prefix. */
+  name: string;
+  /** Human-readable description (optional for extension commands). */
+  description?: string;
+  /** Origin of the command. */
+  source: "extension" | "prompt" | "skill";
+  /** Where it was loaded from. Absent for extension commands. */
+  location?: "user" | "project" | "path";
+  /** Absolute path of the backing file (optional). */
+  path?: string;
 }
 
 /**
@@ -362,7 +390,8 @@ export type Patch =
   | { op: "update_task"; taskId: string; task: Task }
   | { op: "track_file"; path: string; fileOp: string }
   | { op: "add_prompt"; turnNumber: number; prompt: PromptEntry }
-  | { op: "set_prompt_answer"; turnNumber: number; toolUseId: string; answer: string };
+  | { op: "set_prompt_answer"; turnNumber: number; toolUseId: string; answer: string }
+  | { op: "set_pi_commands"; commands: PiCommandDescriptor[] };
 
 // ── Protocol Messages ────────────────────────────────────────────────
 //
@@ -381,7 +410,15 @@ export type ServerPushMessage =
   | { type: "inbox.removed"; itemId: number }
   | { type: "inbox.snapshot"; items: InboxItem[] }
   | { type: "overview.snapshot"; projects: ProjectSummary[] }
-  | { type: "notice"; level: "info" | "warn" | "error"; text: string };
+  | { type: "notice"; level: "info" | "warn" | "error"; text: string }
+  /**
+   * Pi session lifecycle signal. Out-of-band from the patch stream — used by
+   * terminals to track the latest pi session id without waiting for a full
+   * snapshot, and to surface server-side rejections.
+   */
+  | { type: "pi.session"; sessionId: string; event: "started"; cwd: string }
+  | { type: "pi.session"; sessionId: string; event: "stopped" }
+  | { type: "pi.session"; sessionId: string; event: "rejected"; reason: string };
 
 /** Messages from server to terminal (pull mode — signals only, no payload). */
 export type ServerSignalMessage =
@@ -416,6 +453,7 @@ export type TerminalMessage =
   | { type: "pi.compact"; sessionId?: string; customInstructions?: string }
   | { type: "pi.new-session"; sessionId?: string }
   | { type: "pi.stop"; sessionId?: string }
+  | { type: "pi.refresh-commands"; sessionId: string }
 
 export interface ProjectSummary {
   project: string;

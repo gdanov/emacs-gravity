@@ -16,7 +16,7 @@ import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from
 import { parseTerminalMessage, isHookMessage } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
 import { MermaidRpcServer } from "./handlers/mermaid-rpc-server.js";
-import { sessionEnd, setCost, setContextUsage, updateMeta } from "./state/session.js";
+import { sessionEnd, setCost, setContextUsage, setPiCommands, updateMeta } from "./state/session.js";
 
 // Effect services
 import { ServerConfig, ServerConfigLive } from "./services/config.js";
@@ -496,7 +496,43 @@ const program = Effect.gen(function* () {
     };
     setImmediate(() => captureSessionFile());
 
+    // Fetch pi's command inventory (extension commands, prompt templates,
+    // skills). Used by Emacs to drive slash-command autocomplete in the
+    // compose buffer. Fire-and-forget — failures are logged but don't gate
+    // session startup.
+    setImmediate(() => refreshPiCommands(sessionId));
+
     return sessionId;
+  };
+
+  /**
+   * Fetch `get_commands` from the pi process backing SESSION-ID and broadcast
+   * a `set_pi_commands` patch. Idempotent: safe to call repeatedly. Drops
+   * silently if the session has already been replaced (a `pi.stop` racing
+   * with `pi.refresh-commands`).
+   */
+  const refreshPiCommands = (sessionId: string): void => {
+    const driver = piDrivers.get(sessionId);
+    if (!driver) return;
+    driver.getCommands().then(
+      (commands) => {
+        // Bail if the driver was swapped/stopped while the RPC was in flight.
+        if (piDrivers.get(sessionId) !== driver) return;
+        const session = store.get(sessionId);
+        if (!session) return;
+        const patches = setPiCommands(session, commands);
+        if (patches.length === 0) return;
+        if (PULL_MODE) {
+          const stored = store.appendPatches(sessionId, patches);
+          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+          terminals.signalChanged("session", sessionId, seq);
+        } else {
+          terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+        }
+        logMsg(`Pi[${sessionId}]: ${commands.length} commands available`);
+      },
+      (err) => logMsg(`pi get_commands failed for ${sessionId}: ${err.message}`, "warn"),
+    );
   };
 
   /** Look up a pi driver by sessionId, logging a warning if not found. */
@@ -1068,6 +1104,12 @@ const program = Effect.gen(function* () {
         // path removes it from piDrivers and broadcasts pi.session "stopped".
         const m = msg as { sessionId: string };
         stopPiSession(m.sessionId).catch((err) => logMsg(`pi.stop failed: ${err.message}`, "error"));
+        break;
+      }
+
+      case "pi.refresh-commands": {
+        const m = msg as { sessionId: string };
+        refreshPiCommands(m.sessionId);
         break;
       }
     }
