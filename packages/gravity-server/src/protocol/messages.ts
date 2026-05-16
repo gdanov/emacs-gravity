@@ -19,6 +19,7 @@ const VALID_TERMINAL_MESSAGE_TYPES = new Set([
   "pi.steer",
   "pi.abort",
   "pi.set-thinking",
+  "pi.set-session-name",
   "pi.set-model",
   "pi.resume",
   "pi.compact",

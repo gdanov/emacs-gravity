@@ -1304,5 +1304,17 @@ ensure setf alist-get works in-place."
         (should (= (length answers) 0))))))
 
 
+(ert-deftest cgp-pi-set-session-name-sends-action ()
+  "`claude-gravity--pi-set-session-name' sends a pi.set-session-name message."
+  (let (captured)
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured))))
+      (claude-gravity--pi-set-session-name "pi-x" "my name"))
+    (should (equal (car captured)
+                   '((type . "pi.set-session-name")
+                     (sessionId . "pi-x")
+                     (name . "my name"))))))
+
+
 (provide 'claude-gravity-patch-test)
 ;;; claude-gravity-patch-test.el ends here

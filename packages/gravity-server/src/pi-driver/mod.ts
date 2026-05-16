@@ -103,6 +103,8 @@ export interface PiDriverInstance {
   setThinkingLevel(level: ThinkingLevel): void;
   /** Set thinking level via string (will be normalized). */
   setEffortLevel(level: string): void;
+  /** Set pi's session name (`set_session_name` RPC); pi reflects it via `get_state.sessionName`. */
+  setSessionName(name: string): void;
   /** Switch model at runtime (pi `set_model` RPC). */
   setModel(provider: string, modelId: string): void;
   /** Request session stats from pi (tokens, cost, contextUsage). */
@@ -256,6 +258,8 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
       metadata = updateThinkingLevel(metadata, normalized);
       state.effortLevel = thinkingToEffort(normalized);
     },
+
+    setSessionName: (name) => driver.setSessionName(name),
 
     setModel: (provider: string, modelId: string) => {
       driver.setModel(provider, modelId);

@@ -515,10 +515,19 @@ const program = Effect.gen(function* () {
       if (piDrivers.get(sessionId) !== driver) return;
       driver.getState().then((state) => {
         const f = (state as { sessionFile?: unknown }).sessionFile;
-        if (typeof f === "string" && f.length > 0) {
-          const session = store.get(sessionId);
-          if (session) {
-            const patches = updateMeta(session, { piSessionFile: f });
+        const name = (state as { sessionName?: unknown }).sessionName;
+        const session = store.get(sessionId);
+        if (session) {
+          // Fold both pi's session-file path and its own session name (if
+          // present) into one set_meta patch. displayName drives the overview
+          // label; piSessionFile drives resume. Either may be absent on any
+          // given poll — only emit when at least one is present.
+          const opts = {
+            ...(typeof f === "string" && f ? { piSessionFile: f } : {}),
+            ...(typeof name === "string" && name ? { displayName: name } : {}),
+          };
+          if (Object.keys(opts).length > 0) {
+            const patches = updateMeta(session, opts);
             if (PULL_MODE) {
               const stored = store.appendPatches(sessionId, patches);
               const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
@@ -527,6 +536,8 @@ const program = Effect.gen(function* () {
               terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
             }
           }
+        }
+        if (typeof f === "string" && f.length > 0) {
           // Also extract gitBranch from the session file and update session + accumulator.
           captureBranch(sessionId, f, driver);
         } else if (attempt < 3) {
@@ -619,6 +630,28 @@ const program = Effect.gen(function* () {
     const d = getPiDriver(sessionId, "pi.set-thinking");
     if (!d) return;
     d.setEffortLevel(level);
+  };
+
+  /**
+   * Set pi's session name for a specific session (`set_session_name` RPC).
+   * Optimistically reflects the name in the overview via `set_meta`; pi
+   * persists it and the next `get_state` poll confirms it.
+   */
+  const piSessionSetSessionName = (sessionId: string, name: string): void => {
+    const d = getPiDriver(sessionId, "pi.set-session-name");
+    if (!d) return;
+    d.setSessionName(name);
+    const session = store.get(sessionId);
+    if (session) {
+      const patches = updateMeta(session, { displayName: name });
+      if (PULL_MODE) {
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
+      } else {
+        terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+      }
+    }
   };
 
   /** Switch model for a specific pi session (pi `set_model` RPC). */
@@ -1117,6 +1150,12 @@ const program = Effect.gen(function* () {
       case "pi.set-thinking": {
         const m = msg as { sessionId: string; level: string };
         piSessionSetThinking(m.sessionId, m.level);
+        break;
+      }
+
+      case "pi.set-session-name": {
+        const m = msg as { sessionId: string; name: string };
+        piSessionSetSessionName(m.sessionId, m.name);
         break;
       }
 

@@ -144,6 +144,20 @@ describe("PiProtocol", () => {
     expect(parsed.type).toBe("set_thinking_level");
     expect(parsed.level).toBe("high");
   });
+
+  it("should format session name command", () => {
+    expect(PiProtocol.formatSessionName("foo")).toBe(
+      '{"type":"set_session_name","name":"foo"}\n',
+    );
+  });
+
+  it("should attach the id when formatting set_session_name via formatCommand", () => {
+    const line = PiProtocol.formatCommand({ type: "set_session_name", name: "bar" }, "id1");
+    const parsed = JSON.parse(line.trim());
+    expect(parsed.type).toBe("set_session_name");
+    expect(parsed.name).toBe("bar");
+    expect(parsed.id).toBe("id1");
+  });
 });
 
 // ── Turn accumulator tests ─────────────────────────────────────────

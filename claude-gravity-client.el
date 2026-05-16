@@ -527,6 +527,23 @@ LEVEL is one of: off, minimal, low, medium, high, xhigh."
      (sessionId . ,session-id)
      (level . ,level))))
 
+(defun claude-gravity--pi-set-session-name (session-id name)
+  "Set pi session SESSION-ID's name to NAME (`set_session_name' RPC).
+The name flows back through gravity-server's `set_meta'/displayName
+patch, updating the overview label.  Seeds the prompt with the
+current display name, if any."
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (read-string "Session name: "
+                      (let ((s (claude-gravity--get-session
+                                (claude-gravity--current-pi-session-id))))
+                        (and s (plist-get s :display-name))))))
+  (claude-gravity--log 'info "Pi[%s]: set-session-name %s" session-id name)
+  (claude-gravity--send-to-server
+   `((type . "pi.set-session-name")
+     (sessionId . ,session-id)
+     (name . ,name))))
+
 (defun claude-gravity--pi-status ()
   "List currently active pi sessions."
   (interactive)

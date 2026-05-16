@@ -199,6 +199,11 @@ export function spawnPiSync(
       child.stdin.write(PiProtocol.formatThinkingLevel(level));
     },
 
+    setSessionName: (name: string): void => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      child.stdin.write(PiProtocol.formatSessionName(name));
+    },
+
     setModel: (provider: string, modelId: string): void => {
       if (stopped || !child.stdin || child.stdin.destroyed) return;
       child.stdin.write(PiProtocol.formatSetModel(provider, modelId));

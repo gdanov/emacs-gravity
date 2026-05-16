@@ -448,6 +448,7 @@ export type TerminalMessage =
   | { type: "pi.steer"; sessionId: string; text: string }
   | { type: "pi.abort"; sessionId: string }
   | { type: "pi.set-thinking"; sessionId: string; level: string }
+  | { type: "pi.set-session-name"; sessionId: string; name: string }
   | { type: "pi.set-model"; sessionId: string; provider: string; modelId: string }
   | { type: "pi.resume"; sessionId?: string; sessionPath: string }
   | { type: "pi.compact"; sessionId?: string; customInstructions?: string }

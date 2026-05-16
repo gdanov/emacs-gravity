@@ -530,6 +530,7 @@ export type PiCommand =
   | { type: "steer"; message: string }
   | { type: "abort" }
   | { type: "set_thinking_level"; level: ThinkingLevel }
+  | { type: "set_session_name"; name: string }
   | { type: "set_model"; provider: string; modelId: string }
   | { type: "get_session_stats" }
   | { type: "get_state" }
@@ -655,6 +656,11 @@ export interface PiDriver {
    * Set the thinking/effort level at runtime.
    */
   setThinkingLevel(level: ThinkingLevel): void;
+  /**
+   * Set pi's session name (`set_session_name` RPC). Fire-and-forget: pi
+   * persists the name and surfaces it back via `get_state.sessionName`.
+   */
+  setSessionName(name: string): void;
   /**
    * Switch to a specific model at runtime. Pi accepts provider+modelId pairs
    * (see pi RPC docs: set_model command). Pi 0.74 replies with the full Model

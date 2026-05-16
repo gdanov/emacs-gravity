@@ -212,6 +212,8 @@ export class PiProtocol {
         return JSON.stringify(withId({ type: "abort" })) + "\n";
       case "set_thinking_level":
         return JSON.stringify(withId({ type: "set_thinking_level", level: cmd.level })) + "\n";
+      case "set_session_name":
+        return JSON.stringify(withId({ type: "set_session_name", name: cmd.name })) + "\n";
       case "set_model":
         return JSON.stringify(withId({ type: "set_model", provider: cmd.provider, modelId: cmd.modelId })) + "\n";
       case "get_session_stats":
@@ -276,6 +278,13 @@ export class PiProtocol {
    */
   static formatThinkingLevel(level: ThinkingLevel): string {
     return JSON.stringify({ type: "set_thinking_level", level } as PiCommand) + "\n";
+  }
+
+  /**
+   * Format a set_session_name command for pi's stdin.
+   */
+  static formatSessionName(name: string): string {
+    return JSON.stringify({ type: "set_session_name", name } as PiCommand) + "\n";
   }
 
   /**
