@@ -212,16 +212,60 @@ const program = Effect.gen(function* () {
       }
       case "input":
       case "editor": {
-        // TODO: surface a multi-line text-entry buffer in Emacs. For now,
-        // cancel so pi's extension can fall through to a default.
-        logMsg(`pi extension_ui_request ${method} not yet supported — cancelling`, "warn");
-        sendResponse({ cancelled: true });
+        // Route free-text input/editor like `select` (into the question
+        // inbox) so any connected terminal can answer. The discriminator
+        // `pi_ui.kind: "text"` + empty options[] tells the terminal to
+        // render a text-entry surface instead of pick-one. The existing
+        // `action.question` pi-branch already turns answers[0] into
+        // {value} (and an absent answer into {cancelled:true}), so no
+        // change to the response handler is needed.
+        const summary =
+          request.title ?? request.message ??
+          (method === "editor" ? "Pi editor" : "Pi input");
+        const item = inbox.add(
+          "question",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          {
+            tool_name: "pi:input",
+            tool_input: {
+              // Empty options[] — action.question's handler still finds a
+              // question entry, but the terminal branches on pi_ui.kind.
+              questions: [{ question: summary, options: [] }],
+            },
+            pi_ui: {
+              method,
+              id: request.id,
+              kind: "text",
+              prefill: request.prefill,
+              placeholder: request.placeholder,
+              title: request.title,
+              message: request.message,
+              multiline: method === "editor",
+            },
+          },
+        );
+        pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request.id, method });
+        terminals.broadcast({ type: "inbox.added", item });
+        break;
+      }
+      case "notify": {
+        // Surface pi-extension notifications as gravity notices (the
+        // `notice` ServerPushMessage already exists and Emacs already
+        // renders it). Fire-and-forget — pi does not expect a response.
+        const level: "info" | "warn" | "error" =
+          request.notifyType === "error"
+            ? "error"
+            : request.notifyType === "warning"
+              ? "warn"
+              : "info";
+        terminals.broadcast({ type: "notice", level, text: request.message ?? "" });
         break;
       }
       // Fire-and-forget: pi doesn't expect a response. Log for visibility;
-      // wiring these into the UI (status bar, transient notifications,
-      // window title) is a follow-up.
-      case "notify":
+      // wiring these into the UI (status bar, window title) is a follow-up.
       case "setStatus":
       case "setWidget":
       case "setTitle":
@@ -443,7 +487,9 @@ const program = Effect.gen(function* () {
           else logMsg(`Pi session ended: ${sessionId}`);
           // Cancel only THIS driver's pending pi UI dialogs — other pi
           // sessions' dialogs must remain intact. Iterate by entry so we
-          // can match on sessionId.
+          // can match on sessionId. confirm/select AND input/editor are
+          // all registered the same way in pendingPiUIResponses, so this
+          // loop drops every pending dialog type on exit.
           for (const [itemId, entry] of pendingPiUIResponses) {
             if (entry.sessionId !== sessionId) continue;
             inbox.remove(itemId);

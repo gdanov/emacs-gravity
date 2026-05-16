@@ -581,8 +581,150 @@ Erases and redraws the body while preserving buffer-local state."
     (claude-gravity--question-update-preview-if-visible)))
 
 
+;;; ── Pi input/editor text-entry surface ──────────────────────────────
+;;
+;; Pi extensions calling ctx.ui.input / ctx.ui.editor produce a `question'
+;; inbox item carrying data.pi_ui.kind = "text". We render a text buffer
+;; (header = prompt, editable area below a separator) instead of the
+;; pick-one option UI. Submit/cancel reuse the verified question response
+;; path (`claude-gravity--send-question-response'), which lands on the
+;; server as `action.question'; the server's pi-branch turns answers[0]
+;; into {value} or, when answers[] is empty, {cancelled:true}.
+
+(defvar-local claude-gravity--pi-text-separator nil
+  "Marker for the start of the editable text-entry area.")
+
+(defvar claude-gravity-pi-text-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'claude-gravity-pi-text-submit)
+    (define-key map (kbd "C-c C-k") #'claude-gravity-pi-text-cancel)
+    map)
+  "Keymap for `claude-gravity-pi-text-mode'.")
+
+(define-minor-mode claude-gravity-pi-text-mode
+  "Minor mode for pi input/editor text-entry buffers.
+\\{claude-gravity-pi-text-mode-map}"
+  :lighter " PiInput"
+  :keymap claude-gravity-pi-text-mode-map)
+
+(defun claude-gravity--pi-text-guard (beg _end)
+  "Prevent edits before the text-entry separator marker."
+  (when (and claude-gravity--pi-text-separator
+             (< beg (marker-position claude-gravity--pi-text-separator)))
+    (user-error "Header is read-only — type below the separator")))
+
+(defun claude-gravity--pi-text-body ()
+  "Return the trimmed text typed below the separator, or nil if empty."
+  (when claude-gravity--pi-text-separator
+    (let ((s (string-trim
+              (buffer-substring-no-properties
+               (marker-position claude-gravity--pi-text-separator)
+               (point-max)))))
+      (and (not (string-empty-p s)) s))))
+
+(defun claude-gravity--pi-text-cleanup (item)
+  "Drop inbox ITEM, kill this buffer, and pop the next item."
+  (let ((session-id (alist-get 'session-id item))
+        (buf (current-buffer)))
+    (remhash (alist-get 'id item) claude-gravity--inbox-action-buffers)
+    (claude-gravity--inbox-remove (alist-get 'id item))
+    (quit-window)
+    (when (buffer-live-p buf) (kill-buffer buf))
+    (claude-gravity--inbox-pop-next session-id)))
+
+(defun claude-gravity-pi-text-submit ()
+  "Send the typed text as the answer to the pi input/editor request.
+Empty input is treated as a cancel (server sees no answer →
+{cancelled:true}) rather than submitting an empty string, which pi
+would interpret as a real value."
+  (interactive)
+  (let* ((item claude-gravity--action-inbox-item)
+         (handle (claude-gravity--inbox-item-handle item))
+         (text (claude-gravity--pi-text-body)))
+    (if (null text)
+        (claude-gravity-pi-text-cancel)
+      ;; answers = (TEXT) → vconcat → ["TEXT"] on the wire; server's pi
+      ;; action.question branch sends {value:"TEXT"}.
+      (claude-gravity--send-question-response handle (list text))
+      (claude-gravity--log 'debug "Pi input submitted: %s" text)
+      (claude-gravity--pi-text-cleanup item))))
+
+(defun claude-gravity-pi-text-cancel ()
+  "Cancel the pi input/editor request.
+Sends an EMPTY answers list so the server sees answers[0] === undefined
+and replies {cancelled:true} to pi (NOT an empty-string value)."
+  (interactive)
+  (let* ((item claude-gravity--action-inbox-item)
+         (handle (claude-gravity--inbox-item-handle item)))
+    ;; Empty list → (vconcat nil) = [] → JSON []; server pi-branch:
+    ;; `const value = answers[0]` is undefined → {cancelled:true}.
+    (claude-gravity--send-question-response handle nil)
+    (claude-gravity--log 'debug "Pi input cancelled")
+    (claude-gravity--pi-text-cleanup item)))
+
+(defun claude-gravity--inbox-act-pi-text (item pi-ui)
+  "Open a text-entry buffer for pi input/editor inbox ITEM.
+PI-UI is the data.pi_ui alist (title/message/placeholder/prefill)."
+  (let* ((item-id (alist-get 'id item))
+         (title (alist-get 'title pi-ui))
+         (message (alist-get 'message pi-ui))
+         (placeholder (alist-get 'placeholder pi-ui))
+         (prefill (alist-get 'prefill pi-ui))
+         (buf (get-buffer-create (format "*Claude Pi Input #%d*" item-id))))
+    (with-current-buffer buf
+      (if (fboundp 'markdown-mode) (markdown-mode) (text-mode))
+      ;; Major mode kills buffer-locals; rebuild content + state after it.
+      (remove-hook 'before-change-functions
+                   #'claude-gravity--pi-text-guard t)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (when (and title (not (string-empty-p title)))
+          (insert (propertize (concat title "\n")
+                              'face 'claude-gravity-section-heading)))
+        (when (and message (not (string-empty-p message)))
+          (insert (propertize (concat message "\n")
+                              'face 'claude-gravity-detail-label)))
+        (when (and placeholder (not (string-empty-p placeholder)))
+          (insert (propertize (concat "(" placeholder ")\n")
+                              'face 'claude-gravity-detail-label)))
+        (insert (propertize
+                 "C-c C-c send · C-c C-k cancel (empty = cancel)\n"
+                 'face 'claude-gravity-detail-label))
+        (insert (propertize (concat (make-string 50 ?─) "\n")
+                            'face 'claude-gravity-divider))
+        (setq-local claude-gravity--pi-text-separator (copy-marker (point)))
+        ;; Lock the header read-only, leaving the boundary char editable
+        ;; so typing at the start of the body is not blocked.
+        (when (> (point) 2)
+          (put-text-property 1 (1- (point)) 'read-only t)
+          (put-text-property 1 (1- (point)) 'front-sticky '(read-only)))
+        (when (and prefill (not (string-empty-p prefill)))
+          (insert prefill)))
+      (add-hook 'before-change-functions
+                #'claude-gravity--pi-text-guard nil t)
+      (setq-local claude-gravity--action-inbox-item item)
+      (claude-gravity-pi-text-mode 1)
+      (goto-char (point-max)))
+    (puthash item-id buf claude-gravity--inbox-action-buffers)
+    (display-buffer-in-side-window buf '((side . bottom) (window-height . 0.35)))
+    (select-window (get-buffer-window buf))
+    (goto-char (point-max))))
+
+
 (defun claude-gravity--inbox-act-question (item)
-  "Open a question action buffer for inbox ITEM."
+  "Open a question action buffer for inbox ITEM.
+Pi `input'/`editor' requests (data.pi_ui.kind = \"text\") branch to a
+text-entry buffer; everything else uses the pick-one option UI."
+  (let* ((data (alist-get 'data item))
+         (pi-ui (alist-get 'pi_ui data))
+         (kind (and pi-ui (alist-get 'kind pi-ui))))
+    (if (equal kind "text")
+        (claude-gravity--inbox-act-pi-text item pi-ui)
+      (claude-gravity--inbox-act-question-options item))))
+
+
+(defun claude-gravity--inbox-act-question-options (item)
+  "Open the pick-one question action buffer for inbox ITEM."
   (let* ((data (alist-get 'data item))
          (label (alist-get 'label item))
          (tool-input (alist-get 'tool_input data))

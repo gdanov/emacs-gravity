@@ -1215,5 +1215,94 @@ ensure setf alist-get works in-place."
       (should (string-match-p "\\[prompt · project\\]" txt))
       (should (string-match-p "Web search" txt)))))
 
+;;; ═══════════════════════════════════════════════════════════════════
+;;; Part N: Pi input/editor text-entry inbox surface (T1.1)
+;;; ═══════════════════════════════════════════════════════════════════
+
+(require 'claude-gravity-actions)
+
+(defun cgp--pi-text-item (&optional prefill placeholder)
+  "Build a synthetic `question' inbox item carrying pi_ui.kind=text."
+  `((id . 42)
+    (type . question)
+    (session-id . "test-sess")
+    (project . "test")
+    (label . "test")
+    (summary . "Commit message")
+    (data . ((tool_name . "pi:input")
+             (tool_input . ((questions . [((question . "Commit message")
+                                           (options . []))])))
+             (pi_ui . ((method . "input")
+                       (id . "req-1")
+                       (kind . "text")
+                       ,@(when prefill `((prefill . ,prefill)))
+                       ,@(when placeholder `((placeholder . ,placeholder)))
+                       (title . "Enter commit message")
+                       (message . "Describe the change")
+                       (multiline . :json-false)))))
+    (socket-proc . nil)))
+
+(ert-deftest cgp-pi-text-buffer-created-with-prefill ()
+  "input/editor request opens a *Claude Pi Input* buffer seeded with prefill."
+  (cgp--fresh-session)
+  (let ((item (cgp--pi-text-item "fix: initial" "type here")))
+    (unwind-protect
+        (progn
+          (claude-gravity--inbox-act-question item)
+          (let ((buf (get-buffer "*Claude Pi Input #42*")))
+            (should (buffer-live-p buf))
+            (with-current-buffer buf
+              (let ((txt (buffer-substring-no-properties (point-min) (point-max))))
+                ;; Header carries the prompt + placeholder hint.
+                (should (string-match-p "Enter commit message" txt))
+                (should (string-match-p "Describe the change" txt))
+                (should (string-match-p "type here" txt))
+                ;; Editable area seeded with prefill.
+                (should (string-match-p "fix: initial" txt))
+                ;; Separator marker installed past the header.
+                (should claude-gravity--pi-text-separator)
+                (should (> (marker-position claude-gravity--pi-text-separator)
+                           (point-min)))))))
+      (let ((b (get-buffer "*Claude Pi Input #42*")))
+        (when (buffer-live-p b) (kill-buffer b))))))
+
+(ert-deftest cgp-pi-text-submit-and-cancel-answer-shaping ()
+  "Submit yields answers=[text]; cancel yields an empty answers vector."
+  (cgp--fresh-session)
+  (let (captured)
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured))))
+      ;; Submit path
+      (let ((item (cgp--pi-text-item)))
+        (unwind-protect
+            (progn
+              (claude-gravity--inbox-act-question item)
+              (with-current-buffer (get-buffer "*Claude Pi Input #42*")
+                (goto-char (point-max))
+                (insert "hello pi")
+                (claude-gravity-pi-text-submit)))
+          (let ((b (get-buffer "*Claude Pi Input #42*")))
+            (when (buffer-live-p b) (kill-buffer b)))))
+      (let* ((msg (car captured))
+             (answers (alist-get 'answers msg)))
+        (should (equal (alist-get 'type msg) "action.question"))
+        (should (equal (aref answers 0) "hello pi")))
+      ;; Cancel path — empty answers vector → server sees no value.
+      (setq captured nil)
+      (let ((item (cgp--pi-text-item "ignored prefill")))
+        (unwind-protect
+            (progn
+              (claude-gravity--inbox-act-question item)
+              (with-current-buffer (get-buffer "*Claude Pi Input #42*")
+                (claude-gravity-pi-text-cancel)))
+          (let ((b (get-buffer "*Claude Pi Input #42*")))
+            (when (buffer-live-p b) (kill-buffer b)))))
+      (let* ((msg (car captured))
+             (answers (alist-get 'answers msg)))
+        (should (equal (alist-get 'type msg) "action.question"))
+        ;; Empty vector ⇒ JSON [] ⇒ answers[0] === undefined ⇒ cancel.
+        (should (= (length answers) 0))))))
+
+
 (provide 'claude-gravity-patch-test)
 ;;; claude-gravity-patch-test.el ends here
