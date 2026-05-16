@@ -22,6 +22,34 @@ import type {
   ExtensionUIResponsePayload,
 } from "./types.js";
 
+/**
+ * Normalize pi's `get_commands` payload into flat `PiCommandDescriptor`s.
+ *
+ * pi 0.74 docs show flat `path`/`location`, but the shipping build nests
+ * them under `sourceInfo` ({ path, scope, source, origin, baseDir }).
+ * Accept both so the patch stream and Emacs see one stable shape.
+ * Tolerates a non-array input (returns []).
+ */
+export function normalizePiCommands(commands: unknown): PiCommandDescriptor[] {
+  const raw = Array.isArray(commands) ? commands : [];
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.length > 0 ? v : undefined;
+  return raw.map((c): PiCommandDescriptor => {
+    const r = (c ?? {}) as Record<string, unknown>;
+    const si = (r.sourceInfo ?? {}) as Record<string, unknown>;
+    const loc = str(r.location) ?? str(si.scope);
+    const path = str(r.path) ?? str(si.path);
+    const description = str(r.description);
+    return {
+      name: String(r.name ?? ""),
+      source: (str(r.source) ?? "extension") as PiCommandDescriptor["source"],
+      ...(description ? { description } : {}),
+      ...(loc ? { location: loc as PiCommandDescriptor["location"] } : {}),
+      ...(path ? { path } : {}),
+    };
+  });
+}
+
 /** Path to the pi binary (default: "pi"). */
 const PI_BINARY = process.env.PI_BINARY_PATH ?? "pi";
 
@@ -200,8 +228,8 @@ export function spawnPiSync(
       if (!response.success) {
         throw new Error(`pi get_commands failed: ${response.error ?? "unknown error"}`);
       }
-      const data = (response.data ?? {}) as { commands?: PiCommandDescriptor[] };
-      return Array.isArray(data.commands) ? data.commands : [];
+      const data = (response.data ?? {}) as { commands?: unknown };
+      return normalizePiCommands(data.commands);
     },
 
     switchSession: async (sessionPath: string): Promise<boolean> => {

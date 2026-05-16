@@ -962,5 +962,65 @@ the message under `message` with `role`, `content`, and `model`."
             (insert (format "%s%s\n" (claude-gravity--indent) (propertize pat 'face 'claude-gravity-detail-label)))))
         (insert "\n")))))
 
+(defconst claude-gravity--pi-command-source-order
+  '(("extension" . 0) ("prompt" . 1) ("skill" . 2))
+  "Render order for pi command sources, mirroring pi's get_commands.")
+
+(defun claude-gravity-insert-pi-commands (session)
+  "Insert the Pi Commands section for SESSION.
+Reads `:pi-commands' (pi's get_commands inventory).  Renders nothing
+for non-pi sessions or when the inventory is empty/unknown.  Entries
+are grouped extension -> prompt -> skill, then alphabetical."
+  (let ((cmds (plist-get session :pi-commands)))
+    (when (and cmds (> (length cmds) 0))
+      (let* ((rank (lambda (c)
+                     (or (alist-get (alist-get 'source c)
+                                    claude-gravity--pi-command-source-order
+                                    nil nil #'equal)
+                         99)))
+             (sorted (sort (copy-sequence cmds)
+                           (lambda (a b)
+                             (let ((ra (funcall rank a)) (rb (funcall rank b)))
+                               (if (= ra rb)
+                                   (string< (or (alist-get 'name a) "")
+                                            (or (alist-get 'name b) ""))
+                                 (< ra rb)))))))
+        (magit-insert-section (pi-commands nil t)
+          (magit-insert-heading
+            (claude-gravity--section-divider
+             (format "Pi Commands (%d)" (length sorted))))
+          (dolist (c sorted)
+            (let* ((name (or (alist-get 'name c) ""))
+                   (src (or (alist-get 'source c) ""))
+                   (desc (alist-get 'description c))
+                   (path (alist-get 'path c))
+                   (loc (alist-get 'location c))
+                   (prefix (pcase src
+                             ("skill" "S ")
+                             ("prompt" "/ ")
+                             ("extension" "X ")
+                             (_ "  ")))
+                   (name-face (if (equal src "extension")
+                                  'claude-gravity-tool-signature
+                                'claude-gravity-tool-name)))
+              (magit-insert-section (pi-command c t)
+                (magit-insert-heading
+                  (format "%s%s%s  %s"
+                          (claude-gravity--indent)
+                          (propertize prefix 'face 'claude-gravity-detail-label)
+                          (propertize (concat "/" name) 'face name-face)
+                          (propertize (format "[%s%s]" src
+                                              (if loc (format " · %s" loc) ""))
+                                      'face 'claude-gravity-detail-label)))
+                (when (and desc (not (string-empty-p desc)))
+                  (insert (claude-gravity--indent) "    "
+                          (propertize desc 'face 'claude-gravity-detail-label)
+                          "\n"))
+                (when path
+                  (insert (claude-gravity--indent) "    "
+                          (propertize path 'face 'claude-gravity-detail-label)
+                          "\n")))))
+          (insert "\n"))))))
+
 (provide 'claude-gravity-render)
 ;;; claude-gravity-render.el ends here

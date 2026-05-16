@@ -1173,5 +1173,47 @@ ensure setf alist-get works in-place."
       (should-not (claude-gravity--pi-slash-capf)))))
 
 
+;;; ═══════════════════════════════════════════════════════════════════
+;;; Pi Commands section renderer (claude-gravity-insert-pi-commands)
+;;; ═══════════════════════════════════════════════════════════════════
+
+(defun cgp--render-pi-commands (session)
+  "Render SESSION's pi-commands section into a temp buffer; return text."
+  (require 'claude-gravity-render)
+  (with-temp-buffer
+    (magit-insert-section (root)
+      (claude-gravity-insert-pi-commands session))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(ert-deftest cgp-pi-commands-section-empty-renders-nothing ()
+  "No section when :pi-commands is nil or empty."
+  (let ((s (cgp--fresh-session)))
+    (should (equal "" (cgp--render-pi-commands s)))
+    (plist-put s :pi-commands nil)
+    (should (equal "" (cgp--render-pi-commands s)))
+    (plist-put s :pi-commands '())
+    (should (equal "" (cgp--render-pi-commands s)))))
+
+(ert-deftest cgp-pi-commands-section-renders-grouped ()
+  "Populated inventory renders a heading and groups extension→prompt→skill."
+  (let ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "skill:web" "skill" "Web search" "user" "/u/SKILL.md")
+                                 ,(cgp--pi-cmd "review" "prompt" "Review changes" "project" "/p/review.md")
+                                 ,(cgp--pi-cmd "run" "extension" "Run subagent")])))
+    (let ((txt (cgp--render-pi-commands s)))
+      (should (string-match-p "Pi Commands (3)" txt))
+      ;; Source grouping order: extension first, skill last.
+      (let ((i-ext (string-match "/run" txt))
+            (i-prm (string-match "/review" txt))
+            (i-skl (string-match "/skill:web" txt)))
+        (should (and i-ext i-prm i-skl))
+        (should (< i-ext i-prm))
+        (should (< i-prm i-skl)))
+      ;; Source labels + descriptions are shown.
+      (should (string-match-p "\\[extension\\]" txt))
+      (should (string-match-p "\\[prompt · project\\]" txt))
+      (should (string-match-p "Web search" txt)))))
+
 (provide 'claude-gravity-patch-test)
 ;;; claude-gravity-patch-test.el ends here

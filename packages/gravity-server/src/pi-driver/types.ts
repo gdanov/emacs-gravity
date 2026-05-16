@@ -544,6 +544,11 @@ export type PiCommand =
  * template, or skill. Invoke by sending `/<name>` (or `/skill:<name>`) as a
  * regular `prompt` message; pi handles the expansion. See pi `docs/rpc.md`
  * `get_commands`.
+ *
+ * This is the *normalized* shape. pi 0.74 docs show flat `path`/`location`,
+ * but the shipping build nests them under `sourceInfo` ({ path, scope, … }).
+ * `spawn.ts`'s `getCommands` flattens both into the fields below so the
+ * patch stream and Emacs see one stable shape.
  */
 export interface PiCommandDescriptor {
   /** Command name without the leading slash. Skills carry the `skill:` prefix. */

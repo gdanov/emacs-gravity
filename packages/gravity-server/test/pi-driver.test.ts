@@ -950,3 +950,65 @@ describe("regression: thinking/text/result reach the emitted hookData", () => {
     expect(text(2)).toBe("Finally echo.");
   });
 });
+import { normalizePiCommands } from "../src/pi-driver/spawn.js";
+
+describe("normalizePiCommands", () => {
+  it("flattens the shipping-build sourceInfo shape", () => {
+    const out = normalizePiCommands([
+      {
+        name: "mcp",
+        description: "Show MCP server status",
+        source: "extension",
+        sourceInfo: {
+          path: "/n/pi-mcp-adapter/index.ts",
+          scope: "user",
+          source: "npm:pi-mcp-adapter",
+          origin: "package",
+        },
+      },
+    ]);
+    expect(out).toEqual([
+      {
+        name: "mcp",
+        description: "Show MCP server status",
+        source: "extension",
+        location: "user",
+        path: "/n/pi-mcp-adapter/index.ts",
+      },
+    ]);
+  });
+
+  it("accepts the documented flat shape unchanged", () => {
+    const out = normalizePiCommands([
+      { name: "review", description: "Review", source: "prompt", location: "project", path: "/p/.pi/prompts/review.md" },
+    ]);
+    expect(out[0]).toEqual({
+      name: "review",
+      description: "Review",
+      source: "prompt",
+      location: "project",
+      path: "/p/.pi/prompts/review.md",
+    });
+  });
+
+  it("omits absent optional fields and defaults source", () => {
+    const out = normalizePiCommands([{ name: "bare" }]);
+    expect(out[0]).toEqual({ name: "bare", source: "extension" });
+    expect("path" in out[0]).toBe(false);
+    expect("location" in out[0]).toBe(false);
+    expect("description" in out[0]).toBe(false);
+  });
+
+  it("prefers flat path over sourceInfo.path when both present", () => {
+    const out = normalizePiCommands([
+      { name: "x", source: "skill", path: "/flat", sourceInfo: { path: "/nested" } },
+    ]);
+    expect(out[0].path).toBe("/flat");
+  });
+
+  it("returns [] for non-array input", () => {
+    expect(normalizePiCommands(undefined)).toEqual([]);
+    expect(normalizePiCommands(null)).toEqual([]);
+    expect(normalizePiCommands("nope")).toEqual([]);
+  });
+});

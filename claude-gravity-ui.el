@@ -1300,6 +1300,9 @@ Used to instrument per-section render latency."
               (push (claude-gravity--section-timing "files"
 																										(lambda () (claude-gravity-insert-files session)))
                     section-times)
+              (push (claude-gravity--section-timing "pi-commands"
+																											(lambda () (claude-gravity-insert-pi-commands session)))
+                    section-times)
               (push (claude-gravity--section-timing "patterns"
 																										(lambda () (claude-gravity-insert-allow-patterns session)))
                     section-times)
@@ -1675,6 +1678,12 @@ Otherwise toggle."
         (if (and file-path (file-exists-p file-path))
             (find-file file-path)
           (magit-section-toggle section))))
+     ;; Pi command → open its backing file (template/skill/extension)
+     ((and section (eq (oref section type) 'pi-command))
+      (let ((path (alist-get 'path (oref section value))))
+        (if (and path (file-exists-p path))
+            (find-file path)
+          (magit-section-toggle section))))
      ;; Config: empty category → dired on directory
      ((and section (eq (oref section type) 'config-category))
       (let ((dir-path (alist-get 'dir-path (oref section value))))
@@ -1770,6 +1779,11 @@ Works on config-category sections (Rules, Skills, Agents, Commands)."
            (if (and file-path (file-exists-p file-path))
                (find-file file-path)
              (message "No file path for this entry"))))
+        ('pi-command
+         (let ((path (alist-get 'path (oref section value))))
+           (if (and path (file-exists-p path))
+               (find-file path)
+             (message "No file path for this pi command"))))
         ('config-leaf
          (let ((file-path (alist-get 'file-path (oref section value))))
            (when file-path (find-file file-path))))
