@@ -594,9 +594,10 @@ Returns non-nil if a daemon session was re-keyed."
       (claude-gravity--current-session-pi-p)))
 
 (defun claude-gravity-unified-compose (&optional session-id)
-  "Open compose buffer for the current session (daemon, tmux, or pi).
-For pi sessions, prompts via minibuffer for now — multi-line compose
-buffer for pi is a TODO (see design/pi-adapter.md)."
+  "Open the multi-line compose buffer for the current session.
+Daemon, tmux, and pi sessions all use the same chat-style compose
+buffer.  Pi sessions additionally get `/'-command autocomplete from
+pi's command inventory."
   (interactive)
   (cond
    ((claude-gravity--current-session-daemon-p)
@@ -604,7 +605,7 @@ buffer for pi is a TODO (see design/pi-adapter.md)."
    ((claude-gravity--current-session-tmux-p)
     (claude-gravity-compose-prompt session-id))
    ((claude-gravity--current-session-pi-p)
-    (call-interactively #'claude-gravity--pi-prompt))
+    (claude-gravity-compose-prompt session-id))
    (t (user-error "No managed session at point"))))
 
 (defun claude-gravity-unified-stop (&optional session-id)

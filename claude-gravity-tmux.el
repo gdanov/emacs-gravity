@@ -539,8 +539,19 @@ If SESSION-ID is nil, uses the current buffer's session."
   "Open a chat-style compose buffer to send a prompt.
 SESSION-ID defaults to the current buffer's session or any active tmux session."
   (interactive)
-  (let* ((resolved (claude-gravity--resolve-tmux-session session-id))
-         (sid (car resolved))
+  ;; Pi sessions have no tmux pane — resolve the sid directly and skip
+  ;; `claude-gravity--resolve-tmux-session' (which errors without one).
+  ;; Everything else (history, separator, read-only guard, CAPF) is the
+  ;; same buffer machinery the tmux path uses.
+  (let* ((cand-sid (or session-id
+                       claude-gravity--buffer-session-id
+                       (let ((section (ignore-errors (magit-current-section))))
+                         (when (and section (eq (oref section type) 'session-entry))
+                           (oref section value)))))
+         (cand-session (and cand-sid (claude-gravity--get-session cand-sid)))
+         (pi-p (and cand-session (equal (plist-get cand-session :source) "pi")))
+         (resolved (unless pi-p (claude-gravity--resolve-tmux-session session-id)))
+         (sid (if pi-p cand-sid (car resolved)))
          (session (claude-gravity--get-session sid))
          (label (if session (claude-gravity--session-label session) (claude-gravity--short-id sid)))
          (buf-name (format "*Claude Compose: %s*" label))
@@ -572,6 +583,7 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
                 #'claude-gravity--compose-guard-history nil t)
       ;; Buffer-local state (after major mode so they survive)
       (setq-local claude-gravity--compose-session-id sid)
+      (setq-local claude-gravity--compose-backend (if pi-p 'pi 'tmux))
       ;; Minor modes
       (claude-gravity-compose-mode 1)
       (when (fboundp 'olivetti-mode) (olivetti-mode 1))
@@ -592,12 +604,15 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
 (declare-function claude-gravity-daemon-compose-send "claude-gravity-daemon")
 (declare-function claude-gravity--current-session-daemon-p "claude-gravity-daemon")
 (declare-function claude-gravity-daemon-set-permission-mode "claude-gravity-daemon")
+(declare-function claude-gravity--pi-prompt "claude-gravity-client")
 
 (defun claude-gravity-compose-send ()
   "Send the composed prompt and close the compose buffer."
   (interactive)
-  (if (eq claude-gravity--compose-backend 'daemon)
-      (claude-gravity-daemon-compose-send)
+  (cond
+   ((eq claude-gravity--compose-backend 'daemon)
+    (claude-gravity-daemon-compose-send))
+   (t
     (let* ((sep claude-gravity--compose-separator)
            (text (string-trim
                   (buffer-substring-no-properties
@@ -605,11 +620,14 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
                    (point-max)))))
       (if (string-empty-p text)
           (message "Nothing to send")
-        (let* ((sid claude-gravity--compose-session-id)
-               (resolved (claude-gravity--resolve-tmux-session sid)))
-          (claude-gravity--send-prompt-core text (car resolved) (cdr resolved))
+        (let ((sid claude-gravity--compose-session-id))
+          (if (eq claude-gravity--compose-backend 'pi)
+              ;; Pi: send straight to the server (no tmux pane).
+              (claude-gravity--pi-prompt sid text)
+            (let ((resolved (claude-gravity--resolve-tmux-session sid)))
+              (claude-gravity--send-prompt-core text (car resolved) (cdr resolved))))
           (claude-gravity--compose-cleanup)
-          (message "Prompt sent"))))))
+          (message "Prompt sent")))))))
 
 
 ;;; ── Pi slash-command autocomplete ──────────────────────────────────
