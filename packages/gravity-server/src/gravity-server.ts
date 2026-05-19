@@ -10,6 +10,7 @@ import { createServer } from "net";
 import type { Server, Socket } from "net";
 import { unlinkSync } from "fs";
 import { dirname } from "path";
+import { pathToFileURL } from "url";
 import { Effect, Layer } from "effect";
 
 import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
@@ -58,6 +59,143 @@ function logMsg(message: string, level: string = "info"): void {
     process.stderr.write(`[${ts}] [${level}] ${message}\n`);
   } catch { /* best effort */ }
 }
+
+// ── Hook message processing (extracted for socket-free testing) ──────
+//
+// The hook dispatch was an inner closure of `program`; extracted to a
+// module-level function with explicit dependency injection so it can be
+// driven by a test harness without real Unix sockets. Behaviour is a
+// verbatim move — closure refs become `deps.*`, module consts unchanged.
+
+export interface HookMessageDeps {
+  readonly store: SessionStoreService;
+  readonly inbox: InboxService;
+  readonly terminals: TerminalService;
+  readonly runEvent: (
+    eventName: HookEventName, sessionId: string, cwd: string,
+    data: HookData, pid: number | null, hookSocket?: Socket,
+  ) => Patch[];
+  readonly waitForCapableTerminal: (capability: string, timeoutMs: number) => Promise<boolean>;
+  readonly schedulePurge: (sessionId: string) => void;
+  readonly markHookReceived: () => void;
+}
+
+export const processHookMessage = async (
+  deps: HookMessageDeps,
+  msg: Record<string, unknown>,
+  socket: Socket,
+): Promise<void> => {
+  const eventName = msg.event as HookEventName;
+  const sessionId = (msg.session_id as string) || "unknown";
+  const cwd = (msg.cwd as string) || "";
+  const pid = (msg.pid as number) || null;
+  const data = (msg.data as HookData) || {};
+  const needsResponse = msg.needs_response === true;
+
+  logMsg(`Hook event: ${eventName} session=${sessionId}`);
+  deps.markHookReceived();
+
+  // Reject bidirectional events if no capable terminal is connected
+  if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
+    if (!deps.terminals.hasCapableTerminal("action.permission")) {
+      logMsg(`No capable terminal connected — waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
+      const arrived = await deps.waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
+      if (!arrived) {
+        logMsg(`No capable terminal after ${CAPABILITY_WAIT_MS}ms — rejecting ${eventName}`, "warn");
+        try {
+          socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
+          socket.end();
+        } catch { /* socket may already be closed */ }
+        return;
+      }
+      logMsg(`Capable terminal connected during wait — proceeding with ${eventName}`);
+    }
+  }
+
+  // Clean up stale bidirectional inbox items before processing
+  if (!BIDIRECTIONAL_EVENTS.has(eventName)) {
+    const staleRemoved = deps.inbox.removeStaleForSession(sessionId);
+    for (const item of staleRemoved) {
+      logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`);
+      deps.terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+    }
+
+    if (eventName !== "Notification") {
+      // Preserve a sibling item from the SAME tool invocation: the generic
+      // PreToolUse fires concurrently with AskUserQuestionIntercept (and the
+      // ExitPlanMode PermissionRequest) for one tool_use_id. Without this,
+      // PreToolUse force-closes the live question/plan-review item ~6ms
+      // after the intercept created it. Supersede is for PRIOR tools only.
+      const incomingToolUseId = (data as Record<string, unknown> | undefined)
+        ?.tool_use_id as string | undefined;
+      const forceClosed = deps.inbox.forceCloseStaleForSession(sessionId, incomingToolUseId);
+      for (const item of forceClosed) {
+        logMsg(`Inbox item ${item.id} (${item.type}) force-closed: superseded by ${eventName}`);
+        deps.terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+      }
+    }
+  }
+
+  const patches = deps.runEvent(eventName, sessionId, cwd, data, pid, needsResponse ? socket : undefined);
+
+  if (patches.length > 0) {
+    if (PULL_MODE) {
+      // Pull mode: store patches and signal, don't broadcast
+      const stored = deps.store.appendPatches(sessionId, patches);
+      const seq = stored.length > 0 ? stored[stored.length - 1].seq : deps.store.getSessionSeq(sessionId);
+      deps.terminals.signalChanged("session", sessionId, seq);
+    } else {
+      // Push mode (default): broadcast full patches
+      deps.terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+    }
+  }
+
+  // Schedule purge for ended sessions, cancel if session self-heals
+  const session = deps.store.get(sessionId);
+  if (session && session.status === "ended") {
+    deps.schedulePurge(sessionId);
+  } else if (session && session.status === "active") {
+    deps.store.cancelPurge(sessionId);
+  }
+
+  const hasStatusPatch = patches.some(p =>
+    p.op === "set_claude_status" || p.op === "set_status"
+  );
+  if (OVERVIEW_EVENTS.has(eventName) || hasStatusPatch) {
+    if (PULL_MODE) {
+      deps.terminals.signalChanged("overview");
+    } else {
+      deps.terminals.broadcast({
+        type: "overview.snapshot",
+        projects: deps.store.getProjectSummaries(),
+      });
+    }
+  }
+
+  if (eventName === "SessionStart") {
+    const ss = deps.store.get(sessionId);
+    if (ss) {
+      if (PULL_MODE) {
+        deps.terminals.signalChanged("session", sessionId, deps.store.getSessionSeq(sessionId));
+      } else {
+        deps.terminals.broadcast({ type: "session.snapshot", sessionId, session: ss });
+      }
+    }
+  }
+
+  if (eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept") {
+    const items = deps.inbox.all();
+    if (items.length > 0) {
+      const item = items[0];
+      logMsg(`Inbox broadcast: type=${item.type} tool_name=${(item.data as Record<string, unknown>)?.tool_name} id=${item.id}`);
+      if (PULL_MODE) {
+        deps.terminals.signalChanged("inbox");
+      } else {
+        deps.terminals.broadcast({ type: "inbox.added", item });
+      }
+    }
+  }
+};
 
 // ── Program ──────────────────────────────────────────────────────────
 
@@ -796,118 +934,15 @@ const program = Effect.gen(function* () {
 
   // ── Hook message handler ─────────────────────────────────────────
 
-  const handleHookMessage = async (msg: Record<string, unknown>, socket: Socket): Promise<void> => {
-    const eventName = msg.event as HookEventName;
-    const sessionId = (msg.session_id as string) || "unknown";
-    const cwd = (msg.cwd as string) || "";
-    const pid = (msg.pid as number) || null;
-    const data = (msg.data as HookData) || {};
-    const needsResponse = msg.needs_response === true;
-
-    logMsg(`Hook event: ${eventName} session=${sessionId}`);
-    hookEventReceived = true;
-
-    // Reject bidirectional events if no capable terminal is connected
-    if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
-      if (!terminals.hasCapableTerminal("action.permission")) {
-        logMsg(`No capable terminal connected — waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
-        const arrived = await waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
-        if (!arrived) {
-          logMsg(`No capable terminal after ${CAPABILITY_WAIT_MS}ms — rejecting ${eventName}`, "warn");
-          try {
-            socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
-            socket.end();
-          } catch { /* socket may already be closed */ }
-          return;
-        }
-        logMsg(`Capable terminal connected during wait — proceeding with ${eventName}`);
-      }
-    }
-
-    // Clean up stale bidirectional inbox items before processing
-    if (!BIDIRECTIONAL_EVENTS.has(eventName)) {
-      const staleRemoved = inbox.removeStaleForSession(sessionId);
-      for (const item of staleRemoved) {
-        logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`);
-        terminals.broadcast({ type: "inbox.removed", itemId: item.id });
-      }
-
-      if (eventName !== "Notification") {
-        // Preserve a sibling item from the SAME tool invocation: the generic
-        // PreToolUse fires concurrently with AskUserQuestionIntercept (and the
-        // ExitPlanMode PermissionRequest) for one tool_use_id. Without this,
-        // PreToolUse force-closes the live question/plan-review item ~6ms
-        // after the intercept created it. Supersede is for PRIOR tools only.
-        const incomingToolUseId = (data as Record<string, unknown> | undefined)
-          ?.tool_use_id as string | undefined;
-        const forceClosed = inbox.forceCloseStaleForSession(sessionId, incomingToolUseId);
-        for (const item of forceClosed) {
-          logMsg(`Inbox item ${item.id} (${item.type}) force-closed: superseded by ${eventName}`);
-          terminals.broadcast({ type: "inbox.removed", itemId: item.id });
-        }
-      }
-    }
-
-    const patches = runEvent(eventName, sessionId, cwd, data, pid, needsResponse ? socket : undefined);
-
-    if (patches.length > 0) {
-      if (PULL_MODE) {
-        // Pull mode: store patches and signal, don't broadcast
-        const stored = store.appendPatches(sessionId, patches);
-        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-        terminals.signalChanged("session", sessionId, seq);
-      } else {
-        // Push mode (default): broadcast full patches
-        terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-      }
-    }
-
-    // Schedule purge for ended sessions, cancel if session self-heals
-    const session = store.get(sessionId);
-    if (session && session.status === "ended") {
-      schedulePurge(sessionId);
-    } else if (session && session.status === "active") {
-      store.cancelPurge(sessionId);
-    }
-
-    const hasStatusPatch = patches.some(p =>
-      p.op === "set_claude_status" || p.op === "set_status"
+  const handleHookMessage = (msg: Record<string, unknown>, socket: Socket): Promise<void> =>
+    processHookMessage(
+      {
+        store, inbox, terminals, runEvent, waitForCapableTerminal, schedulePurge,
+        markHookReceived: () => { hookEventReceived = true; },
+      },
+      msg,
+      socket,
     );
-    if (OVERVIEW_EVENTS.has(eventName) || hasStatusPatch) {
-      if (PULL_MODE) {
-        terminals.signalChanged("overview");
-      } else {
-        terminals.broadcast({
-          type: "overview.snapshot",
-          projects: store.getProjectSummaries(),
-        });
-      }
-    }
-
-    if (eventName === "SessionStart") {
-      const session = store.get(sessionId);
-      if (session) {
-        if (PULL_MODE) {
-          terminals.signalChanged("session", sessionId, store.getSessionSeq(sessionId));
-        } else {
-          terminals.broadcast({ type: "session.snapshot", sessionId, session });
-        }
-      }
-    }
-
-    if (eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept") {
-      const items = inbox.all();
-      if (items.length > 0) {
-        const item = items[0];
-        logMsg(`Inbox broadcast: type=${item.type} tool_name=${(item.data as Record<string, unknown>)?.tool_name} id=${item.id}`);
-        if (PULL_MODE) {
-          terminals.signalChanged("inbox");
-        } else {
-          terminals.broadcast({ type: "inbox.added", item });
-        }
-      }
-    }
-  };
 
   /** Send overview data to a connection (used by both push and pull modes). */
   const sendOverview = (conn: TerminalConnection): void => {
@@ -1493,7 +1528,15 @@ const main = Effect.gen(function* () {
   yield* program;
 });
 
-Effect.runPromise(Effect.provide(main, MainLive)).catch((e) => {
-  logMsg(`Fatal error: ${e}`, "error");
-  process.exit(1);
-});
+// Only bootstrap the server when run as the entrypoint. Importing this
+// module (e.g. the socket-free test harness for processHookMessage) must
+// NOT start sockets / call process.exit.
+const isEntrypoint =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  Effect.runPromise(Effect.provide(main, MainLive)).catch((e) => {
+    logMsg(`Fatal error: ${e}`, "error");
+    process.exit(1);
+  });
+}

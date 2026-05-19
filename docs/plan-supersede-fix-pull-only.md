@@ -9,8 +9,20 @@
 > 191/191 gravity-server tests green, tsc clean. **Not committed** (awaiting
 > explicit request per source-control rule).
 >
-> Next: Phase 3.1 harness (refactor risk — characterization-test-first),
-> 3.3 property test, then Phase 2 push removal (breaking, `refactor!:`).
+> Done (uncommitted): Phase 3.1 — extracted `processHookMessage` to a
+> module-level DI function + entrypoint guard (`isEntrypoint`) so the
+> module is importable without starting sockets. Phase 3.3 — socket-free
+> harness (`test/hook-message-harness.test.ts`): FakeTerminals + simulated
+> poll; AskUserQuestion liveness invariant (both hook orderings),
+> supersede-still-works, ExitPlanMode guard tests (Phase 0.2 open item
+> documented in-test). 197/197 vitest, tsc clean, bundle builds.
+>
+> Behaviour preservation: extraction was a verbatim move (closure→deps.*);
+> bracketed by the full unit suite (191→197) + tsc. True before/after
+> characterization impossible (zero prior coverage of this path) — locked
+> in going forward by the new harness instead.
+>
+> Next: **STOP — ask before Phase 2** (push removal, breaking).
 
 ## Objective
 
