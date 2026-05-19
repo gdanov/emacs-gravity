@@ -224,3 +224,77 @@ describe("processHookMessage — ExitPlanMode plan-review (Phase 0.2 open item)"
     expect(planSock._ended).toBe(true);
   });
 });
+
+// Phase 3.4 — pull state machine. Push removal makes signal+poll the ONLY
+// delivery path; these pin the properties the prior suite never expressed.
+describe("pull state machine", () => {
+  let h: ReturnType<typeof makeHarness>;
+  beforeEach(() => { h = makeHarness(); });
+
+  it("seq is strictly monotonic with no gaps within a session", async () => {
+    await h.send("SessionStart", "s1", {});
+    await h.send("UserPromptSubmit", "s1", { prompt: "a" } as unknown as HookData);
+    await h.send("UserPromptSubmit", "s1", { prompt: "b" } as unknown as HookData);
+    const all = h.store.getPatchesSince("s1", 0);
+    expect(all.length).toBeGreaterThan(0);
+    const seqs = all.map(p => p.seq);
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i]).toBe(seqs[i - 1] + 1); // consecutive, no gaps, monotonic
+    }
+    expect(h.store.getSessionSeq("s1")).toBe(seqs[seqs.length - 1]);
+  });
+
+  it("getPatchesSince returns exactly the suffix after a seq", async () => {
+    await h.send("SessionStart", "s1", {});
+    await h.send("UserPromptSubmit", "s1", { prompt: "x" } as unknown as HookData);
+    const all = h.store.getPatchesSince("s1", 0);
+    const mid = all[Math.floor(all.length / 2)].seq;
+    const after = h.store.getPatchesSince("s1", mid);
+    expect(after.every(p => p.seq > mid)).toBe(true);
+    expect(after.length).toBe(all.filter(p => p.seq > mid).length);
+    expect(h.store.getPatchesSince("s1", h.store.getSessionSeq("s1"))).toHaveLength(0);
+  });
+
+  it("global seq stays monotonic across interleaved sessions", async () => {
+    await h.send("SessionStart", "s1", {});
+    await h.send("SessionStart", "s2", {});
+    await h.send("UserPromptSubmit", "s1", { prompt: "1" } as unknown as HookData);
+    await h.send("UserPromptSubmit", "s2", { prompt: "2" } as unknown as HookData);
+    const s1max = h.store.getSessionSeq("s1");
+    const s2max = h.store.getSessionSeq("s2");
+    expect(s2max).toBeGreaterThan(s1max); // s2's later patch got a higher global seq
+    // Per-session histories never interleave another session's patches.
+    expect(h.store.getPatchesSince("s2", 0).every(p => p.seq > 0)).toBe(true);
+  });
+
+  it("coalesced signals: one poll after many events yields full net state", async () => {
+    await h.send("SessionStart", "s1", {});
+    await h.send("UserPromptSubmit", "s1", { prompt: "p" } as unknown as HookData);
+    await h.send("AskUserQuestionIntercept", "s1", AUQ_DATA("tu_q"), true);
+    await h.send("PreToolUse", "s1", AUQ_DATA("tu_q"), false);
+    // Many signals fired (session + inbox), contentless and coalescible.
+    expect(h.rec.signals.length).toBeGreaterThan(1);
+    expect(h.rec.signals.some(s => s.what === "inbox")).toBe(true);
+    // A single poll observes the full current truth regardless of signal count.
+    expect(h.simulatePoll()).toHaveLength(1);
+    expect(h.simulatePoll()[0].type).toBe("question");
+    expect(h.store.getPatchesSince("s1", 0).length).toBeGreaterThan(0);
+  });
+
+  it("add+remove between polls: net truth is delivered (guard makes it survive)", async () => {
+    // Question created then a DIFFERENT tool's PreToolUse reaps it, with no
+    // poll in between. A single later poll must reflect the net truth.
+    await h.send("AskUserQuestionIntercept", "s1", AUQ_DATA("tu_q"), true);
+    await h.send("PreToolUse", "s1", AUQ_DATA("tu_other"), false); // different id → reaped
+    const inboxSignals = h.rec.signals.filter(s => s.what === "inbox").length;
+    expect(inboxSignals).toBeGreaterThanOrEqual(1); // client would poll & converge
+    expect(h.simulatePoll()).toHaveLength(0); // net truth: gone (legit supersede)
+
+    // Same scenario WITH the guard (same tool_use_id): net truth = survives.
+    const h2 = makeHarness();
+    await h2.send("AskUserQuestionIntercept", "s1", AUQ_DATA("tu_q"), true);
+    await h2.send("PreToolUse", "s1", AUQ_DATA("tu_q"), false); // same id → preserved
+    expect(h2.simulatePoll()).toHaveLength(1);
+    expect(h2.simulatePoll()[0].type).toBe("question");
+  });
+});
