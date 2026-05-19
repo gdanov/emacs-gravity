@@ -47,9 +47,6 @@ const HOOKS_SILENCE_REARM_MS = 600_000;
 const BIDIRECTIONAL_EVENTS: ReadonlySet<HookEventName> = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 const OVERVIEW_EVENTS: ReadonlySet<HookEventName> = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
 
-// Pull mode: server sends lightweight signals instead of full payloads
-// Default: true. Set to false via GRAVITY_PUSH_MODE=true to use push (legacy).
-const PULL_MODE = process.env.GRAVITY_PUSH_MODE !== "true";
 
 // ── Logging helper (simple, no service dependency for socket callbacks) ──
 
@@ -58,6 +55,26 @@ function logMsg(message: string, level: string = "info"): void {
   try {
     process.stderr.write(`[${ts}] [${level}] ${message}\n`);
   } catch { /* best effort */ }
+}
+
+// ── Pull-only state emission ─────────────────────────────────────────
+//
+// The server NEVER proactively pushes replicated state. It stores patches
+// and emits a lightweight `state-changed` signal; clients fetch via poll.
+// (Push terminal communication removed — see docs/refactor-implementation.)
+
+function emitSessionPatches(
+  store: SessionStoreService,
+  terminals: TerminalService,
+  sessionId: string,
+  patches: Patch[],
+): void {
+  if (patches.length === 0) return;
+  const stored = store.appendPatches(sessionId, patches);
+  const seq = stored.length > 0
+    ? stored[stored.length - 1].seq
+    : store.getSessionSeq(sessionId);
+  terminals.signalChanged("session", sessionId, seq);
 }
 
 // ── Hook message processing (extracted for socket-free testing) ──────
@@ -117,7 +134,7 @@ export const processHookMessage = async (
     const staleRemoved = deps.inbox.removeStaleForSession(sessionId);
     for (const item of staleRemoved) {
       logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`);
-      deps.terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+      deps.terminals.signalChanged("inbox");
     }
 
     if (eventName !== "Notification") {
@@ -131,7 +148,7 @@ export const processHookMessage = async (
       const forceClosed = deps.inbox.forceCloseStaleForSession(sessionId, incomingToolUseId);
       for (const item of forceClosed) {
         logMsg(`Inbox item ${item.id} (${item.type}) force-closed: superseded by ${eventName}`);
-        deps.terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+        deps.terminals.signalChanged("inbox");
       }
     }
   }
@@ -139,15 +156,10 @@ export const processHookMessage = async (
   const patches = deps.runEvent(eventName, sessionId, cwd, data, pid, needsResponse ? socket : undefined);
 
   if (patches.length > 0) {
-    if (PULL_MODE) {
-      // Pull mode: store patches and signal, don't broadcast
-      const stored = deps.store.appendPatches(sessionId, patches);
-      const seq = stored.length > 0 ? stored[stored.length - 1].seq : deps.store.getSessionSeq(sessionId);
-      deps.terminals.signalChanged("session", sessionId, seq);
-    } else {
-      // Push mode (default): broadcast full patches
-      deps.terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-    }
+    // Pull mode: store patches and signal, don't broadcast
+    const stored = deps.store.appendPatches(sessionId, patches);
+    const seq = stored.length > 0 ? stored[stored.length - 1].seq : deps.store.getSessionSeq(sessionId);
+    deps.terminals.signalChanged("session", sessionId, seq);
   }
 
   // Schedule purge for ended sessions, cancel if session self-heals
@@ -162,24 +174,13 @@ export const processHookMessage = async (
     p.op === "set_claude_status" || p.op === "set_status"
   );
   if (OVERVIEW_EVENTS.has(eventName) || hasStatusPatch) {
-    if (PULL_MODE) {
-      deps.terminals.signalChanged("overview");
-    } else {
-      deps.terminals.broadcast({
-        type: "overview.snapshot",
-        projects: deps.store.getProjectSummaries(),
-      });
-    }
+    deps.terminals.signalChanged("overview");
   }
 
   if (eventName === "SessionStart") {
     const ss = deps.store.get(sessionId);
     if (ss) {
-      if (PULL_MODE) {
-        deps.terminals.signalChanged("session", sessionId, deps.store.getSessionSeq(sessionId));
-      } else {
-        deps.terminals.broadcast({ type: "session.snapshot", sessionId, session: ss });
-      }
+      deps.terminals.signalChanged("session", sessionId, deps.store.getSessionSeq(sessionId));
     }
   }
 
@@ -188,11 +189,7 @@ export const processHookMessage = async (
     if (items.length > 0) {
       const item = items[0];
       logMsg(`Inbox broadcast: type=${item.type} tool_name=${(item.data as Record<string, unknown>)?.tool_name} id=${item.id}`);
-      if (PULL_MODE) {
-        deps.terminals.signalChanged("inbox");
-      } else {
-        deps.terminals.broadcast({ type: "inbox.added", item });
-      }
+      deps.terminals.signalChanged("inbox");
     }
   }
 };
@@ -237,13 +234,9 @@ const program = Effect.gen(function* () {
     const patches = runEvent(result.hookEvent, sessionId, cwd, result.hookData, null);
 
     if (patches.length > 0) {
-      if (PULL_MODE) {
-        const stored = store.appendPatches(sessionId, patches);
-        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-        terminals.signalChanged("session", sessionId, seq);
-      } else {
-        terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-      }
+      const stored = store.appendPatches(sessionId, patches);
+      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+      terminals.signalChanged("session", sessionId, seq);
     }
 
     // Handle session lifecycle for overview updates
@@ -251,14 +244,7 @@ const program = Effect.gen(function* () {
       p.op === "set_claude_status" || p.op === "set_status"
     );
     if (OVERVIEW_EVENTS.has(result.hookEvent) || hasStatusPatch) {
-      if (PULL_MODE) {
-        terminals.signalChanged("overview");
-      } else {
-        terminals.broadcast({
-          type: "overview.snapshot",
-          projects: store.getProjectSummaries(),
-        });
-      }
+      terminals.signalChanged("overview");
     }
 
     // Schedule purge for ended sessions
@@ -322,7 +308,7 @@ const program = Effect.gen(function* () {
           },
         );
         pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request.id, method });
-        terminals.broadcast({ type: "inbox.added", item });
+        terminals.signalChanged("inbox");
         break;
       }
       case "select": {
@@ -345,7 +331,7 @@ const program = Effect.gen(function* () {
           },
         );
         pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request.id, method });
-        terminals.broadcast({ type: "inbox.added", item });
+        terminals.signalChanged("inbox");
         break;
       }
       case "input":
@@ -386,7 +372,7 @@ const program = Effect.gen(function* () {
           },
         );
         pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request.id, method });
-        terminals.broadcast({ type: "inbox.added", item });
+        terminals.signalChanged("inbox");
         break;
       }
       case "notify": {
@@ -465,13 +451,9 @@ const program = Effect.gen(function* () {
         if (session && branch !== null) {
           const patches = updateMeta(session, { branch });
           if (patches.length > 0) {
-            if (PULL_MODE) {
-              const stored = store.appendPatches(sessionId, patches);
-              const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-              terminals.signalChanged("session", sessionId, seq);
-            } else {
-              terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-            }
+            const stored = store.appendPatches(sessionId, patches);
+            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+            terminals.signalChanged("session", sessionId, seq);
           }
         }
       } catch (err) {
@@ -498,13 +480,9 @@ const program = Effect.gen(function* () {
       }));
     }
     if (patches.length === 0) return;
-    if (PULL_MODE) {
-      const stored = store.appendPatches(sessionId, patches);
-      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-      terminals.signalChanged("session", sessionId, seq);
-    } else {
-      terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-    }
+    const stored = store.appendPatches(sessionId, patches);
+    const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+    terminals.signalChanged("session", sessionId, seq);
   };
 
   // Define helper functions before pi driver check
@@ -532,10 +510,7 @@ const program = Effect.gen(function* () {
       inbox.removeForSession(sessionId);
       terminals.broadcast({ type: "session.removed", sessionId });
       terminals.unsubscribeAll(sessionId);
-      terminals.broadcast({
-        type: "overview.snapshot",
-        projects: store.getProjectSummaries(),
-      });
+      terminals.signalChanged("overview");
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
@@ -631,7 +606,7 @@ const program = Effect.gen(function* () {
           for (const [itemId, entry] of pendingPiUIResponses) {
             if (entry.sessionId !== sessionId) continue;
             inbox.remove(itemId);
-            terminals.broadcast({ type: "inbox.removed", itemId });
+            terminals.signalChanged("inbox");
             pendingPiUIResponses.delete(itemId);
           }
           terminals.broadcast({
@@ -666,13 +641,9 @@ const program = Effect.gen(function* () {
           };
           if (Object.keys(opts).length > 0) {
             const patches = updateMeta(session, opts);
-            if (PULL_MODE) {
-              const stored = store.appendPatches(sessionId, patches);
-              const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-              terminals.signalChanged("session", sessionId, seq);
-            } else {
-              terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-            }
+            const stored = store.appendPatches(sessionId, patches);
+            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+            terminals.signalChanged("session", sessionId, seq);
           }
         }
         if (typeof f === "string" && f.length > 0) {
@@ -722,13 +693,9 @@ const program = Effect.gen(function* () {
         if (!session) return;
         const patches = setPiCommands(session, commands);
         if (patches.length === 0) return;
-        if (PULL_MODE) {
-          const stored = store.appendPatches(sessionId, patches);
-          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-          terminals.signalChanged("session", sessionId, seq);
-        } else {
-          terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-        }
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
         logMsg(`Pi[${sessionId}]: ${commands.length} commands available`);
       },
       (err) => logMsg(`pi get_commands failed for ${sessionId}: ${err.message}`, "warn"),
@@ -752,13 +719,9 @@ const program = Effect.gen(function* () {
         if (!session) return;
         const patches = setPiModels(session, models);
         if (patches.length === 0) return;
-        if (PULL_MODE) {
-          const stored = store.appendPatches(sessionId, patches);
-          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-          terminals.signalChanged("session", sessionId, seq);
-        } else {
-          terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-        }
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
         logMsg(`Pi[${sessionId}]: ${models.length} models available`);
       },
       (err) => logMsg(`pi get_available_models failed for ${sessionId}: ${err.message}`, "warn"),
@@ -817,13 +780,9 @@ const program = Effect.gen(function* () {
     const session = store.get(sessionId);
     if (session) {
       const patches = updateMeta(session, { displayName: name });
-      if (PULL_MODE) {
-        const stored = store.appendPatches(sessionId, patches);
-        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-        terminals.signalChanged("session", sessionId, seq);
-      } else {
-        terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-      }
+      const stored = store.appendPatches(sessionId, patches);
+      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+      terminals.signalChanged("session", sessionId, seq);
     }
   };
 
@@ -1043,7 +1002,7 @@ const program = Effect.gen(function* () {
           }
           pendingPiUIResponses.delete(itemId);
           inbox.remove(itemId);
-          terminals.broadcast({ type: "inbox.removed", itemId });
+          terminals.signalChanged("inbox");
           break;
         }
         Effect.runSync(inbox.respond(itemId, {
@@ -1052,7 +1011,7 @@ const program = Effect.gen(function* () {
             decision: { behavior: decision, message, updatedPermissions },
           },
         }));
-        terminals.broadcast({ type: "inbox.removed", itemId });
+        terminals.signalChanged("inbox");
         break;
       }
 
@@ -1074,7 +1033,7 @@ const program = Effect.gen(function* () {
           }
           pendingPiUIResponses.delete(itemId);
           inbox.remove(itemId);
-          terminals.broadcast({ type: "inbox.removed", itemId });
+          terminals.signalChanged("inbox");
           break;
         }
         const pending = inbox.getPending(itemId);
@@ -1094,7 +1053,7 @@ const program = Effect.gen(function* () {
             updatedInput: { ...toolInput, answers: answersMap },
           },
         }));
-        terminals.broadcast({ type: "inbox.removed", itemId });
+        terminals.signalChanged("inbox");
         break;
       }
 
@@ -1150,7 +1109,7 @@ const program = Effect.gen(function* () {
             decision: { behavior: decision, message },
           },
         }));
-        terminals.broadcast({ type: "inbox.removed", itemId });
+        terminals.signalChanged("inbox");
         break;
       }
 
@@ -1169,15 +1128,9 @@ const program = Effect.gen(function* () {
             break;
           }
           logMsg(`Terminal hint: session ${sessionId} is dead — marking ended`);
-          const patches = sessionEnd(session);
-          if (patches.length > 0) {
-            terminals.broadcast({ type: "session.update", sessionId, patches });
-          }
+          emitSessionPatches(store, terminals, sessionId, sessionEnd(session));
           schedulePurge(sessionId);
-          terminals.broadcast({
-            type: "overview.snapshot",
-            projects: store.getProjectSummaries(),
-          });
+          terminals.signalChanged("overview");
         }
         break;
       }
@@ -1317,7 +1270,7 @@ const program = Effect.gen(function* () {
       const removed = inbox.removeBySocket(socket);
       for (const item of removed) {
         logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: hook socket closed`);
-        terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+        terminals.signalChanged("inbox");
       }
     });
   });
@@ -1428,23 +1381,12 @@ const program = Effect.gen(function* () {
       if (isDead) {
         const patches = sessionEnd(session);
         if (patches.length > 0) {
-          if (PULL_MODE) {
-            const stored = store.appendPatches(sessionId, patches);
-            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-            terminals.signalChanged("session", sessionId, seq);
-          } else {
-            terminals.broadcast({ type: "session.update", sessionId, patches });
-          }
+          const stored = store.appendPatches(sessionId, patches);
+          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+          terminals.signalChanged("session", sessionId, seq);
         }
         schedulePurge(sessionId);
-        if (PULL_MODE) {
-          terminals.signalChanged("overview");
-        } else {
-          terminals.broadcast({
-            type: "overview.snapshot",
-            projects: store.getProjectSummaries(),
-          });
-        }
+        terminals.signalChanged("overview");
       }
     }
 
