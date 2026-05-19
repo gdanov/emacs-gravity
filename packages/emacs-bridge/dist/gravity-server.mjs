@@ -97808,6 +97808,7 @@ var init_mermaid_ascii = __esm({
 import { createServer as createServer2 } from "net";
 import { unlinkSync as unlinkSync2 } from "fs";
 import { dirname } from "path";
+import { pathToFileURL } from "url";
 
 // ../../node_modules/effect/dist/Pipeable.js
 var pipeArguments = (self2, args2) => {
@@ -103272,11 +103273,14 @@ var VALID_TERMINAL_MESSAGE_TYPES = /* @__PURE__ */ new Set([
   "pi.steer",
   "pi.abort",
   "pi.set-thinking",
+  "pi.set-session-name",
   "pi.set-model",
   "pi.resume",
   "pi.compact",
   "pi.new-session",
-  "pi.stop"
+  "pi.stop",
+  "pi.refresh-commands",
+  "pi.refresh-models"
 ]);
 function isHookMessage(obj) {
   return typeof obj.event === "string" && typeof obj.session_id === "string";
@@ -103485,11 +103489,21 @@ function makeInbox() {
       }
       return removed;
     },
-    forceCloseStaleForSession: (sessionId) => {
+    // `preserveToolUseId`: when set, an item whose hook payload carries the
+    // same `tool_use_id` is NOT closed. The generic PreToolUse hook and a
+    // sibling bidirectional hook (AskUserQuestionIntercept, or the
+    // PermissionRequest behind ExitPlanMode) belong to the SAME tool
+    // invocation — superseding here would force-close the live question /
+    // plan-review item microseconds after it was created. Supersede must
+    // only reap items from PRIOR, different tool invocations.
+    forceCloseStaleForSession: (sessionId, preserveToolUseId) => {
       const removed = [];
       for (let i = items.length - 1; i >= 0; i--) {
         const item = items[i];
         if (item.sessionId !== sessionId) continue;
+        if (preserveToolUseId !== void 0 && item.data?.tool_use_id === preserveToolUseId) {
+          continue;
+        }
         closePendingSocket(item.id);
         items.splice(i, 1);
         removed.push(item);
@@ -103650,7 +103664,9 @@ function createSession(sessionId, cwd, source) {
     tasks: {},
     files: {},
     compactions: [],
-    totalToolCount: 0
+    totalToolCount: 0,
+    piCommands: null,
+    piModels: null
   };
 }
 function createTurnNode(turnNumber) {
@@ -103733,6 +103749,14 @@ function setContextUsage(s, contextUsage) {
 function setPlan(s, plan) {
   s.plan = plan;
   return [{ op: "set_plan", plan }];
+}
+function setPiCommands(s, commands) {
+  s.piCommands = commands;
+  return [{ op: "set_pi_commands", commands }];
+}
+function setPiModels(s, models) {
+  s.piModels = models;
+  return [{ op: "set_pi_models", models }];
 }
 function updateMeta(s, opts) {
   s.lastEventTime = Date.now();
@@ -104500,6 +104524,23 @@ var handlePermissionRequest = (ctx) => Effect_exports.gen(function* () {
   const inboxType = toolName === "ExitPlanMode" ? "plan-review" : "permission";
   const patches = [];
   patches.push(...setClaudeStatus(session, "idle"));
+  if (toolName === "AskUserQuestion") {
+    if (ctx.hookSocket) {
+      try {
+        ctx.hookSocket.write(
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: "PermissionRequest",
+              decision: { behavior: "allow" }
+            }
+          }) + "\n"
+        );
+        ctx.hookSocket.end();
+      } catch {
+      }
+    }
+    return patches;
+  }
   if (ctx.hookSocket) {
     inbox.add(
       inboxType,
@@ -105092,12 +105133,18 @@ var PiProtocol = class _PiProtocol {
         return JSON.stringify(withId({ type: "abort" })) + "\n";
       case "set_thinking_level":
         return JSON.stringify(withId({ type: "set_thinking_level", level: cmd.level })) + "\n";
+      case "set_session_name":
+        return JSON.stringify(withId({ type: "set_session_name", name: cmd.name })) + "\n";
       case "set_model":
         return JSON.stringify(withId({ type: "set_model", provider: cmd.provider, modelId: cmd.modelId })) + "\n";
       case "get_session_stats":
         return JSON.stringify(withId({ type: "get_session_stats" })) + "\n";
       case "get_state":
         return JSON.stringify(withId({ type: "get_state" })) + "\n";
+      case "get_commands":
+        return JSON.stringify(withId({ type: "get_commands" })) + "\n";
+      case "get_available_models":
+        return JSON.stringify(withId({ type: "get_available_models" })) + "\n";
       case "switch_session":
         return JSON.stringify(withId({ type: "switch_session", sessionPath: cmd.sessionPath })) + "\n";
       case "compact": {
@@ -105149,6 +105196,12 @@ var PiProtocol = class _PiProtocol {
     return JSON.stringify({ type: "set_thinking_level", level }) + "\n";
   }
   /**
+   * Format a set_session_name command for pi's stdin.
+   */
+  static formatSessionName(name) {
+    return JSON.stringify({ type: "set_session_name", name }) + "\n";
+  }
+  /**
    * Format a set_model command for pi's stdin.
    * Pi expects { type: "set_model", provider, modelId } (verified against
    * pi 0.74 RPC docs).
@@ -105160,6 +105213,39 @@ var PiProtocol = class _PiProtocol {
 
 // src/pi-driver/spawn.ts
 var RAW_LOG = process.env.GRAVITY_PI_RAW_LOG;
+function normalizePiCommands(commands) {
+  const raw = Array.isArray(commands) ? commands : [];
+  const str = (v) => typeof v === "string" && v.length > 0 ? v : void 0;
+  return raw.map((c) => {
+    const r = c ?? {};
+    const si = r.sourceInfo ?? {};
+    const loc = str(r.location) ?? str(si.scope);
+    const path = str(r.path) ?? str(si.path);
+    const description = str(r.description);
+    return {
+      name: String(r.name ?? ""),
+      source: str(r.source) ?? "extension",
+      ...description ? { description } : {},
+      ...loc ? { location: loc } : {},
+      ...path ? { path } : {}
+    };
+  });
+}
+function normalizePiModels(models) {
+  const raw = Array.isArray(models) ? models : [];
+  const str = (v) => typeof v === "string" && v.length > 0 ? v : void 0;
+  return raw.map((m) => {
+    const r = m ?? {};
+    const name = str(r.name);
+    const contextWindow = typeof r.contextWindow === "number" ? r.contextWindow : void 0;
+    return {
+      id: String(r.id ?? ""),
+      provider: str(r.provider) ?? "",
+      ...name ? { name } : {},
+      ...contextWindow !== void 0 ? { contextWindow } : {}
+    };
+  });
+}
 var PI_BINARY = process.env.PI_BINARY_PATH ?? "pi";
 var DEFAULT_THINKING_LEVEL = "medium";
 var DEFAULT_PI_SESSION_DIR = join3(homedir3(), ".local", "state", "gravity-pi-sessions");
@@ -105268,6 +105354,10 @@ function spawnPiSync(options = {}) {
       if (stopped || !child.stdin || child.stdin.destroyed) return;
       child.stdin.write(PiProtocol.formatThinkingLevel(level));
     },
+    setSessionName: (name) => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      child.stdin.write(PiProtocol.formatSessionName(name));
+    },
     setModel: (provider, modelId) => {
       if (stopped || !child.stdin || child.stdin.destroyed) return;
       child.stdin.write(PiProtocol.formatSetModel(provider, modelId));
@@ -105287,6 +105377,24 @@ function spawnPiSync(options = {}) {
         throw new Error(`pi get_state failed: ${response.error ?? "unknown error"}`);
       }
       return response.data ?? {};
+    },
+    getCommands: async () => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_commands" });
+      if (!response.success) {
+        throw new Error(`pi get_commands failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return normalizePiCommands(data.commands);
+    },
+    getAvailableModels: async () => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_available_models" });
+      if (!response.success) {
+        throw new Error(`pi get_available_models failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return normalizePiModels(data.models);
     },
     switchSession: async (sessionPath) => {
       if (stopped) throw new Error("pi subprocess already stopped");
@@ -105959,6 +106067,7 @@ function startPiDriver(options) {
       metadata = updateThinkingLevel(metadata, normalized);
       state.effortLevel = thinkingToEffort(normalized);
     },
+    setSessionName: (name) => driver.setSessionName(name),
     setModel: (provider, modelId) => {
       driver.setModel(provider, modelId);
       metadata = updateModel(metadata, modelId, provider);
@@ -105966,6 +106075,8 @@ function startPiDriver(options) {
     },
     getSessionStats: () => driver.getSessionStats(),
     getState: () => driver.getState(),
+    getCommands: () => driver.getCommands(),
+    getAvailableModels: () => driver.getAvailableModels(),
     switchSession: (sessionPath) => driver.switchSession(sessionPath),
     sendExtensionUIResponse: (payload) => driver.sendExtensionUIResponse(payload),
     compact: (customInstructions) => driver.compact(customInstructions),
@@ -105988,7 +106099,6 @@ var HOOKS_SILENCE_WARN_MS = 9e4;
 var HOOKS_SILENCE_REARM_MS = 6e5;
 var BIDIRECTIONAL_EVENTS = /* @__PURE__ */ new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 var OVERVIEW_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
-var PULL_MODE = process.env.GRAVITY_PUSH_MODE !== "true";
 function logMsg(message, level = "info") {
   const ts = (/* @__PURE__ */ new Date()).toISOString();
   try {
@@ -105997,6 +106107,85 @@ function logMsg(message, level = "info") {
   } catch {
   }
 }
+function emitSessionPatches(store, terminals, sessionId, patches) {
+  if (patches.length === 0) return;
+  const stored = store.appendPatches(sessionId, patches);
+  const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+  terminals.signalChanged("session", sessionId, seq);
+}
+var processHookMessage = async (deps, msg, socket) => {
+  const eventName = msg.event;
+  const sessionId = msg.session_id || "unknown";
+  const cwd = msg.cwd || "";
+  const pid = msg.pid || null;
+  const data = msg.data || {};
+  const needsResponse = msg.needs_response === true;
+  logMsg(`Hook event: ${eventName} session=${sessionId}`);
+  deps.markHookReceived();
+  if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
+    if (!deps.terminals.hasCapableTerminal("action.permission")) {
+      logMsg(`No capable terminal connected \u2014 waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
+      const arrived = await deps.waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
+      if (!arrived) {
+        logMsg(`No capable terminal after ${CAPABILITY_WAIT_MS}ms \u2014 rejecting ${eventName}`, "warn");
+        try {
+          socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
+          socket.end();
+        } catch {
+        }
+        return;
+      }
+      logMsg(`Capable terminal connected during wait \u2014 proceeding with ${eventName}`);
+    }
+  }
+  if (!BIDIRECTIONAL_EVENTS.has(eventName)) {
+    const staleRemoved = deps.inbox.removeStaleForSession(sessionId);
+    for (const item of staleRemoved) {
+      logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`);
+      deps.terminals.signalChanged("inbox");
+    }
+    if (eventName !== "Notification") {
+      const incomingToolUseId = data?.tool_use_id;
+      const forceClosed = deps.inbox.forceCloseStaleForSession(sessionId, incomingToolUseId);
+      for (const item of forceClosed) {
+        logMsg(`Inbox item ${item.id} (${item.type}) force-closed: superseded by ${eventName}`);
+        deps.terminals.signalChanged("inbox");
+      }
+    }
+  }
+  const patches = deps.runEvent(eventName, sessionId, cwd, data, pid, needsResponse ? socket : void 0);
+  if (patches.length > 0) {
+    const stored = deps.store.appendPatches(sessionId, patches);
+    const seq = stored.length > 0 ? stored[stored.length - 1].seq : deps.store.getSessionSeq(sessionId);
+    deps.terminals.signalChanged("session", sessionId, seq);
+  }
+  const session = deps.store.get(sessionId);
+  if (session && session.status === "ended") {
+    deps.schedulePurge(sessionId);
+  } else if (session && session.status === "active") {
+    deps.store.cancelPurge(sessionId);
+  }
+  const hasStatusPatch = patches.some(
+    (p) => p.op === "set_claude_status" || p.op === "set_status"
+  );
+  if (OVERVIEW_EVENTS.has(eventName) || hasStatusPatch) {
+    deps.terminals.signalChanged("overview");
+  }
+  if (eventName === "SessionStart") {
+    const ss = deps.store.get(sessionId);
+    if (ss) {
+      deps.terminals.signalChanged("session", sessionId, deps.store.getSessionSeq(sessionId));
+    }
+  }
+  if (eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept") {
+    const items = deps.inbox.all();
+    if (items.length > 0) {
+      const item = items[0];
+      logMsg(`Inbox broadcast: type=${item.type} tool_name=${item.data?.tool_name} id=${item.id}`);
+      deps.terminals.signalChanged("inbox");
+    }
+  }
+};
 var program = Effect_exports.gen(function* () {
   const config = yield* Effect_exports.service(ServerConfig);
   const fs = yield* Effect_exports.service(Fs);
@@ -106018,26 +106207,15 @@ var program = Effect_exports.gen(function* () {
     logMsg(`Pi driver event: ${result3.hookEvent} session=${sessionId}`);
     const patches = runEvent(result3.hookEvent, sessionId, cwd, result3.hookData, null);
     if (patches.length > 0) {
-      if (PULL_MODE) {
-        const stored = store.appendPatches(sessionId, patches);
-        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-        terminals.signalChanged("session", sessionId, seq);
-      } else {
-        terminals.broadcast({ type: "session.update", sessionId, patches });
-      }
+      const stored = store.appendPatches(sessionId, patches);
+      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+      terminals.signalChanged("session", sessionId, seq);
     }
     const hasStatusPatch = patches.some(
       (p) => p.op === "set_claude_status" || p.op === "set_status"
     );
     if (OVERVIEW_EVENTS.has(result3.hookEvent) || hasStatusPatch) {
-      if (PULL_MODE) {
-        terminals.signalChanged("overview");
-      } else {
-        terminals.broadcast({
-          type: "overview.snapshot",
-          projects: store.getProjectSummaries()
-        });
-      }
+      terminals.signalChanged("overview");
     }
     const session = store.get(sessionId);
     if (session && session.status === "ended") {
@@ -106081,7 +106259,7 @@ var program = Effect_exports.gen(function* () {
           }
         );
         pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request3.id, method });
-        terminals.broadcast({ type: "inbox.added", item });
+        terminals.signalChanged("inbox");
         break;
       }
       case "select": {
@@ -106104,19 +106282,48 @@ var program = Effect_exports.gen(function* () {
           }
         );
         pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request3.id, method });
-        terminals.broadcast({ type: "inbox.added", item });
+        terminals.signalChanged("inbox");
         break;
       }
       case "input":
       case "editor": {
-        logMsg(`pi extension_ui_request ${method} not yet supported \u2014 cancelling`, "warn");
-        sendResponse({ cancelled: true });
+        const summary = request3.title ?? request3.message ?? (method === "editor" ? "Pi editor" : "Pi input");
+        const item = inbox.add(
+          "question",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          {
+            tool_name: "pi:input",
+            tool_input: {
+              // Empty options[] — action.question's handler still finds a
+              // question entry, but the terminal branches on pi_ui.kind.
+              questions: [{ question: summary, options: [] }]
+            },
+            pi_ui: {
+              method,
+              id: request3.id,
+              kind: "text",
+              prefill: request3.prefill,
+              placeholder: request3.placeholder,
+              title: request3.title,
+              message: request3.message,
+              multiline: method === "editor"
+            }
+          }
+        );
+        pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request3.id, method });
+        terminals.signalChanged("inbox");
+        break;
+      }
+      case "notify": {
+        const level = request3.notifyType === "error" ? "error" : request3.notifyType === "warning" ? "warn" : "info";
+        terminals.broadcast({ type: "notice", level, text: request3.message ?? "" });
         break;
       }
       // Fire-and-forget: pi doesn't expect a response. Log for visibility;
-      // wiring these into the UI (status bar, transient notifications,
-      // window title) is a follow-up.
-      case "notify":
+      // wiring these into the UI (status bar, window title) is a follow-up.
       case "setStatus":
       case "setWidget":
       case "setTitle":
@@ -106165,13 +106372,9 @@ var program = Effect_exports.gen(function* () {
         if (session && branch !== null) {
           const patches = updateMeta(session, { branch });
           if (patches.length > 0) {
-            if (PULL_MODE) {
-              const stored = store.appendPatches(sessionId, patches);
-              const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-              terminals.signalChanged("session", sessionId, seq);
-            } else {
-              terminals.broadcast({ type: "session.update", sessionId, patches });
-            }
+            const stored = store.appendPatches(sessionId, patches);
+            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+            terminals.signalChanged("session", sessionId, seq);
           }
         }
       } catch (err) {
@@ -106197,13 +106400,9 @@ var program = Effect_exports.gen(function* () {
       }));
     }
     if (patches.length === 0) return;
-    if (PULL_MODE) {
-      const stored = store.appendPatches(sessionId, patches);
-      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-      terminals.signalChanged("session", sessionId, seq);
-    } else {
-      terminals.broadcast({ type: "session.update", sessionId, patches });
-    }
+    const stored = store.appendPatches(sessionId, patches);
+    const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+    terminals.signalChanged("session", sessionId, seq);
   };
   const waitForCapableTerminal = (capability, timeoutMs) => new Promise((resolve) => {
     if (terminals.hasCapableTerminal(capability)) {
@@ -106227,10 +106426,7 @@ var program = Effect_exports.gen(function* () {
       inbox.removeForSession(sessionId);
       terminals.broadcast({ type: "session.removed", sessionId });
       terminals.unsubscribeAll(sessionId);
-      terminals.broadcast({
-        type: "overview.snapshot",
-        projects: store.getProjectSummaries()
-      });
+      terminals.signalChanged("overview");
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
@@ -106286,7 +106482,7 @@ var program = Effect_exports.gen(function* () {
           for (const [itemId, entry] of pendingPiUIResponses) {
             if (entry.sessionId !== sessionId) continue;
             inbox.remove(itemId);
-            terminals.broadcast({ type: "inbox.removed", itemId });
+            terminals.signalChanged("inbox");
             pendingPiUIResponses.delete(itemId);
           }
           terminals.broadcast({
@@ -106303,18 +106499,21 @@ var program = Effect_exports.gen(function* () {
       if (piDrivers.get(sessionId) !== driver) return;
       driver.getState().then((state) => {
         const f = state.sessionFile;
-        if (typeof f === "string" && f.length > 0) {
-          const session = store.get(sessionId);
-          if (session) {
-            const patches = updateMeta(session, { piSessionFile: f });
-            if (PULL_MODE) {
-              const stored = store.appendPatches(sessionId, patches);
-              const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-              terminals.signalChanged("session", sessionId, seq);
-            } else {
-              terminals.broadcast({ type: "session.update", sessionId, patches });
-            }
+        const name = state.sessionName;
+        const session = store.get(sessionId);
+        if (session) {
+          const opts = {
+            ...typeof f === "string" && f ? { piSessionFile: f } : {},
+            ...typeof name === "string" && name ? { displayName: name } : {}
+          };
+          if (Object.keys(opts).length > 0) {
+            const patches = updateMeta(session, opts);
+            const stored = store.appendPatches(sessionId, patches);
+            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+            terminals.signalChanged("session", sessionId, seq);
           }
+        }
+        if (typeof f === "string" && f.length > 0) {
           captureBranch(sessionId, f, driver);
         } else if (attempt < 3) {
           setTimeout(() => captureSessionFile(attempt + 1), 500 * (attempt + 1));
@@ -106328,7 +106527,45 @@ var program = Effect_exports.gen(function* () {
       });
     };
     setImmediate(() => captureSessionFile());
+    setImmediate(() => refreshPiCommands(sessionId));
+    setImmediate(() => refreshPiModels(sessionId));
     return sessionId;
+  };
+  const refreshPiCommands = (sessionId) => {
+    const driver = piDrivers.get(sessionId);
+    if (!driver) return;
+    driver.getCommands().then(
+      (commands) => {
+        if (piDrivers.get(sessionId) !== driver) return;
+        const session = store.get(sessionId);
+        if (!session) return;
+        const patches = setPiCommands(session, commands);
+        if (patches.length === 0) return;
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
+        logMsg(`Pi[${sessionId}]: ${commands.length} commands available`);
+      },
+      (err) => logMsg(`pi get_commands failed for ${sessionId}: ${err.message}`, "warn")
+    );
+  };
+  const refreshPiModels = (sessionId) => {
+    const driver = piDrivers.get(sessionId);
+    if (!driver) return;
+    driver.getAvailableModels().then(
+      (models) => {
+        if (piDrivers.get(sessionId) !== driver) return;
+        const session = store.get(sessionId);
+        if (!session) return;
+        const patches = setPiModels(session, models);
+        if (patches.length === 0) return;
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
+        logMsg(`Pi[${sessionId}]: ${models.length} models available`);
+      },
+      (err) => logMsg(`pi get_available_models failed for ${sessionId}: ${err.message}`, "warn")
+    );
   };
   const getPiDriver = (sessionId, op) => {
     const d = piDrivers.get(sessionId);
@@ -106359,6 +106596,18 @@ var program = Effect_exports.gen(function* () {
     const d = getPiDriver(sessionId, "pi.set-thinking");
     if (!d) return;
     d.setEffortLevel(level);
+  };
+  const piSessionSetSessionName = (sessionId, name) => {
+    const d = getPiDriver(sessionId, "pi.set-session-name");
+    if (!d) return;
+    d.setSessionName(name);
+    const session = store.get(sessionId);
+    if (session) {
+      const patches = updateMeta(session, { displayName: name });
+      const stored = store.appendPatches(sessionId, patches);
+      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+      terminals.signalChanged("session", sessionId, seq);
+    }
   };
   const piSessionSetModel = (sessionId, provider, modelId) => {
     const d = getPiDriver(sessionId, "pi.set-model");
@@ -106426,97 +106675,21 @@ var program = Effect_exports.gen(function* () {
       logMsg(`Auto-started pi session: ${sessionId}`);
     }
   }
-  const handleHookMessage = async (msg, socket) => {
-    const eventName = msg.event;
-    const sessionId = msg.session_id || "unknown";
-    const cwd = msg.cwd || "";
-    const pid = msg.pid || null;
-    const data = msg.data || {};
-    const needsResponse = msg.needs_response === true;
-    logMsg(`Hook event: ${eventName} session=${sessionId}`);
-    hookEventReceived = true;
-    if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
-      if (!terminals.hasCapableTerminal("action.permission")) {
-        logMsg(`No capable terminal connected \u2014 waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
-        const arrived = await waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
-        if (!arrived) {
-          logMsg(`No capable terminal after ${CAPABILITY_WAIT_MS}ms \u2014 rejecting ${eventName}`, "warn");
-          try {
-            socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
-            socket.end();
-          } catch {
-          }
-          return;
-        }
-        logMsg(`Capable terminal connected during wait \u2014 proceeding with ${eventName}`);
+  const handleHookMessage = (msg, socket) => processHookMessage(
+    {
+      store,
+      inbox,
+      terminals,
+      runEvent,
+      waitForCapableTerminal,
+      schedulePurge,
+      markHookReceived: () => {
+        hookEventReceived = true;
       }
-    }
-    if (!BIDIRECTIONAL_EVENTS.has(eventName)) {
-      const staleRemoved = inbox.removeStaleForSession(sessionId);
-      for (const item of staleRemoved) {
-        logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`);
-        terminals.broadcast({ type: "inbox.removed", itemId: item.id });
-      }
-      if (eventName !== "Notification") {
-        const forceClosed = inbox.forceCloseStaleForSession(sessionId);
-        for (const item of forceClosed) {
-          logMsg(`Inbox item ${item.id} (${item.type}) force-closed: superseded by ${eventName}`);
-          terminals.broadcast({ type: "inbox.removed", itemId: item.id });
-        }
-      }
-    }
-    const patches = runEvent(eventName, sessionId, cwd, data, pid, needsResponse ? socket : void 0);
-    if (patches.length > 0) {
-      if (PULL_MODE) {
-        const stored = store.appendPatches(sessionId, patches);
-        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-        terminals.signalChanged("session", sessionId, seq);
-      } else {
-        terminals.broadcast({ type: "session.update", sessionId, patches });
-      }
-    }
-    const session = store.get(sessionId);
-    if (session && session.status === "ended") {
-      schedulePurge(sessionId);
-    } else if (session && session.status === "active") {
-      store.cancelPurge(sessionId);
-    }
-    const hasStatusPatch = patches.some(
-      (p) => p.op === "set_claude_status" || p.op === "set_status"
-    );
-    if (OVERVIEW_EVENTS.has(eventName) || hasStatusPatch) {
-      if (PULL_MODE) {
-        terminals.signalChanged("overview");
-      } else {
-        terminals.broadcast({
-          type: "overview.snapshot",
-          projects: store.getProjectSummaries()
-        });
-      }
-    }
-    if (eventName === "SessionStart") {
-      const session2 = store.get(sessionId);
-      if (session2) {
-        if (PULL_MODE) {
-          terminals.signalChanged("session", sessionId, store.getSessionSeq(sessionId));
-        } else {
-          terminals.broadcast({ type: "session.snapshot", sessionId, session: session2 });
-        }
-      }
-    }
-    if (eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept") {
-      const items = inbox.all();
-      if (items.length > 0) {
-        const item = items[0];
-        logMsg(`Inbox broadcast: type=${item.type} tool_name=${item.data?.tool_name} id=${item.id}`);
-        if (PULL_MODE) {
-          terminals.signalChanged("inbox");
-        } else {
-          terminals.broadcast({ type: "inbox.added", item });
-        }
-      }
-    }
-  };
+    },
+    msg,
+    socket
+  );
   const sendOverview = (conn) => {
     terminals.sendTo(conn, {
       type: "overview.snapshot",
@@ -106603,7 +106776,7 @@ var program = Effect_exports.gen(function* () {
           }
           pendingPiUIResponses.delete(itemId);
           inbox.remove(itemId);
-          terminals.broadcast({ type: "inbox.removed", itemId });
+          terminals.signalChanged("inbox");
           break;
         }
         Effect_exports.runSync(inbox.respond(itemId, {
@@ -106612,7 +106785,7 @@ var program = Effect_exports.gen(function* () {
             decision: { behavior: decision, message, updatedPermissions }
           }
         }));
-        terminals.broadcast({ type: "inbox.removed", itemId });
+        terminals.signalChanged("inbox");
         break;
       }
       case "action.question": {
@@ -106631,7 +106804,7 @@ var program = Effect_exports.gen(function* () {
           }
           pendingPiUIResponses.delete(itemId);
           inbox.remove(itemId);
-          terminals.broadcast({ type: "inbox.removed", itemId });
+          terminals.signalChanged("inbox");
           break;
         }
         const pending = inbox.getPending(itemId);
@@ -106649,7 +106822,7 @@ var program = Effect_exports.gen(function* () {
             updatedInput: { ...toolInput, answers: answersMap }
           }
         }));
-        terminals.broadcast({ type: "inbox.removed", itemId });
+        terminals.signalChanged("inbox");
         break;
       }
       case "action.plan-review": {
@@ -106701,7 +106874,7 @@ var program = Effect_exports.gen(function* () {
             decision: { behavior: decision, message }
           }
         }));
-        terminals.broadcast({ type: "inbox.removed", itemId });
+        terminals.signalChanged("inbox");
         break;
       }
       case "action.turn-auto-approve": {
@@ -106717,15 +106890,9 @@ var program = Effect_exports.gen(function* () {
             break;
           }
           logMsg(`Terminal hint: session ${sessionId} is dead \u2014 marking ended`);
-          const patches = sessionEnd(session);
-          if (patches.length > 0) {
-            terminals.broadcast({ type: "session.update", sessionId, patches });
-          }
+          emitSessionPatches(store, terminals, sessionId, sessionEnd(session));
           schedulePurge(sessionId);
-          terminals.broadcast({
-            type: "overview.snapshot",
-            projects: store.getProjectSummaries()
-          });
+          terminals.signalChanged("overview");
         }
         break;
       }
@@ -106769,6 +106936,11 @@ var program = Effect_exports.gen(function* () {
         piSessionSetThinking(m.sessionId, m.level);
         break;
       }
+      case "pi.set-session-name": {
+        const m = msg;
+        piSessionSetSessionName(m.sessionId, m.name);
+        break;
+      }
       case "pi.set-model": {
         const m = msg;
         piSessionSetModel(m.sessionId, m.provider, m.modelId);
@@ -106792,6 +106964,16 @@ var program = Effect_exports.gen(function* () {
       case "pi.stop": {
         const m = msg;
         stopPiSession(m.sessionId).catch((err) => logMsg(`pi.stop failed: ${err.message}`, "error"));
+        break;
+      }
+      case "pi.refresh-commands": {
+        const m = msg;
+        refreshPiCommands(m.sessionId);
+        break;
+      }
+      case "pi.refresh-models": {
+        const m = msg;
+        refreshPiModels(m.sessionId);
         break;
       }
     }
@@ -106824,7 +107006,7 @@ var program = Effect_exports.gen(function* () {
       const removed = inbox.removeBySocket(socket);
       for (const item of removed) {
         logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: hook socket closed`);
-        terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+        terminals.signalChanged("inbox");
       }
     });
   });
@@ -106903,23 +107085,12 @@ var program = Effect_exports.gen(function* () {
       if (isDead) {
         const patches = sessionEnd(session);
         if (patches.length > 0) {
-          if (PULL_MODE) {
-            const stored = store.appendPatches(sessionId, patches);
-            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-            terminals.signalChanged("session", sessionId, seq);
-          } else {
-            terminals.broadcast({ type: "session.update", sessionId, patches });
-          }
+          const stored = store.appendPatches(sessionId, patches);
+          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+          terminals.signalChanged("session", sessionId, seq);
         }
         schedulePurge(sessionId);
-        if (PULL_MODE) {
-          terminals.signalChanged("overview");
-        } else {
-          terminals.broadcast({
-            type: "overview.snapshot",
-            projects: store.getProjectSummaries()
-          });
-        }
+        terminals.signalChanged("overview");
       }
     }
     if (!hookEventReceived && store.all().length === 0 && terminals.connectionCount() > 0 && now - serverStartedAt > HOOKS_SILENCE_WARN_MS && now - lastHooksSilenceWarn > HOOKS_SILENCE_REARM_MS) {
@@ -106993,7 +107164,13 @@ var main = Effect_exports.gen(function* () {
   yield* pidGuard;
   yield* program;
 });
-Effect_exports.runPromise(Effect_exports.provide(main, MainLive)).catch((e) => {
-  logMsg(`Fatal error: ${e}`, "error");
-  process.exit(1);
-});
+var isEntrypoint = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isEntrypoint) {
+  Effect_exports.runPromise(Effect_exports.provide(main, MainLive)).catch((e) => {
+    logMsg(`Fatal error: ${e}`, "error");
+    process.exit(1);
+  });
+}
+export {
+  processHookMessage
+};
