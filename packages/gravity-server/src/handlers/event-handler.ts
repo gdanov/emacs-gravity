@@ -565,6 +565,34 @@ const handlePermissionRequest = (ctx: EventContext) =>
     const patches: Patch[] = [];
     patches.push(...setClaudeStatus(session, "idle"));
 
+    // AskUserQuestion is owned by the dedicated AskUserQuestionIntercept
+    // hook, which creates a proper "question" inbox item rendered with the
+    // option-pick UI. Claude Code also fires PermissionRequest (matcher "")
+    // for the same AskUserQuestion ~150ms later; creating a generic
+    // "permission" item here would render the raw tool_input as a JSON
+    // dump and bury the real question UI. Unblock this redundant hook
+    // socket with an allow passthrough so Claude proceeds — the intercept
+    // collects the actual answer on its own hook socket. Without this the
+    // PermissionRequest bridge would hang until its 96h timeout.
+    if (toolName === "AskUserQuestion") {
+      if (ctx.hookSocket) {
+        try {
+          ctx.hookSocket.write(
+            JSON.stringify({
+              hookSpecificOutput: {
+                hookEventName: "PermissionRequest",
+                decision: { behavior: "allow" },
+              },
+            }) + "\n",
+          );
+          ctx.hookSocket.end();
+        } catch {
+          /* socket may already be closed */
+        }
+      }
+      return patches;
+    }
+
     if (ctx.hookSocket) {
       inbox.add(
         inboxType,

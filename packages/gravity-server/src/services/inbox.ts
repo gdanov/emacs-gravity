@@ -25,7 +25,10 @@ export interface InboxService {
   readonly remove: (id: number) => InboxItem | undefined;
   readonly removeForSession: (sessionId: string, type?: InboxItemType) => InboxItem[];
   readonly removeStaleForSession: (sessionId: string, type?: InboxItemType) => InboxItem[];
-  readonly forceCloseStaleForSession: (sessionId: string) => InboxItem[];
+  readonly forceCloseStaleForSession: (
+    sessionId: string,
+    preserveToolUseId?: string,
+  ) => InboxItem[];
   readonly find: (id: number) => InboxItem | undefined;
   readonly getPending: (id: number) => PendingResponse | undefined;
   readonly respond: (id: number, response: HookSocketResponse) => Effect.Effect<boolean>;
@@ -106,11 +109,25 @@ export function makeInbox(): InboxService {
       return removed;
     },
 
-    forceCloseStaleForSession: (sessionId) => {
+    // `preserveToolUseId`: when set, an item whose hook payload carries the
+    // same `tool_use_id` is NOT closed. The generic PreToolUse hook and a
+    // sibling bidirectional hook (AskUserQuestionIntercept, or the
+    // PermissionRequest behind ExitPlanMode) belong to the SAME tool
+    // invocation — superseding here would force-close the live question /
+    // plan-review item microseconds after it was created. Supersede must
+    // only reap items from PRIOR, different tool invocations.
+    forceCloseStaleForSession: (sessionId, preserveToolUseId) => {
       const removed: InboxItem[] = [];
       for (let i = items.length - 1; i >= 0; i--) {
         const item = items[i];
         if (item.sessionId !== sessionId) continue;
+        if (
+          preserveToolUseId !== undefined &&
+          (item.data as Record<string, unknown> | undefined)?.tool_use_id ===
+            preserveToolUseId
+        ) {
+          continue;
+        }
         closePendingSocket(item.id);
         items.splice(i, 1);
         removed.push(item);

@@ -1195,6 +1195,43 @@ describe("Event Handler", () => {
       expect(items.length).toBe(0);
     });
 
+    // Regression: Claude Code fires PermissionRequest (matcher "") for
+    // AskUserQuestion ~150ms after AskUserQuestionIntercept. A generic
+    // "permission" item here renders the raw tool_input as a JSON dump and
+    // buries the real question UI. handlePermissionRequest must skip it and
+    // unblock the redundant hook socket with an allow passthrough.
+    it("does not create a permission item for AskUserQuestion (owned by intercept)", () => {
+      startSession(deps);
+      const socket = makeMockSocket();
+      fire(deps, "PermissionRequest", "s1", {
+        tool_name: "AskUserQuestion",
+        tool_input: { questions: [{ question: "Pick one", options: [] }] },
+      }, 123, socket);
+
+      const items = deps.inbox.all().filter(
+        i => i.type === "permission" || i.type === "plan-review",
+      );
+      expect(items.length).toBe(0);
+    });
+
+    it("unblocks the redundant AskUserQuestion PermissionRequest socket with allow", () => {
+      startSession(deps);
+      const socket = makeMockSocket();
+      fire(deps, "PermissionRequest", "s1", {
+        tool_name: "AskUserQuestion",
+        tool_input: { questions: [{ question: "Pick one", options: [] }] },
+      }, 123, socket);
+
+      const written = (socket as unknown as { _written: string[] })._written;
+      expect(written.length).toBe(1);
+      expect(JSON.parse(written[0])).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: "allow" },
+        },
+      });
+    });
+
     it("uses session slug as label when available", () => {
       fire(deps, "SessionStart", "s1", { slug: "my-slug" });
       const socket = makeMockSocket();

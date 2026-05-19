@@ -833,7 +833,14 @@ const program = Effect.gen(function* () {
       }
 
       if (eventName !== "Notification") {
-        const forceClosed = inbox.forceCloseStaleForSession(sessionId);
+        // Preserve a sibling item from the SAME tool invocation: the generic
+        // PreToolUse fires concurrently with AskUserQuestionIntercept (and the
+        // ExitPlanMode PermissionRequest) for one tool_use_id. Without this,
+        // PreToolUse force-closes the live question/plan-review item ~6ms
+        // after the intercept created it. Supersede is for PRIOR tools only.
+        const incomingToolUseId = (data as Record<string, unknown> | undefined)
+          ?.tool_use_id as string | undefined;
+        const forceClosed = inbox.forceCloseStaleForSession(sessionId, incomingToolUseId);
         for (const item of forceClosed) {
           logMsg(`Inbox item ${item.id} (${item.type}) force-closed: superseded by ${eventName}`);
           terminals.broadcast({ type: "inbox.removed", itemId: item.id });

@@ -249,6 +249,59 @@ describe("InboxManager", () => {
       const removed = inbox.forceCloseStaleForSession("unknown");
       expect(removed).toHaveLength(0);
     });
+
+    // Root-cause regression guard. The generic PreToolUse fires concurrently
+    // with AskUserQuestionIntercept for ONE tool invocation; supersede must
+    // not reap the live question item that shares that tool_use_id.
+    describe("preserveToolUseId guard", () => {
+      it("preserves a pending item whose tool_use_id matches", () => {
+        const sock = mockSocket();
+        const item = inbox.add(
+          "question", "s1", "proj", "q", "s",
+          { tool_use_id: "tu_1", questions: [{ question: "Pick" }] },
+          sock,
+        );
+        const removed = inbox.forceCloseStaleForSession("s1", "tu_1");
+        expect(removed).toHaveLength(0);
+        expect(sock.written).toHaveLength(0);
+        expect(sock.ended).toBe(false);
+        expect(inbox.all()).toHaveLength(1);
+        expect(inbox.getPending(item.id)).toBeDefined();
+      });
+
+      it("still reaps a stale item with a DIFFERENT tool_use_id", () => {
+        const stale = mockSocket();
+        const live = mockSocket();
+        inbox.add("permission", "s1", "proj", "old", "s",
+          { tool_use_id: "tu_old" }, stale);
+        const liveItem = inbox.add("question", "s1", "proj", "q", "s",
+          { tool_use_id: "tu_new" }, live);
+        const removed = inbox.forceCloseStaleForSession("s1", "tu_new");
+        expect(removed).toHaveLength(1);
+        expect(removed[0].data.tool_use_id).toBe("tu_old");
+        expect(stale.ended).toBe(true);
+        expect(inbox.all()).toHaveLength(1);
+        expect(inbox.all()[0].id).toBe(liveItem.id);
+      });
+
+      it("undefined preserveToolUseId keeps full-reap behavior", () => {
+        const sock = mockSocket();
+        inbox.add("question", "s1", "proj", "q", "s",
+          { tool_use_id: "tu_1" }, sock);
+        const removed = inbox.forceCloseStaleForSession("s1");
+        expect(removed).toHaveLength(1);
+        expect(sock.ended).toBe(true);
+        expect(inbox.all()).toHaveLength(0);
+      });
+
+      it("reaps items lacking tool_use_id even when an id is preserved", () => {
+        const sock = mockSocket();
+        inbox.add("idle", "s1", "proj", "idle", "s", {}, sock);
+        const removed = inbox.forceCloseStaleForSession("s1", "tu_1");
+        expect(removed).toHaveLength(1);
+        expect(inbox.all()).toHaveLength(0);
+      });
+    });
   });
 
   describe("find", () => {
