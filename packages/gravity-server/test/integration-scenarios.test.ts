@@ -7,9 +7,22 @@ import type { HookSocketMessage, ServerMessage, Patch, HookEventName, HookData }
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const TMP = join(process.env.TMPDIR || "/tmp", `gravity-scenarios-${process.pid}`);
-const HOOK_SOCK = join(TMP, "hooks.sock");
-const TERMINAL_SOCK = join(TMP, "terminal.sock");
+// Socket location. Default (CI/dev) uses a per-pid subdir under TMPDIR.
+// This suite needs AF_UNIX server bind (`listen()` on a unix path). Some
+// sandboxes block that bind syscall entirely (the Claude Code Bash
+// sandbox does — run sandbox-disabled or in CI). Sandboxes that instead
+// gate by *directory* can point GRAVITY_TEST_SOCK_DIR at their permitted
+// flat dir; sockets are then placed directly there with pid-unique names.
+// No CI impact, default behaviour unchanged.
+const SOCK_FLAT_DIR = process.env.GRAVITY_TEST_SOCK_DIR;
+const TMP = SOCK_FLAT_DIR
+  || join(process.env.TMPDIR || "/tmp", `gravity-scenarios-${process.pid}`);
+const HOOK_SOCK = SOCK_FLAT_DIR
+  ? join(SOCK_FLAT_DIR, `gravity-${process.pid}-hooks.sock`)
+  : join(TMP, "hooks.sock");
+const TERMINAL_SOCK = SOCK_FLAT_DIR
+  ? join(SOCK_FLAT_DIR, `gravity-${process.pid}-terminal.sock`)
+  : join(TMP, "terminal.sock");
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
