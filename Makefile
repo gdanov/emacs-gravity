@@ -9,10 +9,11 @@ MARKETPLACE_CACHE := $(shell ls -td $(HOME)/.claude/plugins/cache/emacs-gravity-
 test: test-elisp test-bridge test-server test-menubar check-settings
 
 test-elisp:
-	$(EMACS) -nw --batch -L . -L test \
+	$(EMACS) -nw --batch --eval '(package-initialize)' -L . -L test \
 		-l claude-gravity \
 		-l claude-gravity-test \
 		-l claude-gravity-patch-test \
+		-l claude-gravity-pull-signal-test \
 		-f ert-run-tests-batch-and-exit
 
 test-bridge:
