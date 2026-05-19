@@ -1316,5 +1316,94 @@ ensure setf alist-get works in-place."
                      (name . "my name"))))))
 
 
+;;; ═══════════════════════════════════════════════════════════════════
+;;; T2.3: pi model inventory (set_pi_models) + model picker
+;;; ═══════════════════════════════════════════════════════════════════
+
+(defun cgp--pi-model (id provider &optional name context-window)
+  "Build a wire-shape pi model alist (as it arrives from JSON)."
+  (let ((m `((id . ,id) (provider . ,provider))))
+    (when name           (setq m (append m `((name . ,name)))))
+    (when context-window (setq m (append m `((contextWindow . ,context-window)))))
+    m))
+
+(ert-deftest cgp-set-pi-models-stores-on-session ()
+  "set_pi_models replaces :pi-models with a list of alists (vector form)."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_models")
+                    (models . [,(cgp--pi-model "claude-sonnet-4" "anthropic" "Claude Sonnet 4" 200000)
+                               ,(cgp--pi-model "gpt-4o" "openai")])))
+    (let ((models (plist-get s :pi-models)))
+      (should (= 2 (length models)))
+      (should (equal "claude-sonnet-4" (alist-get 'id (nth 0 models))))
+      (should (equal "anthropic" (alist-get 'provider (nth 0 models))))
+      (should (equal "Claude Sonnet 4" (alist-get 'name (nth 0 models))))
+      (should (equal 200000 (alist-get 'context-window (nth 0 models))))
+      (should (equal "gpt-4o" (alist-get 'id (nth 1 models))))
+      ;; Minimal entries lack name/contextWindow — must round-trip as nil.
+      (should-not (alist-get 'name (nth 1 models)))
+      (should-not (alist-get 'context-window (nth 1 models))))))
+
+(ert-deftest cgp-set-pi-models-list-form ()
+  "set_pi_models accepts a list (not vector) of models too."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_models")
+                    (models . (,(cgp--pi-model "m1" "prov")))))
+    (let ((models (plist-get s :pi-models)))
+      (should (= 1 (length models)))
+      (should (equal "m1" (alist-get 'id (nth 0 models)))))))
+
+(ert-deftest cgp-pi-set-model-picks-from-inventory ()
+  "With a populated inventory, the picker resolves the choice to provider+id."
+  (let* ((s (cgp--fresh-session))
+         captured)
+    (plist-put s :source "pi")
+    (cgp--apply s `((op . "set_pi_models")
+                    (models . [,(cgp--pi-model "claude-sonnet-4" "anthropic" "Claude Sonnet 4")
+                               ,(cgp--pi-model "gpt-4o" "openai" "GPT-4o")])))
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured)))
+              ((symbol-function 'claude-gravity--current-pi-session-id)
+               (lambda () "test-sess"))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _) "anthropic/claude-sonnet-4 — Claude Sonnet 4")))
+      (call-interactively #'claude-gravity--pi-set-model))
+    (should (equal (car captured)
+                   '((type . "pi.set-model")
+                     (sessionId . "test-sess")
+                     (provider . "anthropic")
+                     (modelId . "claude-sonnet-4"))))))
+
+(ert-deftest cgp-pi-set-model-free-typed-provider-slash-id ()
+  "A free-typed `provider/id' that matches no model is still honored."
+  (let* ((s (cgp--fresh-session))
+         captured)
+    (plist-put s :source "pi")
+    (cgp--apply s `((op . "set_pi_models")
+                    (models . [,(cgp--pi-model "gpt-4o" "openai")])))
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured)))
+              ((symbol-function 'claude-gravity--current-pi-session-id)
+               (lambda () "test-sess"))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _) "google/gemini-2.0")))
+      (call-interactively #'claude-gravity--pi-set-model))
+    (should (equal (car captured)
+                   '((type . "pi.set-model")
+                     (sessionId . "test-sess")
+                     (provider . "google")
+                     (modelId . "gemini-2.0"))))))
+
+(ert-deftest cgp-pi-refresh-models-sends-action ()
+  "`claude-gravity--pi-refresh-models' sends a pi.refresh-models message."
+  (let (captured)
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured))))
+      (claude-gravity--pi-refresh-models "pi-x"))
+    (should (equal (car captured)
+                   '((type . "pi.refresh-models")
+                     (sessionId . "pi-x"))))))
+
+
 (provide 'claude-gravity-patch-test)
 ;;; claude-gravity-patch-test.el ends here

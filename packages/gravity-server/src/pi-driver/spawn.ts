@@ -19,6 +19,7 @@ import type {
   PiProtocolEvent,
   PiSessionStats,
   PiCommandDescriptor,
+  PiModel,
   ExtensionUIResponsePayload,
 } from "./types.js";
 
@@ -46,6 +47,30 @@ export function normalizePiCommands(commands: unknown): PiCommandDescriptor[] {
       ...(description ? { description } : {}),
       ...(loc ? { location: loc as PiCommandDescriptor["location"] } : {}),
       ...(path ? { path } : {}),
+    };
+  });
+}
+
+/**
+ * Normalize pi's `get_available_models` payload into the `PiModel` subset
+ * the picker needs. Pi's full `Model` carries many fields; we keep only
+ * `id`, `provider`, and optionally `name`/`contextWindow`. Tolerates a
+ * non-array input (returns []).
+ */
+export function normalizePiModels(models: unknown): PiModel[] {
+  const raw = Array.isArray(models) ? models : [];
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.length > 0 ? v : undefined;
+  return raw.map((m): PiModel => {
+    const r = (m ?? {}) as Record<string, unknown>;
+    const name = str(r.name);
+    const contextWindow =
+      typeof r.contextWindow === "number" ? r.contextWindow : undefined;
+    return {
+      id: String(r.id ?? ""),
+      provider: str(r.provider) ?? "",
+      ...(name ? { name } : {}),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
     };
   });
 }
@@ -235,6 +260,16 @@ export function spawnPiSync(
       }
       const data = (response.data ?? {}) as { commands?: unknown };
       return normalizePiCommands(data.commands);
+    },
+
+    getAvailableModels: async (): Promise<PiModel[]> => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_available_models" });
+      if (!response.success) {
+        throw new Error(`pi get_available_models failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = (response.data ?? {}) as { models?: unknown };
+      return normalizePiModels(data.models);
     },
 
     switchSession: async (sessionPath: string): Promise<boolean> => {

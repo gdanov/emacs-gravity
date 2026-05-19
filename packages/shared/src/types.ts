@@ -174,6 +174,15 @@ export interface Session {
    * process starts and on `pi.refresh-commands` from a terminal.
    */
   piCommands: PiCommandDescriptor[] | null;
+
+  /**
+   * Pi only: snapshot of `get_available_models` for the current pi process —
+   * the models the user can switch to via `set_model`. Null means "not yet
+   * fetched / unknown"; an explicit empty array means "fetched, none
+   * available". Refreshed when the pi process starts and on
+   * `pi.refresh-models` from a terminal.
+   */
+  piModels: PiModel[] | null;
 }
 
 /**
@@ -191,6 +200,24 @@ export interface PiCommandDescriptor {
   location?: "user" | "project" | "path";
   /** Absolute path of the backing file (optional). */
   path?: string;
+}
+
+/**
+ * One entry from pi's `get_available_models` RPC, normalized to the subset
+ * the model picker needs. Pi's full `Model` carries more fields (api,
+ * baseUrl, reasoning, input[], maxTokens, cost{}); only these matter to
+ * gravity. `id` IS the `modelId` accepted by `set_model`. See pi
+ * `docs/rpc.md` `get_available_models`.
+ */
+export interface PiModel {
+  /** Model id — the value passed back as `modelId` to `set_model`. */
+  id: string;
+  /** Human-readable model name (optional). */
+  name?: string;
+  /** Provider key (anthropic / openai / google / …). */
+  provider: string;
+  /** Context window size in tokens (optional; used only for the label). */
+  contextWindow?: number;
 }
 
 /**
@@ -391,7 +418,8 @@ export type Patch =
   | { op: "track_file"; path: string; fileOp: string }
   | { op: "add_prompt"; turnNumber: number; prompt: PromptEntry }
   | { op: "set_prompt_answer"; turnNumber: number; toolUseId: string; answer: string }
-  | { op: "set_pi_commands"; commands: PiCommandDescriptor[] };
+  | { op: "set_pi_commands"; commands: PiCommandDescriptor[] }
+  | { op: "set_pi_models"; models: PiModel[] };
 
 // ── Protocol Messages ────────────────────────────────────────────────
 //
@@ -455,6 +483,7 @@ export type TerminalMessage =
   | { type: "pi.new-session"; sessionId?: string }
   | { type: "pi.stop"; sessionId?: string }
   | { type: "pi.refresh-commands"; sessionId: string }
+  | { type: "pi.refresh-models"; sessionId: string }
 
 export interface ProjectSummary {
   project: string;

@@ -16,7 +16,7 @@ import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from
 import { parseTerminalMessage, isHookMessage } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
 import { MermaidRpcServer } from "./handlers/mermaid-rpc-server.js";
-import { sessionEnd, setCost, setContextUsage, setPiCommands, updateMeta } from "./state/session.js";
+import { sessionEnd, setCost, setContextUsage, setPiCommands, setPiModels, updateMeta } from "./state/session.js";
 
 // Effect services
 import { ServerConfig, ServerConfigLive } from "./services/config.js";
@@ -559,6 +559,11 @@ const program = Effect.gen(function* () {
     // session startup.
     setImmediate(() => refreshPiCommands(sessionId));
 
+    // Fetch pi's available-model list. Used by Emacs to back the model
+    // picker with real models instead of hand-typed strings. Fire-and-
+    // forget — failures are logged but don't gate session startup.
+    setImmediate(() => refreshPiModels(sessionId));
+
     return sessionId;
   };
 
@@ -589,6 +594,36 @@ const program = Effect.gen(function* () {
         logMsg(`Pi[${sessionId}]: ${commands.length} commands available`);
       },
       (err) => logMsg(`pi get_commands failed for ${sessionId}: ${err.message}`, "warn"),
+    );
+  };
+
+  /**
+   * Fetch `get_available_models` from the pi process backing SESSION-ID and
+   * broadcast a `set_pi_models` patch. Idempotent: safe to call repeatedly.
+   * Drops silently if the session has already been replaced (a `pi.stop`
+   * racing with `pi.refresh-models`).
+   */
+  const refreshPiModels = (sessionId: string): void => {
+    const driver = piDrivers.get(sessionId);
+    if (!driver) return;
+    driver.getAvailableModels().then(
+      (models) => {
+        // Bail if the driver was swapped/stopped while the RPC was in flight.
+        if (piDrivers.get(sessionId) !== driver) return;
+        const session = store.get(sessionId);
+        if (!session) return;
+        const patches = setPiModels(session, models);
+        if (patches.length === 0) return;
+        if (PULL_MODE) {
+          const stored = store.appendPatches(sessionId, patches);
+          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+          terminals.signalChanged("session", sessionId, seq);
+        } else {
+          terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
+        }
+        logMsg(`Pi[${sessionId}]: ${models.length} models available`);
+      },
+      (err) => logMsg(`pi get_available_models failed for ${sessionId}: ${err.message}`, "warn"),
     );
   };
 
@@ -1195,6 +1230,12 @@ const program = Effect.gen(function* () {
       case "pi.refresh-commands": {
         const m = msg as { sessionId: string };
         refreshPiCommands(m.sessionId);
+        break;
+      }
+
+      case "pi.refresh-models": {
+        const m = msg as { sessionId: string };
+        refreshPiModels(m.sessionId);
         break;
       }
     }

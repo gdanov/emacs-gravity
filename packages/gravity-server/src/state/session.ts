@@ -19,6 +19,7 @@ import type {
   AgentLocation,
   CompactionMarker,
   PiCommandDescriptor,
+  PiModel,
 } from "@gravity/shared";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -79,6 +80,7 @@ export function createSession(sessionId: string, cwd: string, source?: string): 
     compactions: [],
     totalToolCount: 0,
     piCommands: null,
+    piModels: null,
   };
 }
 
@@ -190,6 +192,16 @@ export function setPiCommands(
 ): Patch[] {
   s.piCommands = commands;
   return [{ op: "set_pi_commands", commands }];
+}
+
+/**
+ * Replace pi's available-model snapshot. Pi-process-scoped — survives turn
+ * resets but is cleared on session purge. Callers should fetch via
+ * `driver.getAvailableModels()` and feed the result here.
+ */
+export function setPiModels(s: Session, models: PiModel[]): Patch[] {
+  s.piModels = models;
+  return [{ op: "set_pi_models", models }];
 }
 
 export function updateMeta(

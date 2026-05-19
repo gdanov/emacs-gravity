@@ -562,14 +562,55 @@ current display name, if any."
                  (mapconcat #'identity pi-sessions ", "))
       (message "No active pi sessions."))))
 
+(defun claude-gravity--pi-model-label (m)
+  "Format pi model alist M as a `completing-read' candidate string.
+Shape: \"PROVIDER/ID — NAME\" (NAME omitted when absent)."
+  (let ((provider (or (alist-get 'provider m) ""))
+        (id (or (alist-get 'id m) ""))
+        (name (alist-get 'name m)))
+    (if (and name (not (string-empty-p name)))
+        (format "%s/%s — %s" provider id name)
+      (format "%s/%s" provider id))))
+
 (defun claude-gravity--pi-set-model (session-id provider model-id)
   "Switch pi session SESSION-ID to PROVIDER + MODEL-ID.
 Pi's `set_model' RPC takes provider and model id as separate fields
-(see pi RPC docs).  Interactive callers are prompted for both."
+(see pi RPC docs).
+
+Interactive: if the session has a cached model inventory
+\(`:pi-models', populated by the server's `get_available_models' RPC),
+offer a `completing-read' over the real models and resolve the choice
+back to its provider+id.  Otherwise (no inventory yet) fall back to two
+free-text prompts.  A freely-typed entry that does not match a known
+model is still honored: \"provider/id\" is split on the first slash,
+otherwise the whole string is treated as the model id and the provider
+is prompted separately.  This keeps the no-inventory path working and
+never blocks the user on a stale/empty cache."
   (interactive
-   (list (claude-gravity--current-pi-session-id)
-         (read-string "Provider (anthropic/openai/google/...): " "anthropic")
-         (read-string "Model id: ")))
+   (let* ((sid (claude-gravity--current-pi-session-id))
+          (session (gethash sid claude-gravity--sessions))
+          (models (and session (plist-get session :pi-models))))
+     (if models
+         (let* ((cands (mapcar (lambda (m)
+                                 (cons (claude-gravity--pi-model-label m) m))
+                               models))
+                (choice (completing-read "Pi model: " cands nil nil))
+                (hit (cdr (assoc choice cands))))
+           (if hit
+               (list sid (alist-get 'provider hit) (alist-get 'id hit))
+             ;; Free-typed entry that matched no known model. Accept
+             ;; "provider/id"; else treat the whole string as the id and
+             ;; ask for the provider separately.
+             (if (string-match "\\`\\([^/]+\\)/\\(.+\\)\\'" choice)
+                 (list sid (match-string 1 choice) (match-string 2 choice))
+               (list sid
+                     (read-string "Provider (anthropic/openai/google/...): "
+                                  "anthropic")
+                     choice))))
+       (list sid
+             (read-string "Provider (anthropic/openai/google/...): "
+                          "anthropic")
+             (read-string "Model id: ")))))
   (claude-gravity--log 'info "Pi[%s]: set-model provider=%s modelId=%s" session-id provider model-id)
   (claude-gravity--send-to-server
    `((type . "pi.set-model")
@@ -603,6 +644,17 @@ or reloading an extension while the session is running."
   (claude-gravity--log 'info "Pi[%s]: refresh-commands" session-id)
   (claude-gravity--send-to-server
    `((type . "pi.refresh-commands")
+     (sessionId . ,session-id))))
+
+(defun claude-gravity--pi-refresh-models (session-id)
+  "Refresh pi's available-model list for SESSION-ID (`get_available_models').
+Asks gravity-server to re-fetch the model list from the running pi
+process and broadcast a fresh set_pi_models patch.  M-x only, no
+binding — the picker is the primary surface."
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (claude-gravity--log 'info "Pi[%s]: refresh-models" session-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.refresh-models")
      (sessionId . ,session-id))))
 
 (defun claude-gravity--pi-new-session (session-id)
@@ -803,6 +855,10 @@ SESSION-JSON is an alist from json-parse-string."
                            (and pc
                                 (mapcar #'claude-gravity--json-pi-command-to-alist
                                         (if (vectorp pc) (append pc nil) pc))))
+            :pi-models (let ((pm (funcall jnil (alist-get 'piModels session-json))))
+                         (and pm
+                              (mapcar #'claude-gravity--json-pi-model-to-alist
+                                      (if (vectorp pm) (append pm nil) pm))))
             :total-tool-count (or (alist-get 'totalToolCount session-json) 0)
             :header-line-cache nil
             :buffer nil
@@ -939,6 +995,18 @@ nil for nil input (used by mapcar over a possibly-empty list)."
             (cons 'source (or (funcall jnil (alist-get 'source c)) "extension"))
             (cons 'location (funcall jnil (alist-get 'location c)))
             (cons 'path (funcall jnil (alist-get 'path c)))))))
+
+(defun claude-gravity--json-pi-model-to-alist (m)
+  "Convert a JSON PiModel to an alist.
+Pi emits: { id, name?, provider, contextWindow? }. Returns nil for nil
+input (used by mapcar over a possibly-empty list)."
+  (when m
+    (let ((jnil #'claude-gravity--jnil))
+      (list (cons 'id (or (funcall jnil (alist-get 'id m)) ""))
+            (cons 'name (funcall jnil (alist-get 'name m)))
+            (cons 'provider (or (funcall jnil (alist-get 'provider m)) ""))
+            (cons 'context-window
+                  (funcall jnil (alist-get 'contextWindow m)))))))
 
 (defun claude-gravity--json-task-to-alist (task-json)
   "Convert a JSON Task to task alist."
@@ -1356,6 +1424,17 @@ MSG contains sessionId and patches array."
                                 (append cmds-json nil)
                               cmds-json))))
          (plist-put session :pi-commands cmds)))
+
+      ("set_pi_models"
+       ;; Pi only: snapshot of `get_available_models' (models switchable
+       ;; via set_model). Each entry is normalized to an alist with symbol
+       ;; keys so the picker can read it without case-mapping.
+       (let* ((models-json (alist-get 'models patch))
+              (models (mapcar #'claude-gravity--json-pi-model-to-alist
+                              (if (vectorp models-json)
+                                  (append models-json nil)
+                                models-json))))
+         (plist-put session :pi-models models)))
 
       ("add_compaction"
        ;; Append-only chronological list of pi compaction events. Marker

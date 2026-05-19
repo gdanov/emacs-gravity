@@ -26,6 +26,7 @@ export type {
   // Pi
   CompactionMarker,
   PiCommandDescriptor,
+  PiModel,
 
   // Patches
   Patch,

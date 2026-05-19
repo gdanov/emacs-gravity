@@ -222,6 +222,8 @@ export class PiProtocol {
         return JSON.stringify(withId({ type: "get_state" })) + "\n";
       case "get_commands":
         return JSON.stringify(withId({ type: "get_commands" })) + "\n";
+      case "get_available_models":
+        return JSON.stringify(withId({ type: "get_available_models" })) + "\n";
       case "switch_session":
         return JSON.stringify(withId({ type: "switch_session", sessionPath: cmd.sessionPath })) + "\n";
       case "compact": {

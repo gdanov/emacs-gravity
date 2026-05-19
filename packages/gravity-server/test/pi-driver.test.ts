@@ -1026,3 +1026,45 @@ describe("normalizePiCommands", () => {
     expect(normalizePiCommands("nope")).toEqual([]);
   });
 });
+
+import { normalizePiModels } from "../src/pi-driver/spawn.js";
+
+describe("normalizePiModels", () => {
+  it("keeps the picker subset from pi's full Model shape", () => {
+    const out = normalizePiModels([
+      {
+        id: "claude-sonnet-4-20250514",
+        name: "Claude Sonnet 4",
+        api: "anthropic-messages",
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        reasoning: true,
+        input: ["text", "image"],
+        contextWindow: 200000,
+        maxTokens: 8192,
+        cost: { input: 3, output: 15 },
+      },
+    ]);
+    expect(out).toEqual([
+      {
+        id: "claude-sonnet-4-20250514",
+        name: "Claude Sonnet 4",
+        provider: "anthropic",
+        contextWindow: 200000,
+      },
+    ]);
+  });
+
+  it("omits absent optional fields; minimal {id,provider} survives", () => {
+    const out = normalizePiModels([{ id: "gpt-4o", provider: "openai" }]);
+    expect(out[0]).toEqual({ id: "gpt-4o", provider: "openai" });
+    expect("name" in out[0]).toBe(false);
+    expect("contextWindow" in out[0]).toBe(false);
+  });
+
+  it("returns [] for non-array input", () => {
+    expect(normalizePiModels(undefined)).toEqual([]);
+    expect(normalizePiModels(null)).toEqual([]);
+    expect(normalizePiModels("nope")).toEqual([]);
+  });
+});

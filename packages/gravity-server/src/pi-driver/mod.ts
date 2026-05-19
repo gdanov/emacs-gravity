@@ -29,6 +29,7 @@ import type {
   ThinkingLevel,
   PiSessionStats,
   PiCommandDescriptor,
+  PiModel,
   ExtensionUIRequestEvent,
   ExtensionUIResponsePayload,
 } from "./types.js";
@@ -113,6 +114,8 @@ export interface PiDriverInstance {
   getState(): Promise<Record<string, unknown>>;
   /** Request `get_commands` from pi (extension commands, prompt templates, skills). */
   getCommands(): Promise<PiCommandDescriptor[]>;
+  /** Request `get_available_models` from pi (models switchable via `set_model`). */
+  getAvailableModels(): Promise<PiModel[]>;
   /** Load a different session file into the running pi process. */
   switchSession(sessionPath: string): Promise<boolean>;
   /** Send an `extension_ui_response` back to pi for a dialog request id. */
@@ -275,6 +278,8 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
     getState: () => driver.getState(),
 
     getCommands: () => driver.getCommands(),
+
+    getAvailableModels: () => driver.getAvailableModels(),
 
     switchSession: (sessionPath: string) => driver.switchSession(sessionPath),
 

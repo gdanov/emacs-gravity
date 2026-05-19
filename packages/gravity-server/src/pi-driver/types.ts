@@ -535,6 +535,7 @@ export type PiCommand =
   | { type: "get_session_stats" }
   | { type: "get_state" }
   | { type: "get_commands" }
+  | { type: "get_available_models" }
   | { type: "switch_session"; sessionPath: string }
   | { type: "compact"; customInstructions?: string }
   | { type: "new_session"; parentSession?: string }
@@ -562,6 +563,24 @@ export interface PiCommandDescriptor {
   location?: "user" | "project" | "path";
   /** Absolute path of the backing file (optional). */
   path?: string;
+}
+
+/**
+ * One entry from pi's `get_available_models` RPC, normalized to the subset
+ * gravity needs. Pi's full `Model` shape is `{ id, name, api, provider,
+ * baseUrl, reasoning, input[], contextWindow, maxTokens, cost{} }`; we only
+ * keep what the picker needs. `id` IS the `modelId` accepted by `set_model`.
+ * See pi `docs/rpc.md` `get_available_models`.
+ */
+export interface PiModel {
+  /** Model id — the value passed back as `modelId` to `set_model`. */
+  id: string;
+  /** Human-readable model name (optional). */
+  name?: string;
+  /** Provider key (anthropic / openai / google / …). */
+  provider: string;
+  /** Context window size in tokens (optional; used only for the label). */
+  contextWindow?: number;
 }
 
 /** Event emitted by protocol.ts for parsed pi events. */
@@ -686,6 +705,12 @@ export interface PiDriver {
    * editing `.pi/{prompts,skills,extensions}` requires a refresh call.
    */
   getCommands(): Promise<PiCommandDescriptor[]>;
+  /**
+   * Request `get_available_models` from pi (`docs/rpc.md`). Returns the
+   * normalized list of models pi can switch to via `set_model`. The list is
+   * pi-process-scoped: a refresh call re-fetches it.
+   */
+  getAvailableModels(): Promise<PiModel[]>;
   /**
    * Switch the running pi process to a different session file
    * (`switch_session` RPC). Pi reloads the .jsonl at `sessionPath`.
