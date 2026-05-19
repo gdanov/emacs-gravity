@@ -429,12 +429,28 @@ export type Patch =
 /** Areas of state that can change on the server. */
 export type ChangedArea = "session" | "inbox" | "overview" | "notice";
 
-/** Messages from server to terminal (push mode). */
+/**
+ * Server → terminal messages that carry a payload.
+ *
+ * Push terminal communication was removed: the server NEVER proactively
+ * broadcasts replicated state. Within this union:
+ *  - `session.update` / `inbox.added` / `inbox.removed` are **never sent**
+ *    by the current server. Retained so a newer terminal can still decode
+ *    an older server; new code must not rely on receiving them.
+ *  - `session.snapshot` / `overview.snapshot` / `inbox.snapshot` are sent
+ *    ONLY as replies to explicit `request.session` / `request.overview` /
+ *    `request.resync`.
+ *  - `session.removed` / `notice` / `pi.session` are out-of-band lifecycle
+ *    / alert events (not replicated state) and remain direct messages.
+ */
 export type ServerPushMessage =
   | { type: "session.snapshot"; sessionId: string; session: Session }
+  /** @deprecated never sent — pull via `state-changed` + `poll`. */
   | { type: "session.update"; sessionId: string; patches: Patch[] }
   | { type: "session.removed"; sessionId: string }
+  /** @deprecated never sent — pull via `state-changed` + `poll`. */
   | { type: "inbox.added"; item: InboxItem }
+  /** @deprecated never sent — pull via `state-changed` + `poll`. */
   | { type: "inbox.removed"; itemId: number }
   | { type: "inbox.snapshot"; items: InboxItem[] }
   | { type: "overview.snapshot"; projects: ProjectSummary[] }
