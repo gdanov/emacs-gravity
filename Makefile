@@ -1,6 +1,6 @@
 EMACS ?= emacs
 
-.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-bridge build-server sync-marketplace clean menubar kill-server restart-server check-settings
+.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell test-e2e test-e2e-local build build-bridge build-server sync-marketplace clean menubar kill-server restart-server check-settings
 
 # Discover the published-marketplace install cache dir (newest by mtime).
 # Only needed for sync-marketplace / restart-server (published-plugin testing).
@@ -24,6 +24,20 @@ test-server:
 
 test-menubar:
 	cd packages/gravity-menubar && swift test
+
+# End-to-end: full stack (gravity-server + spy proxy + emacs --daemon
+# running the REAL client) driving gravity features through synthetic
+# hooks. Containerized = hermetic + AF_UNIX bind works (host sandboxes
+# block it). This is the only elisp coverage CI runs.
+test-e2e:
+	docker build -t gravity-e2e -f test/e2e/Dockerfile .
+	docker run --rm gravity-e2e
+
+# Fast host iteration (no Docker). Needs emacs + node on PATH and a
+# host that permits AF_UNIX server bind (i.e. NOT inside a restrictive
+# sandbox). Pass a name substring to run one scenario.
+test-e2e-local:
+	node test/e2e/run.mjs $(SCENARIO)
 
 build: build-bridge build-server
 
