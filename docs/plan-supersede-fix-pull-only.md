@@ -127,3 +127,37 @@ Commits (`fix(server): …`; `refactor(server,emacs)!: remove push …`), PR.
 - No `PULL_MODE`/`GRAVITY_PUSH_MODE`/dead push code.
 - `handleHookMessage` reachable by in-sandbox tests; integration revived.
 - Inverted supersede test fails pre-fix, passes post-fix.
+
+## Phase 0.2 resolution — ExitPlanMode `tool_use_id` known-unknown (2026-05-19)
+
+Investigated authoritatively (Claude Code hook docs, code.claude.com/docs/en/hooks):
+
+- **`PreToolUse` carries `tool_use_id`** — confirmed verbatim ("PreToolUse
+  hooks receive `tool_name`, `tool_input`, and `tool_use_id`"). The
+  generic-PreToolUse ↔ AskUserQuestionIntercept pair (the reported bug) is
+  therefore structurally guaranteed and is proven end-to-end (e2e S2).
+- **`PermissionRequest` input schema is undocumented** — the docs show
+  only its decision *output*, never its input fields. Whether the
+  ExitPlanMode `PermissionRequest` payload carries the same `tool_use_id`
+  as its sibling generic `PreToolUse` **remains unverified**. No on-disk
+  artifact can answer it: bridge logs carry no payload; the raw-dump
+  feature (`CLAUDE_GRAVITY_DUMP=1` → `{transcript_dir}/gravity/dumps/`)
+  was never enabled in past sessions.
+
+**Risk: zero downside.** AskUserQuestion does not depend on this at all
+(`handlePermissionRequest` skips it; the guard acts on the generic
+PreToolUse). ExitPlanMode is purely opportunistic: if the
+`PermissionRequest` payload carries the matching `tool_use_id`,
+plan-review is also protected; if not, the guard no-ops for plan-review
+and behaviour is exactly pre-fix — **no regression in either case**. The
+harness ExitPlanMode tests use synthetic payloads (they pin the guard
+*mechanism*, not Claude's real shape — stated in-test).
+
+**Definitive closure (one live capture, user-side):** set
+`CLAUDE_GRAVITY_DUMP=1`, run a real plan-mode session through
+ExitPlanMode, then compare `tool_use_id` between the dumped
+`*__PermissionRequest__raw.json` and the sibling
+`*__PreToolUse__raw.json` under `{transcript_dir}/gravity/dumps/`. If
+they match, the ExitPlanMode generalization is confirmed; if absent,
+remove the "also protects ExitPlanMode" claim (no code change needed —
+the guard already no-ops safely).
