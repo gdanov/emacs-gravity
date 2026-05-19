@@ -37,12 +37,14 @@
 >
 > 3.4 DONE (`2ecf7ba`): pull state-machine tests, 11/11 harness.
 > 3.5 DONE (`2ecf7ba`): signal-fed client ERT, 5/5.
-> 3.6 IN PROGRESS: integration-scenarios made sandbox-revivable via
-> GRAVITY_TEST_SOCK_DIR (flat pid-named socket files; sandbox
-> allowUnixSockets is the flat dir only, no nested subdirs). Verifying.
+> 3.6 DONE (`cf08322`): integration-scenarios 13/13 green against the
+> pull-only server (sandbox-disabled — the Bash sandbox blocks AF_UNIX
+> bind categorically; not path-fixable, corrected assumption). Optional
+> GRAVITY_TEST_SOCK_DIR override added (zero CI impact). Full
+> gravity-server suite: 15/15 test files green.
 >
-> Remaining: confirm 3.6 green, then Phase 4 (full make test, memory,
-> push — push needs explicit user go).
+> Remaining: Phase 4 — full `make test` (elisp+bridge+server), memory
+> update, then push (NEEDS EXPLICIT USER GO per source-control rule).
 
 ## Objective
 
