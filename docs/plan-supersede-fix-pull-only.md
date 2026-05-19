@@ -35,8 +35,14 @@
 > Commits: 03af644 fix · 5154726 harness · 51b748f server pull-only ·
 > 64a98ea emacs poll · 5a1b7bb docs. Nothing pushed.
 >
-> Remaining: Phase 3.4 pull state-machine tests, 3.5 signal-fed client
-> ERT, 3.6 revive integration-scenarios in-sandbox, Phase 4 land.
+> 3.4 DONE (`2ecf7ba`): pull state-machine tests, 11/11 harness.
+> 3.5 DONE (`2ecf7ba`): signal-fed client ERT, 5/5.
+> 3.6 IN PROGRESS: integration-scenarios made sandbox-revivable via
+> GRAVITY_TEST_SOCK_DIR (flat pid-named socket files; sandbox
+> allowUnixSockets is the flat dir only, no nested subdirs). Verifying.
+>
+> Remaining: confirm 3.6 green, then Phase 4 (full make test, memory,
+> push — push needs explicit user go).
 
 ## Objective
 
