@@ -77,4 +77,4 @@ we like emacs magit package and want to use similar UI paradigms and libraries. 
 
 # roadmap
 
-All open features, bugs, and tasks are tracked in beads. Run `bd ready` for available work, `bd list --status=open` for the full backlog (21 issues across P1–P4).
+Open features, bugs, and follow-ups are tracked ad hoc in this file and in PRs.
