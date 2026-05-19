@@ -1695,7 +1695,20 @@ Emacs fetches the actual data when it's ready."
     (setq claude-gravity--pending-signal (cons what session-id))
     (when session-id
       (puthash session-id seq claude-gravity--last-seq))
-    (claude-gravity--schedule-delayed-fetch)))
+    ;; Inbox/notice signals are user-blocking (permission, question,
+    ;; plan-review, alerts) — poll immediately so the action surfaces at
+    ;; once. Since push removal, this is the ONLY path that delivers a
+    ;; permission/question to the UI; a 6ms-lived intercept item must not
+    ;; wait on the idle timer. session/overview stay debounced (the whole
+    ;; point of pull mode: no UI churn during heavy editing).
+    (if (member (format "%s" what) '("inbox" "notice"))
+        (progn
+          (when claude-gravity--poll-timer
+            (cancel-timer claude-gravity--poll-timer)
+            (setq claude-gravity--poll-timer nil))
+          (setq claude-gravity--pending-signal nil)
+          (claude-gravity--poll-now))
+      (claude-gravity--schedule-delayed-fetch))))
 
 (defun claude-gravity--handle-session-patches (msg)
   "Handle session-patches — apply patches and update sequence number.
