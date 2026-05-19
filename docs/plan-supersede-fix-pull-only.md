@@ -22,7 +22,21 @@
 > characterization impossible (zero prior coverage of this path) — locked
 > in going forward by the new harness instead.
 >
-> Next: **STOP — ask before Phase 2** (push removal, breaking).
+> Phase 2 DONE (committed): server pull-only (`51b748f`), Emacs
+> immediate-poll-on-inbox (`64a98ea`), docs + protocol deprecation
+> (`5a1b7bb`). **Audit correction:** the Swift menubar did NOT need a
+> rewrite — it already implements a complete pull path (state-changed →
+> instantly-drained poll, inbox-items + session-patches handlers,
+> request.resync on connect, 10s heartbeat). Verified `swift build`
+> clean against the pull-only server, zero Swift changes. Protocol types
+> kept (deprecation-annotated, not deleted): deleting has no functional
+> benefit and real risk (EPERM'd integration test, untested Swift).
+>
+> Commits: 03af644 fix · 5154726 harness · 51b748f server pull-only ·
+> 64a98ea emacs poll · 5a1b7bb docs. Nothing pushed.
+>
+> Remaining: Phase 3.4 pull state-machine tests, 3.5 signal-fed client
+> ERT, 3.6 revive integration-scenarios in-sandbox, Phase 4 land.
 
 ## Objective
 
