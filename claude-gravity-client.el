@@ -478,7 +478,8 @@ target the session at point."
    `((type . "pi.prompt")
      (sessionId . ,session-id)
      (text . ,text)
-     ,@(when images `((images . ,images))))))
+     ,@(when images `((images . ,images)))))
+  (claude-gravity--log 'debug "Pi[%s]: pi.prompt queued, waiting for response from pi" session-id))
 
 (defun claude-gravity--pi-steering (session-id text)
   "Send TEXT as a steering message to pi session SESSION-ID.
@@ -716,6 +717,7 @@ Accumulates partial data in a buffer and processes complete newline-delimited JS
 (defun claude-gravity--handle-server-message (msg)
   "Dispatch a server message MSG to the appropriate handler."
   (let ((type (alist-get 'type msg)))
+    (claude-gravity--log 'debug "→ server msg: type=%s" type)
     (pcase type
       ("session.snapshot"
        (claude-gravity--handle-session-snapshot msg))

@@ -237,6 +237,7 @@ const program = Effect.gen(function* () {
       const stored = store.appendPatches(sessionId, patches);
       const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
       terminals.signalChanged("session", sessionId, seq);
+      logMsg(`Pi driver: ${patches.length} patches for ${result.hookEvent}, signaled session seq=${seq}`);
     }
 
     // Handle session lifecycle for overview updates
@@ -742,9 +743,12 @@ const program = Effect.gen(function* () {
   const piSessionPrompt = (sessionId: string, text: string, images?: string[]): void => {
     const d = getPiDriver(sessionId, "pi.prompt");
     if (!d) return;
-    d.prompt(text, images).catch((err) => {
-      logMsg(`pi.prompt error: ${err.message}`, "error");
-    });
+    logMsg(`pi.prompt: forwarding to driver session=${sessionId} text_len=${text.length}`);
+    d.prompt(text, images)
+      .then(() => logMsg(`pi.prompt: sent to pi session=${sessionId}`))
+      .catch((err) => {
+        logMsg(`pi.prompt error: ${err.message}`, "error");
+      });
   };
 
   /** Send steering message to a specific pi session. */
