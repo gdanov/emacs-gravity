@@ -1405,5 +1405,120 @@ ensure setf alist-get works in-place."
                      (sessionId . "pi-x"))))))
 
 
+;;; ── Session creation in the client ─────────────────────────────────
+;;
+;; The session-creation path is what S1 of the e2e harness proves
+;; end-to-end; these pin it deterministically at the unit level so a
+;; shape regression in `claude-gravity--handle-session-snapshot' or
+;; `claude-gravity--ensure-session' is caught without bringing up the
+;; whole stack.
+
+(defun cgp--snapshot-msg (sid &rest overrides)
+  "Build a synthetic session.snapshot msg with sensible defaults +
+OVERRIDES on the inner `session' alist (a flat alist of pairs)."
+  (let ((session `((sessionId . ,sid)
+                   (cwd . "/work/proj")
+                   (project . "proj")
+                   (status . "active")
+                   (claudeStatus . "idle")
+                   (slug . "snap")
+                   (branch . "main")
+                   (pid . 42)
+                   (startTime . 0)
+                   (lastEventTime . 0)
+                   (turns . nil)
+                   (tasks . nil)
+                   (files . nil)
+                   (compactions . nil)
+                   (totalToolCount . 0)
+                   (currentTurn . 0))))
+    (dolist (pair overrides)
+      (let ((cell (assq (car pair) session)))
+        (if cell (setcdr cell (cdr pair))
+          (push pair session))))
+    `((type . "session.snapshot") (sessionId . ,sid) (session . ,session))))
+
+(defmacro cgp--with-quiet-client (&rest body)
+  "Stub refresh/load helpers so the snapshot handler stays pure in batch."
+  `(cl-letf (((symbol-function 'claude-gravity--schedule-refresh) #'ignore)
+             ((symbol-function 'claude-gravity--schedule-session-refresh) #'ignore)
+             ((symbol-function 'claude-gravity--load-allow-patterns) #'ignore))
+     ,@body))
+
+(ert-deftest cgp-handle-session-snapshot-creates-session ()
+  "A session.snapshot for an unknown id creates a populated session
+plist in claude-gravity--sessions with every identity field set and the
+pre-allocated indexes/hashtables in place."
+  (clrhash claude-gravity--sessions)
+  (cgp--with-quiet-client
+   (claude-gravity--handle-session-snapshot (cgp--snapshot-msg "s-snap-1")))
+  (let ((s (gethash "s-snap-1" claude-gravity--sessions)))
+    (should s)
+    (should (equal "s-snap-1" (plist-get s :session-id)))
+    (should (equal "/work/proj" (plist-get s :cwd)))
+    (should (equal "proj" (plist-get s :project)))
+    (should (eq 'active (plist-get s :status)))
+    (should (eq 'idle (plist-get s :claude-status)))
+    (should (equal "snap" (plist-get s :slug)))
+    (should (equal "main" (plist-get s :branch)))
+    (should (eq 42 (plist-get s :pid)))
+    (should (hash-table-p (plist-get s :tool-index)))
+    (should (hash-table-p (plist-get s :agent-index)))
+    (should (hash-table-p (plist-get s :tasks)))
+    (should (hash-table-p (plist-get s :files)))
+    (should (hash-table-p (plist-get s :turn-index)))))
+
+(ert-deftest cgp-handle-session-snapshot-applies-trailing-patches ()
+  "A session.snapshot carrying `patches' applies them after building the
+session — verifies the snapshot + resync patch pipeline composes."
+  (clrhash claude-gravity--sessions)
+  (let ((msg (append (cgp--snapshot-msg "s-snap-2")
+                     `((patches . (((op . "set_claude_status")
+                                    (claudeStatus . "responding"))))))))
+    (cgp--with-quiet-client (claude-gravity--handle-session-snapshot msg)))
+  (let ((s (gethash "s-snap-2" claude-gravity--sessions)))
+    (should s)
+    (should (eq 'responding (plist-get s :claude-status)))))
+
+(ert-deftest cgp-handle-session-snapshot-preserves-buffer-on-resync ()
+  "Receiving a second snapshot for an existing session must NOT clobber
+the local-only :buffer (user might be reading it). Same for :display-name."
+  (clrhash claude-gravity--sessions)
+  (let ((buf (generate-new-buffer " *cgp-test-keep*")))
+    (unwind-protect
+        (progn
+          (cgp--with-quiet-client
+           (claude-gravity--handle-session-snapshot (cgp--snapshot-msg "s-snap-3")))
+          (plist-put (gethash "s-snap-3" claude-gravity--sessions) :buffer buf)
+          (plist-put (gethash "s-snap-3" claude-gravity--sessions) :display-name "My Name")
+          (cgp--with-quiet-client
+           (claude-gravity--handle-session-snapshot
+            (cgp--snapshot-msg "s-snap-3" '(slug . "snap-v2"))))
+          (let ((s (gethash "s-snap-3" claude-gravity--sessions)))
+            (should (eq buf (plist-get s :buffer)))
+            (should (equal "My Name" (plist-get s :display-name)))
+            (should (equal "snap-v2" (plist-get s :slug)))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest cgp-ensure-session-creates-fresh-with-defaults ()
+  "`claude-gravity--ensure-session' for a brand-new id creates a plist
+with default fields, pre-allocates turn 0, and indexes it; second call
+for the same id returns the SAME plist (idempotent)."
+  (clrhash claude-gravity--sessions)
+  (cl-letf (((symbol-function 'claude-gravity--load-allow-patterns) #'ignore))
+    (let ((s (claude-gravity--ensure-session "s-fresh" "/work/proj")))
+      (should s)
+      (should (equal "s-fresh" (plist-get s :session-id)))
+      (should (eq 'active (plist-get s :status)))
+      (should (eq 'idle (plist-get s :claude-status)))
+      (should (equal "proj" (plist-get s :project)))
+      (let ((turns (claude-gravity--tlist-items (plist-get s :turns)))
+            (turn-index (plist-get s :turn-index)))
+        (should (= 1 (length turns)))
+        (should (= 0 (alist-get 'turn-number (car turns))))
+        (should (gethash 0 turn-index)))
+      (should (eq s (claude-gravity--ensure-session "s-fresh" "/work/proj"))))))
+
+
 (provide 'claude-gravity-patch-test)
 ;;; claude-gravity-patch-test.el ends here

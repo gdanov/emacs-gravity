@@ -53,6 +53,34 @@ process.stdin.on("data", (chunk) => {
         : { value: cmd.value ?? null };
       if (RESULT) writeFileSync(RESULT, JSON.stringify(payload));
     }
+    if (cmd.type === "prompt" && typeof cmd.message === "string") {
+      // Drive a realistic transcript so the UI-flow scenario can observe
+      // (a) immediate "thinking" (agent_start → server sets claude-status
+      // "responding"), then (b) a populated session transcript (user
+      // prompt + a tool call + assistant text + Stop). Two phases with a
+      // short pause between so the test can deterministically assert the
+      // mid-flight responding state before agent_end resolves to idle.
+      const turnId = `t-${Date.now()}`;
+      const toolCallId = `tc-${Date.now()}`;
+      const promptText = cmd.message;
+      emit({ type: "agent_start" });
+      emit({ type: "message_start",
+        message: { role: "user", content: [{ type: "text", text: promptText }] } });
+      emit({ type: "turn_start", turn_id: turnId });
+      emit({ type: "text_delta", delta: "Reading the file…" });
+      emit({ type: "tool_execution_start",
+        toolCallId, toolName: "Read", args: { file_path: "/work/proj/foo.el" } });
+      setTimeout(() => {
+        emit({ type: "tool_execution_end",
+          toolCallId, toolName: "Read",
+          result: "(defun foo () :ok)", isError: false });
+        emit({ type: "text_delta", delta: " Done." });
+        emit({ type: "turn_end", turn_id: turnId });
+        emit({ type: "agent_end",
+          messages: [{ role: "assistant",
+                       usage: { input: 5, output: 7 } }] });
+      }, 250);
+    }
   }
 });
 
