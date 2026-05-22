@@ -93614,22 +93614,22 @@ function processBundles(graph) {
     routeBundledEdges(graph, bundle);
   }
 }
-function splitLines(label) {
+function splitLines2(label) {
   return label.split("\n");
 }
 function maxLineWidth(label) {
-  const lines = splitLines(label);
+  const lines = splitLines2(label);
   return Math.max(...lines.map((l) => l.length), 0);
 }
 function lineCount(label) {
-  return splitLines(label).length;
+  return splitLines2(label).length;
 }
 function getCorners(shape, useAscii) {
   const corners = SHAPE_CORNERS[shape] ?? SHAPE_CORNERS.rectangle;
   return useAscii ? corners.ascii : corners.unicode;
 }
 function getBoxDimensions(label, options) {
-  const lines = splitLines(label);
+  const lines = splitLines2(label);
   const maxLineWidth3 = Math.max(...lines.map((l) => l.length), 0);
   const lineCount3 = lines.length;
   const innerWidth = 2 * options.padding + maxLineWidth3;
@@ -93670,7 +93670,7 @@ function renderBox(label, dimensions, corners, useAscii) {
   canvas[to.x][from.y] = corners.tr;
   canvas[from.x][to.y] = corners.bl;
   canvas[to.x][to.y] = corners.br;
-  const lines = splitLines(label);
+  const lines = splitLines2(label);
   const w = width - 1;
   const h = height - 1;
   const centerY = Math.floor(h / 2);
@@ -93745,7 +93745,7 @@ function drawBoxWithGridDimensions(node, graph) {
   box[from.x][to.y] = effectiveCorners.bl;
   box[to.x][to.y] = effectiveCorners.br;
   const label = node.displayLabel;
-  const lines = splitLines(label);
+  const lines = splitLines2(label);
   const textCenterY = from.y + Math.floor(h / 2);
   const startY = textCenterY - Math.floor((lines.length - 1) / 2);
   for (let i = 0; i < lines.length; i++) {
@@ -93771,12 +93771,12 @@ function drawMultiBox(sections, useAscii, padding = 1) {
   }
   const innerWidth = maxTextWidth + 2 * padding;
   const boxWidth = innerWidth + 2;
-  let totalLines = 0;
+  let totalLines2 = 0;
   for (const section of sections) {
-    totalLines += Math.max(section.length, 1);
+    totalLines2 += Math.max(section.length, 1);
   }
   const numDividers = sections.length - 1;
-  const boxHeight = totalLines + numDividers + 2;
+  const boxHeight = totalLines2 + numDividers + 2;
   const hLine = useAscii ? "-" : "\u2500";
   const vLine = useAscii ? "|" : "\u2502";
   const tl = useAscii ? "+" : "\u250C";
@@ -94077,7 +94077,7 @@ function drawTextOnLine(canvas, line, label, isUpwardEdge) {
       middleY = middleY - offset;
     }
   }
-  const lines = splitLines(label);
+  const lines = splitLines2(label);
   const startY = middleY - Math.floor((lines.length - 1) / 2);
   for (let i = 0; i < lines.length; i++) {
     const lineText = lines[i];
@@ -94377,7 +94377,7 @@ function drawSubgraphLabel(sg, graph) {
   const height = sg.maxY - sg.minY;
   if (width <= 0 || height <= 0) return [mkCanvas(0, 0), { x: 0, y: 0 }];
   const canvas = mkCanvas(width, height);
-  const lines = splitLines(sg.name);
+  const lines = splitLines2(sg.name);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const labelY = 1 + i;
@@ -95076,7 +95076,7 @@ function renderSequenceAscii(text, config, colorMode, theme) {
       if (diagram.notes[n].afterIndex === m) {
         curY += 1;
         const note = diagram.notes[n];
-        const nLines = splitLines(note.text);
+        const nLines = splitLines2(note.text);
         const nWidth = Math.max(...nLines.map((l) => l.length)) + 4;
         const nHeight = nLines.length + 2;
         const aIdx = actorIdx.get(note.actorIds[0]) ?? 0;
@@ -95132,7 +95132,7 @@ function renderSequenceAscii(text, config, colorMode, theme) {
     }
   }
   function drawActorBox(cx, topY, label) {
-    const lines2 = splitLines(label);
+    const lines2 = splitLines2(label);
     const maxW = maxLineWidth(label);
     const w = maxW + 2 * boxPad + 2;
     const h = lines2.length + 2;
@@ -95200,7 +95200,7 @@ function renderSequenceAscii(text, config, colorMode, theme) {
       const arrowY = msgArrowY[m];
       const leftToRight = fromX < toX;
       const midX = Math.floor((fromX + toX) / 2);
-      const msgLines = splitLines(msg.label);
+      const msgLines = splitLines2(msg.label);
       for (let lineIdx = 0; lineIdx < msgLines.length; lineIdx++) {
         const line = msgLines[lineIdx];
         const labelStart = midX - Math.floor(line.length / 2);
@@ -95242,7 +95242,7 @@ function renderSequenceAscii(text, config, colorMode, theme) {
     for (let x = bLeft + 1; x < bRight; x++) setC(x, topY, H, "border");
     setC(bRight, topY, TR, "border");
     const hdrLabel = block.label ? `${block.type} [${block.label}]` : block.type;
-    const hdrLines = splitLines(hdrLabel);
+    const hdrLines = splitLines2(hdrLabel);
     for (let lineIdx = 0; lineIdx < hdrLines.length && topY + lineIdx < botY; lineIdx++) {
       const line = hdrLines[lineIdx];
       for (let i = 0; i < line.length && bLeft + 1 + i < bRight; i++) {
@@ -95525,7 +95525,7 @@ function formatMember(m) {
 function buildClassSections(cls) {
   const header = [];
   if (cls.annotation) header.push(`<<${cls.annotation}>>`);
-  const nameLines = splitLines(cls.label);
+  const nameLines = splitLines2(cls.label);
   header.push(...nameLines);
   const attrs = cls.attributes.map(formatMember);
   const methods = cls.methods.map(formatMember);
@@ -95585,9 +95585,9 @@ function renderClassAscii(text, config, colorMode, theme) {
       for (const line of section) maxTextW = Math.max(maxTextW, line.length);
     }
     const boxW = maxTextW + 4;
-    let totalLines = 0;
-    for (const section of sections) totalLines += Math.max(section.length, 1);
-    const boxH = totalLines + (sections.length - 1) + 2;
+    let totalLines2 = 0;
+    for (const section of sections) totalLines2 += Math.max(section.length, 1);
+    const boxH = totalLines2 + (sections.length - 1) + 2;
     classBoxW.set(cls.id, boxW);
     classBoxH.set(cls.id, boxH);
   }
@@ -95897,7 +95897,7 @@ function renderClassAscii(text, config, colorMode, theme) {
       }
     }
     if (rel.label) {
-      const lines2 = splitLines(rel.label);
+      const lines2 = splitLines2(rel.label);
       const maxLabelWidth = Math.max(...lines2.map((l) => l.length)) + 2;
       let baseMidY;
       let idealMidX;
@@ -96071,7 +96071,7 @@ function formatAttribute(attr) {
   return `${keyStr}${attr.type} ${attr.name}`;
 }
 function buildEntitySections(entity) {
-  const header = splitLines(entity.label);
+  const header = splitLines2(entity.label);
   const attrs = entity.attributes.map(formatAttribute);
   if (attrs.length === 0) return [header];
   return [header, attrs];
@@ -96158,9 +96158,9 @@ function renderErAscii(text, config, colorMode, theme) {
       for (const line of section) maxTextW = Math.max(maxTextW, line.length);
     }
     const boxW = maxTextW + 4;
-    let totalLines = 0;
-    for (const section of sections) totalLines += Math.max(section.length, 1);
-    const boxH = totalLines + (sections.length - 1) + 2;
+    let totalLines2 = 0;
+    for (const section of sections) totalLines2 += Math.max(section.length, 1);
+    const boxH = totalLines2 + (sections.length - 1) + 2;
     entityBoxW.set(ent.id, boxW);
     entityBoxH.set(ent.id, boxH);
   }
@@ -96261,7 +96261,7 @@ function renderErAscii(text, config, colorMode, theme) {
         setC(endX - rightChars.length + 1 + i, lineY, rightChars[i], "arrow");
       }
       if (rel.label) {
-        const lines2 = splitLines(rel.label);
+        const lines2 = splitLines2(rel.label);
         const gapMid = Math.floor((startX + endX) / 2);
         for (let lineIdx = 0; lineIdx < lines2.length; lineIdx++) {
           const line = lines2[lineIdx];
@@ -96308,7 +96308,7 @@ function renderErAscii(text, config, colorMode, theme) {
         setC(targetX - Math.floor(lowerChars.length / 2) + i, endY, lowerChars[i], "arrow");
       }
       if (rel.label) {
-        const lines2 = splitLines(rel.label);
+        const lines2 = splitLines2(rel.label);
         const midY = Math.floor((startY + endY) / 2);
         const startLabelY = midY - Math.floor((lines2.length - 1) / 2);
         for (let lineIdx = 0; lineIdx < lines2.length; lineIdx++) {
@@ -97447,7 +97447,7 @@ var init_dist = __esm({
     };
     stadiumRenderer = {
       getDimensions(label, options) {
-        const lines = splitLines(label);
+        const lines = splitLines2(label);
         const maxLineWidth3 = Math.max(...lines.map((l) => l.length), 0);
         const lineCount3 = lines.length;
         const innerWidth = 2 * options.padding + maxLineWidth3;
@@ -97496,7 +97496,7 @@ var init_dist = __esm({
             canvas[x][height - 1] = hChar;
           }
         }
-        const lines = splitLines(label);
+        const lines = splitLines2(label);
         const startY = centerY - Math.floor((lines.length - 1) / 2);
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
@@ -97523,7 +97523,7 @@ var init_dist = __esm({
     };
     subroutineRenderer = {
       getDimensions(label, options) {
-        const lines = splitLines(label);
+        const lines = splitLines2(label);
         const maxLineWidth3 = Math.max(...lines.map((l) => l.length), 0);
         const lineCount3 = lines.length;
         const innerWidth = 2 * options.padding + maxLineWidth3;
@@ -97564,7 +97564,7 @@ var init_dist = __esm({
         for (let x = 2; x < width - 2; x++) canvas[x][height - 1] = hChar;
         canvas[width - 2][height - 1] = options.useAscii ? "+" : "\u2534";
         canvas[width - 1][height - 1] = options.useAscii ? "+" : "\u2518";
-        const lines = splitLines(label);
+        const lines = splitLines2(label);
         const centerY = Math.floor(height / 2);
         const startY = centerY - Math.floor((lines.length - 1) / 2);
         for (let i = 0; i < lines.length; i++) {
@@ -97592,7 +97592,7 @@ var init_dist = __esm({
     };
     cylinderRenderer = {
       getDimensions(label, options) {
-        const lines = splitLines(label);
+        const lines = splitLines2(label);
         const maxLineWidth3 = Math.max(...lines.map((l) => l.length), 0);
         const lineCount3 = lines.length;
         const innerWidth = 2 * options.padding + maxLineWidth3;
@@ -97633,7 +97633,7 @@ var init_dist = __esm({
         canvas[0][height - 1] = options.useAscii ? "'" : "\u2570";
         for (let x = 1; x < width - 1; x++) canvas[x][height - 1] = hChar;
         canvas[width - 1][height - 1] = options.useAscii ? "'" : "\u256F";
-        const lines = splitLines(label);
+        const lines = splitLines2(label);
         const centerY = Math.floor(height / 2);
         const startY = centerY - Math.floor((lines.length - 1) / 2);
         for (let i = 0; i < lines.length; i++) {
@@ -103683,7 +103683,8 @@ function createTurnNode(turnNumber) {
     stopThinking: null,
     stopReason: null,
     tokenIn: null,
-    tokenOut: null
+    tokenOut: null,
+    editedFiles: []
   };
 }
 function createStepNode(thinking, text) {
@@ -103967,6 +103968,11 @@ function updateToolPartial(s, toolUseId, partial) {
   tool.partial = partial;
   return [{ op: "update_tool_partial", toolUseId, partial }];
 }
+function findTool(s, toolUseId) {
+  const loc = s.toolIndex[toolUseId];
+  if (!loc) return void 0;
+  return findToolByLocation(s, loc);
+}
 function findToolByLocation(s, loc) {
   if (loc.agentId) {
     const agent = findAgent(s, loc.agentId);
@@ -104044,6 +104050,14 @@ function trackFile(s, toolName, toolInput) {
       break;
     case "Edit":
       path = toolInput.file_path;
+      op = "edit";
+      break;
+    case "MultiEdit":
+      path = toolInput.file_path;
+      op = "edit";
+      break;
+    case "NotebookEdit":
+      path = toolInput.notebook_path ?? toolInput.file_path;
       op = "edit";
       break;
     case "Write":
@@ -104147,7 +104161,1191 @@ function finalizeTurnTokens(s, usage) {
   return patches;
 }
 
+// ../../node_modules/diff/libesm/diff/base.js
+var Diff = class {
+  diff(oldStr, newStr, options = {}) {
+    let callback3;
+    if (typeof options === "function") {
+      callback3 = options;
+      options = {};
+    } else if ("callback" in options) {
+      callback3 = options.callback;
+    }
+    const oldString = this.castInput(oldStr, options);
+    const newString = this.castInput(newStr, options);
+    const oldTokens = this.removeEmpty(this.tokenize(oldString, options));
+    const newTokens = this.removeEmpty(this.tokenize(newString, options));
+    return this.diffWithOptionsObj(oldTokens, newTokens, options, callback3);
+  }
+  diffWithOptionsObj(oldTokens, newTokens, options, callback3) {
+    var _a2;
+    const done4 = (value) => {
+      value = this.postProcess(value, options);
+      if (callback3) {
+        setTimeout(function() {
+          callback3(value);
+        }, 0);
+        return void 0;
+      } else {
+        return value;
+      }
+    };
+    const newLen = newTokens.length, oldLen = oldTokens.length;
+    let editLength = 1;
+    let maxEditLength = newLen + oldLen;
+    if (options.maxEditLength != null) {
+      maxEditLength = Math.min(maxEditLength, options.maxEditLength);
+    }
+    const maxExecutionTime = (_a2 = options.timeout) !== null && _a2 !== void 0 ? _a2 : Infinity;
+    const abortAfterTimestamp = Date.now() + maxExecutionTime;
+    const bestPath = [{ oldPos: -1, lastComponent: void 0 }];
+    let newPos = this.extractCommon(bestPath[0], newTokens, oldTokens, 0, options);
+    if (bestPath[0].oldPos + 1 >= oldLen && newPos + 1 >= newLen) {
+      return done4(this.buildValues(bestPath[0].lastComponent, newTokens, oldTokens));
+    }
+    let minDiagonalToConsider = -Infinity, maxDiagonalToConsider = Infinity;
+    const execEditLength = () => {
+      for (let diagonalPath = Math.max(minDiagonalToConsider, -editLength); diagonalPath <= Math.min(maxDiagonalToConsider, editLength); diagonalPath += 2) {
+        let basePath;
+        const removePath = bestPath[diagonalPath - 1], addPath = bestPath[diagonalPath + 1];
+        if (removePath) {
+          bestPath[diagonalPath - 1] = void 0;
+        }
+        let canAdd = false;
+        if (addPath) {
+          const addPathNewPos = addPath.oldPos - diagonalPath;
+          canAdd = addPath && 0 <= addPathNewPos && addPathNewPos < newLen;
+        }
+        const canRemove = removePath && removePath.oldPos + 1 < oldLen;
+        if (!canAdd && !canRemove) {
+          bestPath[diagonalPath] = void 0;
+          continue;
+        }
+        if (!canRemove || canAdd && removePath.oldPos < addPath.oldPos) {
+          basePath = this.addToPath(addPath, true, false, 0, options);
+        } else {
+          basePath = this.addToPath(removePath, false, true, 1, options);
+        }
+        newPos = this.extractCommon(basePath, newTokens, oldTokens, diagonalPath, options);
+        if (basePath.oldPos + 1 >= oldLen && newPos + 1 >= newLen) {
+          return done4(this.buildValues(basePath.lastComponent, newTokens, oldTokens)) || true;
+        } else {
+          bestPath[diagonalPath] = basePath;
+          if (basePath.oldPos + 1 >= oldLen) {
+            maxDiagonalToConsider = Math.min(maxDiagonalToConsider, diagonalPath - 1);
+          }
+          if (newPos + 1 >= newLen) {
+            minDiagonalToConsider = Math.max(minDiagonalToConsider, diagonalPath + 1);
+          }
+        }
+      }
+      editLength++;
+    };
+    if (callback3) {
+      (function exec() {
+        setTimeout(function() {
+          if (editLength > maxEditLength || Date.now() > abortAfterTimestamp) {
+            return callback3(void 0);
+          }
+          if (!execEditLength()) {
+            exec();
+          }
+        }, 0);
+      })();
+    } else {
+      while (editLength <= maxEditLength && Date.now() <= abortAfterTimestamp) {
+        const ret = execEditLength();
+        if (ret) {
+          return ret;
+        }
+      }
+    }
+  }
+  addToPath(path, added, removed, oldPosInc, options) {
+    const last = path.lastComponent;
+    if (last && !options.oneChangePerToken && last.added === added && last.removed === removed) {
+      return {
+        oldPos: path.oldPos + oldPosInc,
+        lastComponent: { count: last.count + 1, added, removed, previousComponent: last.previousComponent }
+      };
+    } else {
+      return {
+        oldPos: path.oldPos + oldPosInc,
+        lastComponent: { count: 1, added, removed, previousComponent: last }
+      };
+    }
+  }
+  extractCommon(basePath, newTokens, oldTokens, diagonalPath, options) {
+    const newLen = newTokens.length, oldLen = oldTokens.length;
+    let oldPos = basePath.oldPos, newPos = oldPos - diagonalPath, commonCount = 0;
+    while (newPos + 1 < newLen && oldPos + 1 < oldLen && this.equals(oldTokens[oldPos + 1], newTokens[newPos + 1], options)) {
+      newPos++;
+      oldPos++;
+      commonCount++;
+      if (options.oneChangePerToken) {
+        basePath.lastComponent = { count: 1, previousComponent: basePath.lastComponent, added: false, removed: false };
+      }
+    }
+    if (commonCount && !options.oneChangePerToken) {
+      basePath.lastComponent = { count: commonCount, previousComponent: basePath.lastComponent, added: false, removed: false };
+    }
+    basePath.oldPos = oldPos;
+    return newPos;
+  }
+  equals(left, right, options) {
+    if (options.comparator) {
+      return options.comparator(left, right);
+    } else {
+      return left === right || !!options.ignoreCase && left.toLowerCase() === right.toLowerCase();
+    }
+  }
+  removeEmpty(array2) {
+    const ret = [];
+    for (let i = 0; i < array2.length; i++) {
+      if (array2[i]) {
+        ret.push(array2[i]);
+      }
+    }
+    return ret;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  castInput(value, options) {
+    return value;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  tokenize(value, options) {
+    return Array.from(value);
+  }
+  join(chars) {
+    return chars.join("");
+  }
+  postProcess(changeObjects, options) {
+    return changeObjects;
+  }
+  get useLongestToken() {
+    return false;
+  }
+  buildValues(lastComponent, newTokens, oldTokens) {
+    const components = [];
+    let nextComponent;
+    while (lastComponent) {
+      components.push(lastComponent);
+      nextComponent = lastComponent.previousComponent;
+      delete lastComponent.previousComponent;
+      lastComponent = nextComponent;
+    }
+    components.reverse();
+    const componentLen = components.length;
+    let componentPos = 0, newPos = 0, oldPos = 0;
+    for (; componentPos < componentLen; componentPos++) {
+      const component = components[componentPos];
+      if (!component.removed) {
+        if (!component.added && this.useLongestToken) {
+          let value = newTokens.slice(newPos, newPos + component.count);
+          value = value.map(function(value2, i) {
+            const oldValue = oldTokens[oldPos + i];
+            return oldValue.length > value2.length ? oldValue : value2;
+          });
+          component.value = this.join(value);
+        } else {
+          component.value = this.join(newTokens.slice(newPos, newPos + component.count));
+        }
+        newPos += component.count;
+        if (!component.added) {
+          oldPos += component.count;
+        }
+      } else {
+        component.value = this.join(oldTokens.slice(oldPos, oldPos + component.count));
+        oldPos += component.count;
+      }
+    }
+    return components;
+  }
+};
+
+// ../../node_modules/diff/libesm/util/string.js
+function hasOnlyWinLineEndings(string2) {
+  return string2.includes("\r\n") && !string2.startsWith("\n") && !string2.match(/[^\r]\n/);
+}
+function hasOnlyUnixLineEndings(string2) {
+  return !string2.includes("\r\n") && string2.includes("\n");
+}
+
+// ../../node_modules/diff/libesm/diff/line.js
+var LineDiff = class extends Diff {
+  constructor() {
+    super(...arguments);
+    this.tokenize = tokenize;
+  }
+  equals(left, right, options) {
+    if (options.ignoreWhitespace) {
+      if (!options.newlineIsToken || !left.includes("\n")) {
+        left = left.trim();
+      }
+      if (!options.newlineIsToken || !right.includes("\n")) {
+        right = right.trim();
+      }
+    } else if (options.ignoreNewlineAtEof && !options.newlineIsToken) {
+      if (left.endsWith("\n")) {
+        left = left.slice(0, -1);
+      }
+      if (right.endsWith("\n")) {
+        right = right.slice(0, -1);
+      }
+    }
+    return super.equals(left, right, options);
+  }
+};
+var lineDiff = new LineDiff();
+function diffLines(oldStr, newStr, options) {
+  return lineDiff.diff(oldStr, newStr, options);
+}
+function tokenize(value, options) {
+  if (options.stripTrailingCr) {
+    value = value.replace(/\r\n/g, "\n");
+  }
+  const retLines = [], linesAndNewlines = value.split(/(\n|\r\n)/);
+  if (!linesAndNewlines[linesAndNewlines.length - 1]) {
+    linesAndNewlines.pop();
+  }
+  for (let i = 0; i < linesAndNewlines.length; i++) {
+    const line = linesAndNewlines[i];
+    if (i % 2 && !options.newlineIsToken) {
+      retLines[retLines.length - 1] += line;
+    } else {
+      retLines.push(line);
+    }
+  }
+  return retLines;
+}
+
+// ../../node_modules/diff/libesm/patch/line-endings.js
+function unixToWin(patch) {
+  if (Array.isArray(patch)) {
+    return patch.map((p) => unixToWin(p));
+  }
+  return Object.assign(Object.assign({}, patch), { hunks: patch.hunks.map((hunk) => Object.assign(Object.assign({}, hunk), { lines: hunk.lines.map((line, i) => {
+    var _a2;
+    return line.startsWith("\\") || line.endsWith("\r") || ((_a2 = hunk.lines[i + 1]) === null || _a2 === void 0 ? void 0 : _a2.startsWith("\\")) ? line : line + "\r";
+  }) })) });
+}
+function winToUnix(patch) {
+  if (Array.isArray(patch)) {
+    return patch.map((p) => winToUnix(p));
+  }
+  return Object.assign(Object.assign({}, patch), { hunks: patch.hunks.map((hunk) => Object.assign(Object.assign({}, hunk), { lines: hunk.lines.map((line) => line.endsWith("\r") ? line.substring(0, line.length - 1) : line) })) });
+}
+function isUnix(patch) {
+  if (!Array.isArray(patch)) {
+    patch = [patch];
+  }
+  return !patch.some((index) => index.hunks.some((hunk) => hunk.lines.some((line) => !line.startsWith("\\") && line.endsWith("\r"))));
+}
+function isWin(patch) {
+  if (!Array.isArray(patch)) {
+    patch = [patch];
+  }
+  return patch.some((index) => index.hunks.some((hunk) => hunk.lines.some((line) => line.endsWith("\r")))) && patch.every((index) => index.hunks.every((hunk) => hunk.lines.every((line, i) => {
+    var _a2;
+    return line.startsWith("\\") || line.endsWith("\r") || ((_a2 = hunk.lines[i + 1]) === null || _a2 === void 0 ? void 0 : _a2.startsWith("\\"));
+  })));
+}
+
+// ../../node_modules/diff/libesm/patch/parse.js
+function parsePatch(uniDiff) {
+  const diffstr = uniDiff.split(/\n/), list = [];
+  let i = 0;
+  function isGitDiffHeader(line) {
+    return /^diff --git /.test(line);
+  }
+  function isDiffHeader(line) {
+    return isGitDiffHeader(line) || /^Index:\s/.test(line) || /^diff(?: -r \w+)+\s/.test(line);
+  }
+  function isFileHeader(line) {
+    return /^(---|\+\+\+)\s/.test(line);
+  }
+  function isHunkHeader(line) {
+    return /^@@\s/.test(line);
+  }
+  function parseIndex() {
+    var _a2;
+    const index = {};
+    index.hunks = [];
+    list.push(index);
+    let seenDiffHeader = false;
+    while (i < diffstr.length) {
+      const line = diffstr[i];
+      if (isFileHeader(line) || isHunkHeader(line)) {
+        break;
+      }
+      if (isGitDiffHeader(line)) {
+        if (seenDiffHeader) {
+          return;
+        }
+        seenDiffHeader = true;
+        index.isGit = true;
+        const paths = parseGitDiffHeader(line);
+        if (paths) {
+          index.oldFileName = paths.oldFileName;
+          index.newFileName = paths.newFileName;
+        }
+        i++;
+        while (i < diffstr.length) {
+          const extLine = diffstr[i];
+          if (isFileHeader(extLine) || isHunkHeader(extLine) || isDiffHeader(extLine)) {
+            break;
+          }
+          const renameFromMatch = /^rename from (.*)/.exec(extLine);
+          if (renameFromMatch) {
+            index.oldFileName = "a/" + unquoteIfQuoted(renameFromMatch[1]);
+            index.isRename = true;
+          }
+          const renameToMatch = /^rename to (.*)/.exec(extLine);
+          if (renameToMatch) {
+            index.newFileName = "b/" + unquoteIfQuoted(renameToMatch[1]);
+            index.isRename = true;
+          }
+          const copyFromMatch = /^copy from (.*)/.exec(extLine);
+          if (copyFromMatch) {
+            index.oldFileName = "a/" + unquoteIfQuoted(copyFromMatch[1]);
+            index.isCopy = true;
+          }
+          const copyToMatch = /^copy to (.*)/.exec(extLine);
+          if (copyToMatch) {
+            index.newFileName = "b/" + unquoteIfQuoted(copyToMatch[1]);
+            index.isCopy = true;
+          }
+          const newFileModeMatch = /^new file mode (\d+)/.exec(extLine);
+          if (newFileModeMatch) {
+            index.isCreate = true;
+            index.newMode = newFileModeMatch[1];
+          }
+          const deletedFileModeMatch = /^deleted file mode (\d+)/.exec(extLine);
+          if (deletedFileModeMatch) {
+            index.isDelete = true;
+            index.oldMode = deletedFileModeMatch[1];
+          }
+          const oldModeMatch = /^old mode (\d+)/.exec(extLine);
+          if (oldModeMatch) {
+            index.oldMode = oldModeMatch[1];
+          }
+          const newModeMatch = /^new mode (\d+)/.exec(extLine);
+          if (newModeMatch) {
+            index.newMode = newModeMatch[1];
+          }
+          if (/^Binary files /.test(extLine)) {
+            index.isBinary = true;
+          }
+          i++;
+        }
+        continue;
+      } else if (isDiffHeader(line)) {
+        if (seenDiffHeader) {
+          return;
+        }
+        seenDiffHeader = true;
+        const headerMatch = /^(?:Index:|diff(?: -r \w+)+)\s+/.exec(line);
+        if (headerMatch) {
+          index.index = line.substring(headerMatch[0].length).trim();
+        }
+      }
+      i++;
+    }
+    parseFileHeader(index);
+    parseFileHeader(index);
+    if (index.oldFileName === void 0 !== (index.newFileName === void 0)) {
+      throw new Error("Missing " + (index.oldFileName !== void 0 ? '"+++ ..."' : '"--- ..."') + " file header for " + ((_a2 = index.oldFileName) !== null && _a2 !== void 0 ? _a2 : index.newFileName));
+    }
+    while (i < diffstr.length) {
+      const line = diffstr[i];
+      if (isDiffHeader(line) || isFileHeader(line) || /^===================================================================/.test(line)) {
+        break;
+      } else if (isHunkHeader(line)) {
+        index.hunks.push(parseHunk());
+      } else {
+        i++;
+      }
+    }
+  }
+  function parseGitDiffHeader(line) {
+    const rest = line.substring("diff --git ".length);
+    if (rest.startsWith('"')) {
+      const oldPath = parseQuotedFileName(rest);
+      if (oldPath === null) {
+        return null;
+      }
+      const afterOld = rest.substring(oldPath.rawLength + 1);
+      let newFileName;
+      if (afterOld.startsWith('"')) {
+        const newPath = parseQuotedFileName(afterOld);
+        if (newPath === null) {
+          return null;
+        }
+        newFileName = newPath.fileName;
+      } else {
+        newFileName = afterOld;
+      }
+      return {
+        oldFileName: oldPath.fileName,
+        newFileName
+      };
+    }
+    const quoteIdx = rest.indexOf('"');
+    if (quoteIdx > 0) {
+      const oldFileName = rest.substring(0, quoteIdx - 1);
+      const newPath = parseQuotedFileName(rest.substring(quoteIdx));
+      if (newPath === null) {
+        return null;
+      }
+      return {
+        oldFileName,
+        newFileName: newPath.fileName
+      };
+    }
+    if (rest.startsWith("a/")) {
+      const splits = [];
+      let idx = 0;
+      while (true) {
+        idx = rest.indexOf(" b/", idx + 1);
+        if (idx === -1) {
+          break;
+        }
+        splits.push(idx);
+      }
+      if (splits.length > 0) {
+        const mid = splits[Math.floor(splits.length / 2)];
+        return {
+          oldFileName: rest.substring(0, mid),
+          newFileName: rest.substring(mid + 1)
+        };
+      }
+    }
+    return null;
+  }
+  function unquoteIfQuoted(s) {
+    if (s.startsWith('"')) {
+      const parsed = parseQuotedFileName(s);
+      if (parsed) {
+        return parsed.fileName;
+      }
+    }
+    return s;
+  }
+  function parseQuotedFileName(s) {
+    if (!s.startsWith('"')) {
+      return null;
+    }
+    let result3 = "";
+    let j = 1;
+    while (j < s.length) {
+      if (s[j] === '"') {
+        return { fileName: result3, rawLength: j + 1 };
+      }
+      if (s[j] === "\\" && j + 1 < s.length) {
+        j++;
+        switch (s[j]) {
+          case "a":
+            result3 += "\x07";
+            break;
+          case "b":
+            result3 += "\b";
+            break;
+          case "f":
+            result3 += "\f";
+            break;
+          case "n":
+            result3 += "\n";
+            break;
+          case "r":
+            result3 += "\r";
+            break;
+          case "t":
+            result3 += "	";
+            break;
+          case "v":
+            result3 += "\v";
+            break;
+          case "\\":
+            result3 += "\\";
+            break;
+          case '"':
+            result3 += '"';
+            break;
+          case "0":
+          case "1":
+          case "2":
+          case "3":
+          case "4":
+          case "5":
+          case "6":
+          case "7": {
+            if (j + 2 >= s.length || s[j + 1] < "0" || s[j + 1] > "7" || s[j + 2] < "0" || s[j + 2] > "7") {
+              return null;
+            }
+            const bytes = [parseInt(s.substring(j, j + 3), 8)];
+            j += 3;
+            while (s[j] === "\\" && s[j + 1] >= "0" && s[j + 1] <= "7") {
+              if (j + 3 >= s.length || s[j + 2] < "0" || s[j + 2] > "7" || s[j + 3] < "0" || s[j + 3] > "7") {
+                return null;
+              }
+              bytes.push(parseInt(s.substring(j + 1, j + 4), 8));
+              j += 4;
+            }
+            result3 += new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+            continue;
+          }
+          // Note that in C, there are also three kinds of hex escape sequences:
+          // - \xhh
+          // - \uhhhh
+          // - \Uhhhhhhhh
+          // We do not bother to parse them here because, so far as we know,
+          // they are never emitted by any tools that generate unified diff
+          // format diffs, and so for now jsdiff does not consider them legal.
+          default:
+            return null;
+        }
+      } else {
+        result3 += s[j];
+      }
+      j++;
+    }
+    return null;
+  }
+  function parseFileHeader(index) {
+    const fileHeaderMatch = /^(---|\+\+\+)\s+/.exec(diffstr[i]);
+    if (fileHeaderMatch) {
+      const prefix = fileHeaderMatch[1], data = diffstr[i].substring(3).trim().split("	", 2), header = (data[1] || "").trim();
+      let fileName = data[0];
+      if (fileName.startsWith('"')) {
+        fileName = unquoteIfQuoted(fileName);
+      } else {
+        fileName = fileName.replace(/\\\\/g, "\\");
+      }
+      if (prefix === "---") {
+        index.oldFileName = fileName;
+        index.oldHeader = header;
+      } else {
+        index.newFileName = fileName;
+        index.newHeader = header;
+      }
+      i++;
+    }
+  }
+  function parseHunk() {
+    var _a2;
+    const chunkHeaderIndex = i, chunkHeaderLine = diffstr[i++], chunkHeader = chunkHeaderLine.split(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    const hunk = {
+      oldStart: +chunkHeader[1],
+      oldLines: typeof chunkHeader[2] === "undefined" ? 1 : +chunkHeader[2],
+      newStart: +chunkHeader[3],
+      newLines: typeof chunkHeader[4] === "undefined" ? 1 : +chunkHeader[4],
+      lines: []
+    };
+    if (hunk.oldLines === 0) {
+      hunk.oldStart += 1;
+    }
+    if (hunk.newLines === 0) {
+      hunk.newStart += 1;
+    }
+    let addCount = 0, removeCount = 0;
+    for (; i < diffstr.length && (removeCount < hunk.oldLines || addCount < hunk.newLines || ((_a2 = diffstr[i]) === null || _a2 === void 0 ? void 0 : _a2.startsWith("\\"))); i++) {
+      const operation = diffstr[i].length == 0 && i != diffstr.length - 1 ? " " : diffstr[i][0];
+      if (operation === "+" || operation === "-" || operation === " " || operation === "\\") {
+        hunk.lines.push(diffstr[i]);
+        if (operation === "+") {
+          addCount++;
+        } else if (operation === "-") {
+          removeCount++;
+        } else if (operation === " ") {
+          addCount++;
+          removeCount++;
+        }
+      } else {
+        throw new Error(`Hunk at line ${chunkHeaderIndex + 1} contained invalid line ${diffstr[i]}`);
+      }
+    }
+    if (!addCount && hunk.newLines === 1) {
+      hunk.newLines = 0;
+    }
+    if (!removeCount && hunk.oldLines === 1) {
+      hunk.oldLines = 0;
+    }
+    if (addCount !== hunk.newLines) {
+      throw new Error("Added line count did not match for hunk at line " + (chunkHeaderIndex + 1));
+    }
+    if (removeCount !== hunk.oldLines) {
+      throw new Error("Removed line count did not match for hunk at line " + (chunkHeaderIndex + 1));
+    }
+    if (i < diffstr.length && diffstr[i] && /^[+ -]/.test(diffstr[i]) && !isFileHeader(diffstr[i])) {
+      throw new Error("Hunk at line " + (chunkHeaderIndex + 1) + " has more lines than expected (expected " + hunk.oldLines + " old lines and " + hunk.newLines + " new lines)");
+    }
+    return hunk;
+  }
+  while (i < diffstr.length) {
+    parseIndex();
+  }
+  return list;
+}
+
+// ../../node_modules/diff/libesm/util/distance-iterator.js
+function distance_iterator_default(start, minLine, maxLine) {
+  let wantForward = true, backwardExhausted = false, forwardExhausted = false, localOffset = 1;
+  return function iterator() {
+    if (wantForward && !forwardExhausted) {
+      if (backwardExhausted) {
+        localOffset++;
+      } else {
+        wantForward = false;
+      }
+      if (start + localOffset <= maxLine) {
+        return start + localOffset;
+      }
+      forwardExhausted = true;
+    }
+    if (!backwardExhausted) {
+      if (!forwardExhausted) {
+        wantForward = true;
+      }
+      if (minLine <= start - localOffset) {
+        return start - localOffset++;
+      }
+      backwardExhausted = true;
+      return iterator();
+    }
+    return void 0;
+  };
+}
+
+// ../../node_modules/diff/libesm/patch/apply.js
+function applyPatch(source, patch, options = {}) {
+  let patches;
+  if (typeof patch === "string") {
+    patches = parsePatch(patch);
+  } else if (Array.isArray(patch)) {
+    patches = patch;
+  } else {
+    patches = [patch];
+  }
+  if (patches.length > 1) {
+    throw new Error("applyPatch only works with a single input.");
+  }
+  return applyStructuredPatch(source, patches[0], options);
+}
+function applyStructuredPatch(source, patch, options = {}) {
+  if (options.autoConvertLineEndings || options.autoConvertLineEndings == null) {
+    if (hasOnlyWinLineEndings(source) && isUnix(patch)) {
+      patch = unixToWin(patch);
+    } else if (hasOnlyUnixLineEndings(source) && isWin(patch)) {
+      patch = winToUnix(patch);
+    }
+  }
+  const lines = source.split("\n"), hunks = patch.hunks, compareLine = options.compareLine || ((lineNumber, line, operation, patchContent) => line === patchContent), fuzzFactor = options.fuzzFactor || 0;
+  let minLine = 0;
+  if (fuzzFactor < 0 || !Number.isInteger(fuzzFactor)) {
+    throw new Error("fuzzFactor must be a non-negative integer");
+  }
+  if (!hunks.length) {
+    return source;
+  }
+  let prevLine = "", removeEOFNL = false, addEOFNL = false;
+  for (let i = 0; i < hunks[hunks.length - 1].lines.length; i++) {
+    const line = hunks[hunks.length - 1].lines[i];
+    if (line[0] == "\\") {
+      if (prevLine[0] == "+") {
+        removeEOFNL = true;
+      } else if (prevLine[0] == "-") {
+        addEOFNL = true;
+      }
+    }
+    prevLine = line;
+  }
+  if (removeEOFNL) {
+    if (addEOFNL) {
+      if (!fuzzFactor && lines[lines.length - 1] == "") {
+        return false;
+      }
+    } else if (lines[lines.length - 1] == "") {
+      lines.pop();
+    } else if (!fuzzFactor) {
+      return false;
+    }
+  } else if (addEOFNL) {
+    if (lines[lines.length - 1] != "") {
+      lines.push("");
+    } else if (!fuzzFactor) {
+      return false;
+    }
+  }
+  function applyHunk(hunkLines, toPos, maxErrors, hunkLinesI = 0, lastContextLineMatched = true, patchedLines = [], patchedLinesLength = 0) {
+    let nConsecutiveOldContextLines = 0;
+    let nextContextLineMustMatch = false;
+    for (; hunkLinesI < hunkLines.length; hunkLinesI++) {
+      const hunkLine = hunkLines[hunkLinesI], operation = hunkLine.length > 0 ? hunkLine[0] : " ", content = hunkLine.length > 0 ? hunkLine.substr(1) : hunkLine;
+      if (operation === "-") {
+        if (compareLine(toPos + 1, lines[toPos], operation, content)) {
+          toPos++;
+          nConsecutiveOldContextLines = 0;
+        } else {
+          if (!maxErrors || lines[toPos] == null) {
+            return null;
+          }
+          patchedLines[patchedLinesLength] = lines[toPos];
+          return applyHunk(hunkLines, toPos + 1, maxErrors - 1, hunkLinesI, false, patchedLines, patchedLinesLength + 1);
+        }
+      }
+      if (operation === "+") {
+        if (!lastContextLineMatched) {
+          return null;
+        }
+        patchedLines[patchedLinesLength] = content;
+        patchedLinesLength++;
+        nConsecutiveOldContextLines = 0;
+        nextContextLineMustMatch = true;
+      }
+      if (operation === " ") {
+        nConsecutiveOldContextLines++;
+        patchedLines[patchedLinesLength] = lines[toPos];
+        if (compareLine(toPos + 1, lines[toPos], operation, content)) {
+          patchedLinesLength++;
+          lastContextLineMatched = true;
+          nextContextLineMustMatch = false;
+          toPos++;
+        } else {
+          if (nextContextLineMustMatch || !maxErrors) {
+            return null;
+          }
+          return lines[toPos] && (applyHunk(hunkLines, toPos + 1, maxErrors - 1, hunkLinesI + 1, false, patchedLines, patchedLinesLength + 1) || applyHunk(hunkLines, toPos + 1, maxErrors - 1, hunkLinesI, false, patchedLines, patchedLinesLength + 1)) || applyHunk(hunkLines, toPos, maxErrors - 1, hunkLinesI + 1, false, patchedLines, patchedLinesLength);
+        }
+      }
+    }
+    patchedLinesLength -= nConsecutiveOldContextLines;
+    toPos -= nConsecutiveOldContextLines;
+    patchedLines.length = patchedLinesLength;
+    return {
+      patchedLines,
+      oldLineLastI: toPos - 1
+    };
+  }
+  const resultLines = [];
+  let prevHunkOffset = 0;
+  for (let i = 0; i < hunks.length; i++) {
+    const hunk = hunks[i];
+    let hunkResult;
+    const maxLine = lines.length - hunk.oldLines + fuzzFactor;
+    let toPos;
+    for (let maxErrors = 0; maxErrors <= fuzzFactor; maxErrors++) {
+      toPos = hunk.oldStart + prevHunkOffset - 1;
+      const iterator = distance_iterator_default(toPos, minLine, maxLine);
+      for (; toPos !== void 0; toPos = iterator()) {
+        hunkResult = applyHunk(hunk.lines, toPos, maxErrors);
+        if (hunkResult) {
+          break;
+        }
+      }
+      if (hunkResult) {
+        break;
+      }
+    }
+    if (!hunkResult) {
+      return false;
+    }
+    for (let i2 = minLine; i2 < toPos; i2++) {
+      resultLines.push(lines[i2]);
+    }
+    for (let i2 = 0; i2 < hunkResult.patchedLines.length; i2++) {
+      const line = hunkResult.patchedLines[i2];
+      resultLines.push(line);
+    }
+    minLine = hunkResult.oldLineLastI + 1;
+    prevHunkOffset = toPos + 1 - hunk.oldStart;
+  }
+  for (let i = minLine; i < lines.length; i++) {
+    resultLines.push(lines[i]);
+  }
+  return resultLines.join("\n");
+}
+
+// ../../node_modules/diff/libesm/patch/reverse.js
+function swapPrefix(fileName) {
+  if (fileName === void 0 || fileName === "/dev/null") {
+    return fileName;
+  }
+  if (fileName.startsWith("a/")) {
+    return "b/" + fileName.slice(2);
+  }
+  if (fileName.startsWith("b/")) {
+    return "a/" + fileName.slice(2);
+  }
+  return fileName;
+}
+function reversePatch(structuredPatch2) {
+  if (Array.isArray(structuredPatch2)) {
+    return structuredPatch2.map((patch) => reversePatch(patch)).reverse();
+  }
+  const reversed = Object.assign(Object.assign({}, structuredPatch2), { oldFileName: structuredPatch2.isGit ? swapPrefix(structuredPatch2.newFileName) : structuredPatch2.newFileName, oldHeader: structuredPatch2.newHeader, newFileName: structuredPatch2.isGit ? swapPrefix(structuredPatch2.oldFileName) : structuredPatch2.oldFileName, newHeader: structuredPatch2.oldHeader, oldMode: structuredPatch2.newMode, newMode: structuredPatch2.oldMode, isCreate: structuredPatch2.isDelete, isDelete: structuredPatch2.isCreate, hunks: structuredPatch2.hunks.map((hunk) => {
+    return {
+      oldLines: hunk.newLines,
+      oldStart: hunk.newStart,
+      newLines: hunk.oldLines,
+      newStart: hunk.oldStart,
+      lines: hunk.lines.map((l) => {
+        if (l.startsWith("-")) {
+          return `+${l.slice(1)}`;
+        }
+        if (l.startsWith("+")) {
+          return `-${l.slice(1)}`;
+        }
+        return l;
+      })
+    };
+  }) });
+  if (structuredPatch2.isCopy) {
+    reversed.newFileName = "/dev/null";
+    reversed.newHeader = void 0;
+    reversed.isDelete = true;
+    delete reversed.isCreate;
+    delete reversed.isCopy;
+    delete reversed.isRename;
+    reversed.hunks = [];
+  }
+  return reversed;
+}
+
+// ../../node_modules/diff/libesm/patch/create.js
+function structuredPatch(oldFileName, newFileName, oldStr, newStr, oldHeader, newHeader, options) {
+  let optionsObj;
+  if (!options) {
+    optionsObj = {};
+  } else if (typeof options === "function") {
+    optionsObj = { callback: options };
+  } else {
+    optionsObj = options;
+  }
+  if (typeof optionsObj.context === "undefined") {
+    optionsObj.context = 4;
+  }
+  const context = optionsObj.context;
+  if (optionsObj.newlineIsToken) {
+    throw new Error("newlineIsToken may not be used with patch-generation functions, only with diffing functions");
+  }
+  if (!optionsObj.callback) {
+    return diffLinesResultToPatch(diffLines(oldStr, newStr, optionsObj));
+  } else {
+    const { callback: callback3 } = optionsObj;
+    diffLines(oldStr, newStr, Object.assign(Object.assign({}, optionsObj), { callback: (diff) => {
+      const patch = diffLinesResultToPatch(diff);
+      callback3(patch);
+    } }));
+  }
+  function diffLinesResultToPatch(diff) {
+    if (!diff) {
+      return;
+    }
+    diff.push({ value: "", lines: [] });
+    function contextLines(lines) {
+      return lines.map(function(entry) {
+        return " " + entry;
+      });
+    }
+    const hunks = [];
+    let oldRangeStart = 0, newRangeStart = 0, curRange = [], oldLine = 1, newLine = 1;
+    for (let i = 0; i < diff.length; i++) {
+      const current = diff[i], lines = current.lines || splitLines(current.value);
+      current.lines = lines;
+      if (current.added || current.removed) {
+        if (!oldRangeStart) {
+          const prev = diff[i - 1];
+          oldRangeStart = oldLine;
+          newRangeStart = newLine;
+          if (prev) {
+            curRange = context > 0 ? contextLines(prev.lines.slice(-context)) : [];
+            oldRangeStart -= curRange.length;
+            newRangeStart -= curRange.length;
+          }
+        }
+        for (const line of lines) {
+          curRange.push((current.added ? "+" : "-") + line);
+        }
+        if (current.added) {
+          newLine += lines.length;
+        } else {
+          oldLine += lines.length;
+        }
+      } else {
+        if (oldRangeStart) {
+          if (lines.length <= context * 2 && i < diff.length - 2) {
+            for (const line of contextLines(lines)) {
+              curRange.push(line);
+            }
+          } else {
+            const contextSize = Math.min(lines.length, context);
+            for (const line of contextLines(lines.slice(0, contextSize))) {
+              curRange.push(line);
+            }
+            const hunk = {
+              oldStart: oldRangeStart,
+              oldLines: oldLine - oldRangeStart + contextSize,
+              newStart: newRangeStart,
+              newLines: newLine - newRangeStart + contextSize,
+              lines: curRange
+            };
+            hunks.push(hunk);
+            oldRangeStart = 0;
+            newRangeStart = 0;
+            curRange = [];
+          }
+        }
+        oldLine += lines.length;
+        newLine += lines.length;
+      }
+    }
+    for (const hunk of hunks) {
+      for (let i = 0; i < hunk.lines.length; i++) {
+        if (hunk.lines[i].endsWith("\n")) {
+          hunk.lines[i] = hunk.lines[i].slice(0, -1);
+        } else {
+          hunk.lines.splice(i + 1, 0, "\\ No newline at end of file");
+          i++;
+        }
+      }
+    }
+    return {
+      oldFileName,
+      newFileName,
+      oldHeader,
+      newHeader,
+      hunks
+    };
+  }
+}
+function splitLines(text) {
+  const hasTrailingNl = text.endsWith("\n");
+  const result3 = text.split("\n").map((line) => line + "\n");
+  if (hasTrailingNl) {
+    result3.pop();
+  } else {
+    result3.push(result3.pop().slice(0, -1));
+  }
+  return result3;
+}
+
+// src/enrichment/file-diff.ts
+import { readFileSync as readFileSync2 } from "fs";
+var MAX_DIFF_LINES = 800;
+var MAX_DIFF_BYTES = 64 * 1024;
+var scratchStore = /* @__PURE__ */ new Map();
+function turnKey(turnNumber, path) {
+  return `${turnNumber} ${path}`;
+}
+function sessionScratch(sessionId) {
+  let m = scratchStore.get(sessionId);
+  if (!m) {
+    m = /* @__PURE__ */ new Map();
+    scratchStore.set(sessionId, m);
+  }
+  return m;
+}
+function clearSession(sessionId) {
+  scratchStore.delete(sessionId);
+}
+function opLabel(toolName) {
+  switch (toolName) {
+    case "Write":
+      return "write";
+    case "MultiEdit":
+      return "edit";
+    case "NotebookEdit":
+      return "edit";
+    case "Edit":
+      return "edit";
+    default:
+      return "edit";
+  }
+}
+function resolvePath(toolInput) {
+  if (!toolInput) return null;
+  const fp = toolInput.file_path ?? toolInput.filePath ?? toolInput.notebook_path;
+  return typeof fp === "string" && fp.length > 0 ? fp : null;
+}
+var readFileSafe = (path) => Effect_exports.match(
+  Effect_exports.try({
+    try: () => readFileSync2(path, "utf-8"),
+    catch: (cause) => cause
+  }),
+  { onFailure: () => null, onSuccess: (s) => s }
+);
+function asHunks(value) {
+  if (!Array.isArray(value)) return null;
+  const hunks = [];
+  for (const h of value) {
+    if (h == null || typeof h !== "object") return null;
+    const rec = h;
+    if (typeof rec.oldStart !== "number" || typeof rec.oldLines !== "number" || typeof rec.newStart !== "number" || typeof rec.newLines !== "number" || !Array.isArray(rec.lines)) {
+      return null;
+    }
+    hunks.push({
+      oldStart: rec.oldStart,
+      oldLines: rec.oldLines,
+      newStart: rec.newStart,
+      newLines: rec.newLines,
+      lines: rec.lines.map((l) => String(l))
+    });
+  }
+  return hunks;
+}
+function extractStructuredPatch(toolResponse) {
+  if (toolResponse == null || typeof toolResponse !== "object") return null;
+  const rec = toolResponse;
+  return asHunks(rec.structuredPatch) ?? asHunks(rec.structured_patch);
+}
+function reverseApply(hunks, current) {
+  try {
+    const patch = {
+      oldFileName: "a",
+      newFileName: "b",
+      oldHeader: void 0,
+      newHeader: void 0,
+      hunks
+    };
+    const reversed = reversePatch(patch);
+    const applied = applyPatch(current, reversed);
+    return applied === false ? null : applied;
+  } catch {
+    return null;
+  }
+}
+function reverseStringReplace(current, toolInput) {
+  if (!toolInput) return null;
+  const oldString = toolInput.old_string ?? toolInput.oldString;
+  const newString = toolInput.new_string ?? toolInput.newString;
+  if (typeof oldString !== "string" || typeof newString !== "string") return null;
+  const replaceAll = toolInput.replace_all === true || toolInput.replaceAll === true;
+  if (newString.length === 0) {
+    return null;
+  }
+  if (replaceAll) {
+    return current.split(newString).join(oldString);
+  }
+  const idx = current.indexOf(newString);
+  if (idx === -1) return null;
+  return current.slice(0, idx) + oldString + current.slice(idx + newString.length);
+}
+function countLines(hunks) {
+  let added = 0;
+  let removed = 0;
+  for (const h of hunks) {
+    for (const line of h.lines) {
+      if (line.startsWith("+")) added++;
+      else if (line.startsWith("-")) removed++;
+    }
+  }
+  return { added, removed };
+}
+function totalLines(hunks) {
+  return hunks.reduce((acc, h) => acc + h.lines.length, 0);
+}
+function buildFileDiff(path, ops, baseline, current) {
+  const editCount = ops.length;
+  let hunks = null;
+  try {
+    const sp = structuredPatch("a", "b", baseline, current);
+    hunks = asHunks(sp.hunks);
+  } catch {
+    hunks = null;
+  }
+  const status = baseline.length === 0 && current.length > 0 ? "created" : current.length === 0 && baseline.length > 0 ? "deleted" : "modified";
+  if (hunks == null) {
+    return { path, ops, editCount, status, added: 0, removed: 0, hunks: null, truncated: false };
+  }
+  const { added, removed } = countLines(hunks);
+  const tooManyLines = totalLines(hunks) > MAX_DIFF_LINES;
+  const tooManyBytes = JSON.stringify(hunks).length > MAX_DIFF_BYTES;
+  if (tooManyLines || tooManyBytes) {
+    return { path, ops, editCount, status, added, removed, hunks: null, truncated: true };
+  }
+  return { path, ops, editCount, status, added, removed, hunks, truncated: false };
+}
+function upsertEditedFile(turn, file) {
+  const idx = turn.editedFiles.findIndex((f) => f.path === file.path);
+  if (idx >= 0) {
+    turn.editedFiles[idx] = file;
+  } else {
+    turn.editedFiles.push(file);
+  }
+}
+function recordEdit(session, turnNumber, toolName, toolInput, toolResponse) {
+  return Effect_exports.gen(function* () {
+    const path = resolvePath(toolInput);
+    if (!path) return [];
+    const turn = session.turns.find((t) => t.turnNumber === turnNumber);
+    if (!turn) return [];
+    const scratch = sessionScratch(session.sessionId);
+    const key = turnKey(turnNumber, path);
+    const existing = scratch.get(key);
+    const op = opLabel(toolName);
+    const onDisk = yield* readFileSafe(path);
+    if (existing) {
+      existing.ops.push(op);
+      if (onDisk != null) existing.current = onDisk;
+      const file2 = buildFileDiff(path, existing.ops, existing.baseline, existing.current);
+      upsertEditedFile(turn, file2);
+      return [{ op: "update_turn_file", turnNumber, file: file2 }];
+    }
+    const respRec = toolResponse != null && typeof toolResponse === "object" ? toolResponse : void 0;
+    const isWriteCreate = toolName === "Write" && (respRec?.type === "create" || // Write-create: no prior content recorded and the structuredPatch
+    // is empty (Claude Code emits `[]` for a fresh-file Write).
+    Array.isArray(respRec?.structuredPatch) && respRec.structuredPatch.length === 0);
+    const current = onDisk != null ? onDisk : typeof respRec?.content === "string" ? respRec.content : null;
+    if (current == null) {
+      const file2 = {
+        path,
+        ops: [op],
+        editCount: 1,
+        status: "modified",
+        added: 0,
+        removed: 0,
+        hunks: null,
+        truncated: false
+      };
+      upsertEditedFile(turn, file2);
+      return [{ op: "update_turn_file", turnNumber, file: file2 }];
+    }
+    let baseline;
+    if (isWriteCreate) {
+      baseline = "";
+    } else {
+      const patchHunks = extractStructuredPatch(toolResponse);
+      baseline = (patchHunks ? reverseApply(patchHunks, current) : null) ?? reverseStringReplace(current, toolInput);
+    }
+    if (baseline == null) {
+      scratch.set(key, { baseline: current, current, ops: [op] });
+      const file2 = {
+        path,
+        ops: [op],
+        editCount: 1,
+        status: "modified",
+        added: 0,
+        removed: 0,
+        hunks: null,
+        truncated: false
+      };
+      upsertEditedFile(turn, file2);
+      return [{ op: "update_turn_file", turnNumber, file: file2 }];
+    }
+    scratch.set(key, { baseline, current, ops: [op] });
+    const file = buildFileDiff(path, [op], baseline, current);
+    upsertEditedFile(turn, file);
+    return [{ op: "update_turn_file", turnNumber, file }];
+  });
+}
+
 // src/handlers/event-handler.ts
+var EDIT_TOOLS = /* @__PURE__ */ new Set([
+  "Edit",
+  "Write",
+  "MultiEdit",
+  "NotebookEdit"
+]);
 function shortModelName(modelId) {
   if (modelId.includes("opus")) return "opus";
   if (modelId.includes("sonnet")) return "sonnet";
@@ -104245,6 +105443,7 @@ var handleSessionEnd = (ctx) => Effect_exports.gen(function* () {
   const store = yield* Effect_exports.service(SessionStore);
   const session = store.get(ctx.sessionId);
   if (!session) return [];
+  clearSession(ctx.sessionId);
   return sessionEnd(session);
 });
 var handleUserPromptSubmit = (ctx) => Effect_exports.gen(function* () {
@@ -104459,6 +105658,20 @@ var handlePostToolUse = (ctx) => Effect_exports.gen(function* () {
   patches.push(
     ...trackTask(session, "PostToolUse", toolName, ctx.data.tool_input, toolUseId || "", toolResponse)
   );
+  if (EDIT_TOOLS.has(toolName) && toolUseId) {
+    const tool = findTool(session, toolUseId);
+    if (tool && tool.status === "done") {
+      patches.push(
+        ...yield* recordEdit(
+          session,
+          tool.turn,
+          toolName,
+          ctx.data.tool_input,
+          toolResponse
+        )
+      );
+    }
+  }
   if (toolName === "AskUserQuestion" && toolUseId) {
     const answer = extractAskAnswer(toolResponse);
     patches.push(...updatePromptAnswer(session, toolUseId, answer));
@@ -106210,6 +107423,7 @@ var program = Effect_exports.gen(function* () {
       const stored = store.appendPatches(sessionId, patches);
       const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
       terminals.signalChanged("session", sessionId, seq);
+      logMsg(`Pi driver: ${patches.length} patches for ${result3.hookEvent}, signaled session seq=${seq}`);
     }
     const hasStatusPatch = patches.some(
       (p) => p.op === "set_claude_status" || p.op === "set_status"
@@ -106344,7 +107558,7 @@ var program = Effect_exports.gen(function* () {
     const attemptRead = (attempt = 0) => {
       if (piDrivers.get(sessionId) !== driver) return;
       try {
-        const { readFileSync: readFileSync2 } = __require("fs");
+        const { readFileSync: readFileSync3 } = __require("fs");
         let branch = null;
         try {
           const fd = __require("fs").openSync(sessionFile, "r");
@@ -106578,7 +107792,8 @@ var program = Effect_exports.gen(function* () {
   const piSessionPrompt = (sessionId, text, images) => {
     const d = getPiDriver(sessionId, "pi.prompt");
     if (!d) return;
-    d.prompt(text, images).catch((err) => {
+    logMsg(`pi.prompt: forwarding to driver session=${sessionId} text_len=${text.length}`);
+    d.prompt(text, images).then(() => logMsg(`pi.prompt: sent to pi session=${sessionId}`)).catch((err) => {
       logMsg(`pi.prompt error: ${err.message}`, "error");
     });
   };

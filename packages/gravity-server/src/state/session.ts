@@ -99,6 +99,7 @@ export function createTurnNode(turnNumber: number): TurnNode {
     stopReason: null,
     tokenIn: null,
     tokenOut: null,
+    editedFiles: [],
   };
 }
 
@@ -665,6 +666,11 @@ export function trackFile(s: Session, toolName: string, toolInput: Record<string
   switch (toolName) {
     case "Read": path = toolInput.file_path as string; op = "read"; break;
     case "Edit": path = toolInput.file_path as string; op = "edit"; break;
+    case "MultiEdit": path = toolInput.file_path as string; op = "edit"; break;
+    case "NotebookEdit":
+      path = (toolInput.notebook_path ?? toolInput.file_path) as string;
+      op = "edit";
+      break;
     case "Write": path = toolInput.file_path as string; op = "write"; break;
     default: return [];
   }

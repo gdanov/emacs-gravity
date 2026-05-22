@@ -16,6 +16,8 @@ export type {
   AgentLocation,
   Task,
   FileEntry,
+  FileDiff,
+  StructuredPatchHunk,
   Plan,
   PromptEntry,
 

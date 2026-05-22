@@ -868,6 +868,24 @@ SESSION-JSON is an alist from json-parse-string."
             :ignored nil
             :allow-patterns nil))))
 
+(defun claude-gravity--json-file-diff-to-alist (file-json)
+  "Convert a JSON FileDiff object to a file-diff alist.
+FILE-JSON has fields path/ops/editCount/status/added/removed/hunks/truncated.
+`hunks' may be JSON null — coerced to nil; otherwise kept as a list of hunk
+alists (the exact shape `claude-gravity--insert-structured-patch' renders)."
+  (let* ((jnil #'claude-gravity--jnil)
+         (hunks (funcall jnil (alist-get 'hunks file-json))))
+    (list (cons 'path (alist-get 'path file-json))
+          (cons 'ops (claude-gravity--as-list
+                      (funcall jnil (alist-get 'ops file-json))))
+          (cons 'editCount (or (funcall jnil (alist-get 'editCount file-json)) 0))
+          (cons 'status (or (funcall jnil (alist-get 'status file-json))
+                            "modified"))
+          (cons 'added (or (funcall jnil (alist-get 'added file-json)) 0))
+          (cons 'removed (or (funcall jnil (alist-get 'removed file-json)) 0))
+          (cons 'hunks (and hunks (claude-gravity--as-list hunks)))
+          (cons 'truncated (eq (alist-get 'truncated file-json) t)))))
+
 (defun claude-gravity--json-turn-to-alist (turn-json)
   "Convert a JSON TurnNode to turn alist."
   (let* ((jnil #'claude-gravity--jnil)
@@ -875,6 +893,8 @@ SESSION-JSON is an alist from json-parse-string."
          (steps-json (or (funcall jnil (alist-get 'steps turn-json)) nil))
          (agents-json (or (funcall jnil (alist-get 'agents turn-json)) nil))
          (tasks-json (or (funcall jnil (alist-get 'tasks turn-json)) nil))
+         (edited-files-json (or (funcall jnil (alist-get 'editedFiles turn-json))
+                                nil))
          (steps-tl (claude-gravity--tlist-new))
          (agents-tl (claude-gravity--tlist-new)))
     ;; Convert steps
@@ -892,6 +912,11 @@ SESSION-JSON is an alist from json-parse-string."
           (cons 'steps steps-tl)
           (cons 'agents agents-tl)
           (cons 'tasks (mapcar #'claude-gravity--json-task-to-alist tasks-json))
+          ;; Pre-allocated edited-files key — populated from snapshot here
+          ;; and upserted later by `update_turn_file' patches.
+          (cons 'edited-files
+                (mapcar #'claude-gravity--json-file-diff-to-alist
+                        (claude-gravity--as-list edited-files-json)))
           (cons 'tool-count (or (alist-get 'toolCount turn-json) 0))
           (cons 'agent-count (or (alist-get 'agentCount turn-json) 0))
           (cons 'frozen (eq (alist-get 'frozen turn-json) t))
@@ -1376,6 +1401,27 @@ MSG contains sessionId and patches array."
               (task-json (alist-get 'task patch))
               (task (claude-gravity--json-task-to-alist task-json)))
          (puthash task-id task (plist-get session :tasks))))
+
+      ("update_turn_file"
+       ;; Upsert one file's consolidated per-turn diff. Replace the
+       ;; same-`path' entry in the turn's `edited-files' list, else
+       ;; append. Idempotent — safe to re-apply on resync.
+       (let* ((turn-num (alist-get 'turnNumber patch))
+              (file-json (alist-get 'file patch))
+              (turn-node (claude-gravity--get-turn-node session turn-num)))
+         (when (and turn-node file-json)
+           (let* ((fd (claude-gravity--json-file-diff-to-alist file-json))
+                  (path (alist-get 'path fd))
+                  (existing (alist-get 'edited-files turn-node))
+                  (found nil))
+             (dolist (e existing)
+               (when (equal (alist-get 'path e) path)
+                 (setq found e)))
+             (if found
+                 ;; Replace existing entry in place by mutating its conses.
+                 (setcdr found (cdr fd))
+               (setf (alist-get 'edited-files turn-node)
+                     (append existing (list fd))))))))
 
       ("track_file"
        (let* ((path (alist-get 'path patch))

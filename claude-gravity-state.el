@@ -320,6 +320,11 @@ only touch a small section of the buffer."
         (cons 'steps (claude-gravity--tlist-new))
         (cons 'agents (claude-gravity--tlist-new))
         (cons 'tasks nil)
+        ;; `edited-files' is a plain list of file-diff alists, upserted by
+        ;; `update_turn_file' patches.  Pre-allocated to nil so later
+        ;; `setf (alist-get 'edited-files ...)' mutates in place (the
+        ;; documented setf-on-a-new-key pitfall — see CLAUDE.md / MEMORY).
+        (cons 'edited-files nil)
         (cons 'tool-count 0)
         (cons 'agent-count 0)
         (cons 'frozen nil)

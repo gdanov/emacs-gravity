@@ -38,6 +38,7 @@ import {
   finalizeLastPrompt,
   addTool,
   completeTool,
+  findTool,
   updateToolPartial,
   addCompaction,
   addAgent,
@@ -48,7 +49,16 @@ import {
   finalizeTurnTokens,
   updatePromptAnswer,
 } from "../state/session.js";
+import { recordEdit, clearSession as clearFileDiffScratch } from "../enrichment/file-diff.js";
 import type { Socket } from "net";
+
+/** Edit-class tools whose effect is rolled up into per-turn file diffs. */
+const EDIT_TOOLS: ReadonlySet<string> = new Set([
+  "Edit",
+  "Write",
+  "MultiEdit",
+  "NotebookEdit",
+]);
 
 // ── Pure helpers (no Effect wrapping needed) ─────────────────────────
 
@@ -204,6 +214,8 @@ const handleSessionEnd = (ctx: EventContext) =>
     const store = yield* Effect.service(SessionStore);
     const session = store.get(ctx.sessionId);
     if (!session) return [];
+    // Drop per-turn file-diff scratch (full file contents) for this session.
+    clearFileDiffScratch(ctx.sessionId);
     return sessionEnd(session);
   });
 
@@ -487,6 +499,26 @@ const handlePostToolUse = (ctx: EventContext) =>
     patches.push(
       ...trackTask(session, "PostToolUse", toolName, ctx.data.tool_input as Record<string, unknown>, toolUseId || "", toolResponse),
     );
+
+    // Per-turn consolidated file diff. `recordEdit` consumes the RAW
+    // `toolResponse` (with `structuredPatch` intact) — `completeTool` above
+    // strips bloated result fields from the STORED result, but the local
+    // `toolResponse` reference is untouched. Use the completed tool's turn
+    // number (the tool carries `.turn`).
+    if (EDIT_TOOLS.has(toolName) && toolUseId) {
+      const tool = findTool(session, toolUseId);
+      if (tool && tool.status === "done") {
+        patches.push(
+          ...(yield* recordEdit(
+            session,
+            tool.turn,
+            toolName,
+            ctx.data.tool_input as Record<string, unknown>,
+            toolResponse,
+          )),
+        );
+      }
+    }
 
     if (toolName === "AskUserQuestion" && toolUseId) {
       const answer = extractAskAnswer(toolResponse);

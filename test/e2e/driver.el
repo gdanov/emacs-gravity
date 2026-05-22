@@ -73,6 +73,30 @@ between tries, until non-nil or TIMEOUT seconds. Returns t/nil."
              (goto-char (point-min))
              (and (re-search-forward regexp nil t) t))))))
 
+(defun cge--show-section-tree (section)
+  "Recursively `magit-section-show' SECTION and all descendants.
+Showing a section runs its (possibly deferred) washer, which inserts
+children whose own washers must then be run — hence the post-order
+recursion AFTER showing."
+  (magit-section-show section)
+  (dolist (child (oref section children))
+    (cge--show-section-tree child)))
+
+(defun cge-expand-all-match (name-regexp)
+  "Recursively expand every magit-section in the first buffer matching
+NAME-REGEXP. Frozen turns defer their children to a washer that only
+runs when the section is shown; expanding forces those washers so a
+subsequent dump captures the full transcript. Two passes — the first
+runs turn washers (inserting Edited Files etc.), the second expands the
+newly-materialised subsections. Returns t, or nil if no buffer matched."
+  (let ((b (cge--first-matching name-regexp)))
+    (and b
+         (with-current-buffer b
+           (when (and (boundp 'magit-root-section) magit-root-section)
+             (cge--show-section-tree magit-root-section)
+             (cge--show-section-tree magit-root-section))
+           t))))
+
 (defun cge-dump (buffer path)
   "Write BUFFER's text (no properties) to PATH. Returns t (empty file
 if the buffer is absent, so the runner can still assert)."

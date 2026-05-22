@@ -209,5 +209,134 @@
           (should (= 999 (alist-get 'id dispatched))))
       nil)))
 
+;;; Per-turn edited-files tests
+
+(defun cg-test--file-diff-patch (turn path &rest overrides)
+  "Build an `update_turn_file' patch alist for TURN and PATH.
+OVERRIDES is a plist merged into the `file' object (keys: ops added
+removed status editCount hunks truncated)."
+  `((op . "update_turn_file")
+    (turnNumber . ,turn)
+    (file . ((path . ,path)
+             (ops . ,(or (plist-get overrides :ops) ["edit"]))
+             (editCount . ,(or (plist-get overrides :editCount) 1))
+             (status . ,(or (plist-get overrides :status) "modified"))
+             (added . ,(or (plist-get overrides :added) 0))
+             (removed . ,(or (plist-get overrides :removed) 0))
+             (hunks . ,(if (plist-member overrides :hunks)
+                           (plist-get overrides :hunks)
+                         :null))
+             (truncated . ,(if (plist-get overrides :truncated) t :false))))))
+
+(ert-deftest cg-test-update-turn-file-insert-and-replace ()
+  "`update_turn_file' inserts a file entry, then replaces by path."
+  (let ((sid "turn-file-test-1"))
+    (cg-test--fresh-session sid)
+    (let ((session (cg-test--get sid)))
+      ;; Need a turn for turnNumber 1
+      (let ((turn (claude-gravity--make-turn-node 1)))
+        (claude-gravity--tlist-append (plist-get session :turns) turn)
+        (claude-gravity--index-turn session turn))
+      ;; First patch — inserts
+      (claude-gravity--apply-patch
+       session (cg-test--file-diff-patch 1 "a.el" :added 10 :removed 2))
+      (let* ((turn (claude-gravity--get-turn-node session 1))
+             (files (alist-get 'edited-files turn)))
+        (should (= 1 (length files)))
+        (should (equal "a.el" (alist-get 'path (car files))))
+        (should (= 10 (alist-get 'added (car files)))))
+      ;; Second patch, same path — replaces (not append)
+      (claude-gravity--apply-patch
+       session (cg-test--file-diff-patch 1 "a.el" :added 30 :removed 5
+                                         :editCount 3))
+      (let* ((turn (claude-gravity--get-turn-node session 1))
+             (files (alist-get 'edited-files turn)))
+        (should (= 1 (length files)))
+        (should (= 30 (alist-get 'added (car files))))
+        (should (= 3 (alist-get 'editCount (car files)))))
+      ;; Third patch, different path — appends
+      (claude-gravity--apply-patch
+       session (cg-test--file-diff-patch 1 "b.el" :added 1 :removed 1))
+      (let* ((turn (claude-gravity--get-turn-node session 1))
+             (files (alist-get 'edited-files turn)))
+        (should (= 2 (length files)))
+        (should (equal '("a.el" "b.el")
+                       (mapcar (lambda (f) (alist-get 'path f)) files)))))))
+
+(defun cg-test--render-edited-files (turn)
+  "Render TURN's edited-files section into a temp buffer; return plain text."
+  (require 'claude-gravity-render)
+  (with-temp-buffer
+    (magit-insert-section (root)
+      (claude-gravity--insert-turn-edited-files turn))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(ert-deftest cg-test-render-turn-edited-files-heading ()
+  "Rendering a turn's edited files emits the heading with aggregate counts."
+  (let ((turn (claude-gravity--make-turn-node 1)))
+    (setf (alist-get 'edited-files turn)
+          (list '((path . "claude-gravity-ui.el")
+                  (ops . ("edit" "edit"))
+                  (editCount . 2) (status . "modified")
+                  (added . 88) (removed . 20)
+                  (hunks . nil) (truncated . nil))
+                '((path . "session.ts")
+                  (ops . ("write"))
+                  (editCount . 1) (status . "created")
+                  (added . 43) (removed . 22)
+                  (hunks . nil) (truncated . nil))))
+    (let ((rendered (cg-test--render-edited-files turn)))
+      (should (string-match-p "Edited Files (2)" rendered))
+      ;; Aggregate: 88+43 added, 20+22 removed
+      (should (string-match-p "+131" rendered))
+      (should (string-match-p "−42" rendered))
+      ;; Per-file: created status shown instead of edit count
+      (should (string-match-p "created" rendered))
+      (should (string-match-p "2 edits" rendered))
+      (should (string-match-p "claude-gravity-ui.el" rendered))
+      (should (string-match-p "session.ts" rendered)))))
+
+(ert-deftest cg-test-render-turn-edited-files-nil-hunks ()
+  "A file-diff with nil hunks renders path-only without error."
+  (let ((turn (claude-gravity--make-turn-node 1)))
+    (setf (alist-get 'edited-files turn)
+          (list '((path . "no-diff.el")
+                  (ops . ("edit"))
+                  (editCount . 1) (status . "modified")
+                  (added . 0) (removed . 0)
+                  (hunks . nil) (truncated . nil))))
+    (let ((rendered (cg-test--render-edited-files turn)))
+      (should (string-match-p "no-diff.el" rendered))
+      (should (string-match-p "diff unavailable" rendered))))
+  ;; truncated with nil hunks → "diff too large"
+  (let ((turn2 (claude-gravity--make-turn-node 2)))
+    (setf (alist-get 'edited-files turn2)
+          (list '((path . "huge.el")
+                  (ops . ("edit"))
+                  (editCount . 1) (status . "modified")
+                  (added . 9999) (removed . 8888)
+                  (hunks . nil) (truncated . t))))
+    (let ((rendered2 (cg-test--render-edited-files turn2)))
+      (should (string-match-p "diff too large" rendered2)))))
+
+(ert-deftest cg-test-render-turn-edited-files-with-hunks ()
+  "A file-diff with hunks renders the structured patch."
+  (let ((turn (claude-gravity--make-turn-node 1)))
+    (setf (alist-get 'edited-files turn)
+          (list `((path . "patched.el")
+                  (ops . ("edit"))
+                  (editCount . 1) (status . "modified")
+                  (added . 1) (removed . 1)
+                  (hunks . (((oldStart . 10) (oldLines . 2)
+                             (newStart . 10) (newLines . 2)
+                             (lines . (" context"
+                                       "-old line"
+                                       "+new line")))))
+                  (truncated . nil))))
+    (let ((rendered (cg-test--render-edited-files turn)))
+      (should (string-match-p "patched.el" rendered))
+      (should (string-match-p (regexp-quote "@@ -10,2 +10,2 @@") rendered))
+      (should (string-match-p "Diff:" rendered)))))
+
 (provide 'claude-gravity-test)
 ;;; claude-gravity-test.el ends here

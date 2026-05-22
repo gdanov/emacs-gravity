@@ -633,6 +633,79 @@ Aborted markers render dimmer."
                summary nil 'claude-gravity-detail-label))))))))
 
 
+(defun claude-gravity--format-diff-counts (added removed)
+  "Format ADDED/REMOVED line counts as a propertized \"+A −B\" string."
+  (concat (propertize (format "+%d" (or added 0))
+                      'face 'claude-gravity-diff-added)
+          " "
+          (propertize (format "−%d" (or removed 0))
+                      'face 'claude-gravity-diff-removed)))
+
+
+(defun claude-gravity--insert-turn-edited-files (turn-node)
+  "Insert the \"Edited Files\" subsection for TURN-NODE.
+Renders one collapsible entry per file in the turn's `edited-files'
+list, each showing the consolidated baseline->final diff.  The header
+aggregates +added/-removed across every file.  Does nothing when the
+turn edited no files."
+  (let ((files (alist-get 'edited-files turn-node)))
+    (when (and files (> (length files) 0))
+      (let ((total-added 0)
+            (total-removed 0))
+        (dolist (fd files)
+          (cl-incf total-added (or (alist-get 'added fd) 0))
+          (cl-incf total-removed (or (alist-get 'removed fd) 0)))
+        (magit-insert-section (turn-edited-files nil t)
+          (magit-insert-heading
+            (format "%sEdited Files (%d)  %s"
+                    (claude-gravity--indent)
+                    (length files)
+                    (claude-gravity--format-diff-counts total-added
+                                                        total-removed)))
+          (dolist (fd files)
+            (let* ((path (or (alist-get 'path fd) "?"))
+                   (status (or (alist-get 'status fd) "modified"))
+                   (added (or (alist-get 'added fd) 0))
+                   (removed (or (alist-get 'removed fd) 0))
+                   (edit-count (or (alist-get 'editCount fd) 0))
+                   (hunks (alist-get 'hunks fd))
+                   (truncated (alist-get 'truncated fd))
+                   ;; created/deleted statuses replace the edit count
+                   (count-str
+                    (pcase status
+                      ("created" (propertize "created"
+                                             'face 'claude-gravity-diff-added))
+                      ("deleted" (propertize "deleted"
+                                             'face 'claude-gravity-diff-removed))
+                      (_ (propertize (format "%d edit%s" edit-count
+                                             (if (= edit-count 1) "" "s"))
+                                     'face 'claude-gravity-detail-label)))))
+              (magit-insert-section (turn-file-diff path t)
+                (magit-insert-heading
+                  (format "%s%s  %s  %s"
+                          (claude-gravity--indent)
+                          (propertize path 'face 'claude-gravity-tool-name)
+                          (claude-gravity--format-diff-counts added removed)
+                          count-str))
+                (cond
+                 ;; Consolidated diff available — reuse the structured-patch
+                 ;; renderer (server emits the exact hunk shape it consumes).
+                 (hunks
+                  (claude-gravity--insert-structured-patch hunks "Diff:"))
+                 ;; Diff dropped for size — point the user at the file.
+                 (truncated
+                  (insert (claude-gravity--indent)
+                          (propertize "diff too large — open the file"
+                                      'face 'claude-gravity-detail-label)
+                          "\n"))
+                 ;; Diff could not be computed.
+                 (t
+                  (insert (claude-gravity--indent)
+                          (propertize "diff unavailable"
+                                      'face 'claude-gravity-detail-label)
+                          "\n")))))))))))
+
+
 (defun claude-gravity-insert-turns (session)
   "Insert unified turns section for SESSION.
 Iterates the :turns tree directly — no grouping or hash construction needed."
@@ -670,7 +743,8 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                           (format "%s  %s"
                                   (propertize "Pre-prompt activity" 'face 'claude-gravity-detail-label)
                                   (claude-gravity--turn-counts-from-node turn-node)))
-                        (claude-gravity--insert-turn-children-from-tree turn-node))
+                        (claude-gravity--insert-turn-children-from-tree turn-node)
+                        (claude-gravity--insert-turn-edited-files turn-node))
                       (claude-gravity--insert-stop-text turn-node)
                       ;; Turn-0 markers use sentinel -1 (no user turn yet).
                       (claude-gravity--insert-compactions-for-turn compactions -1))
@@ -752,6 +826,7 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                                  (oset sec hidden t))
                                         (claude-gravity--insert-turn-children-from-tree tn)
                                         (claude-gravity--insert-agent-completions ta)
+                                        (claude-gravity--insert-turn-edited-files tn)
                                         (claude-gravity--insert-stop-text tn)
                                         (claude-gravity--insert-compactions-for-turn
                                          cm (alist-get 'turn-number tn)))))
@@ -765,7 +840,8 @@ Iterates the :turns tree directly — no grouping or hash construction needed."
                                   (propertize elapsed-str 'face 'claude-gravity-detail-label)
                                   (claude-gravity--format-turn-tokens turn-node)))
                         (claude-gravity--insert-turn-children-from-tree turn-node)
-                        (claude-gravity--insert-agent-completions turn-agents))
+                        (claude-gravity--insert-agent-completions turn-agents)
+                        (claude-gravity--insert-turn-edited-files turn-node))
                       (claude-gravity--insert-stop-text turn-node)
                       (claude-gravity--insert-compactions-for-turn compactions turn-num))))))))
         (insert "\n")))))

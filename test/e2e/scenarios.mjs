@@ -6,7 +6,7 @@
 
 import { replay } from "./inject.mjs";
 import { join } from "path";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -526,6 +526,226 @@ export const scenarios = [
       const finalAdds = countAddTurnsForSid();
       ctx.assert(finalAdds >= prompts.length,
         `server emitted ≥ ${prompts.length} add_turn ops across the multi-turn pi session (got ${finalAdds})`);
+    },
+  },
+
+  // ── S9: per-turn edited-files consolidated diff ──────────────────────
+  // Drives the per-turn edited-files feature end-to-end. One turn edits
+  // file A three times and file B once. The server reads each edited
+  // file's CURRENT content from disk on every PostToolUse, reconstructs
+  // the turn baseline by reverse-applying the FIRST edit's structuredPatch,
+  // and emits `update_turn_file` patches carrying a consolidated FileDiff.
+  //
+  // The core assertion: file A — edited 3× — renders ONE consolidated diff
+  // V0→V3 (original `alpha`/`beta`/`gamma` removed, final `ALPHA`/`BETA`/
+  // `GAMMA` added), NOT three stacked per-edit diffs.
+  {
+    name: "edited-files-consolidated-diff",
+    async run(ctx) {
+      const sid = "s9-edited-files";
+      const fileA = join(ctx.RUN, "fileA.txt");
+      const fileB = join(ctx.RUN, "fileB.txt");
+
+      // Tiny 3-line files keep the hand-written first-edit hunk trivial.
+      // A: V0=alpha/beta/gamma → V1 → V2 → V3=ALPHA/BETA/GAMMA.
+      const A0 = "alpha\nbeta\ngamma\n";
+      const A1 = "alpha\nBETA\ngamma\n";
+      const A2 = "alpha\nBETA\nGAMMA\n";
+      const A3 = "ALPHA\nBETA\nGAMMA\n";
+      const B0 = "one\ntwo\nthree\n";
+      const B1 = "one\nTWO\nthree\n";
+
+      // First-edit hunk for A: baseline(V0) → V1. The server reverse-
+      // applies this against the on-disk content to reconstruct V0.
+      const aFirstHunk = [{
+        oldStart: 1, oldLines: 3, newStart: 1, newLines: 3,
+        lines: [" alpha", "-beta", "+BETA", " gamma"],
+      }];
+      // First-edit hunk for B: baseline(B0) → B1.
+      const bFirstHunk = [{
+        oldStart: 1, oldLines: 3, newStart: 1, newLines: 3,
+        lines: [" one", "-two", "+TWO", " three"],
+      }];
+
+      // Find file A's client-side edited-files entry across all turns.
+      // Returns the editCount, or -1 if no entry exists yet.
+      const aEntryEditCount = () => {
+        const form = `(let ((ec -1))
+          (let ((s (gethash ${JSON.stringify(sid)} claude-gravity--sessions)))
+            (when s
+              (dolist (tn (claude-gravity--tlist-items (plist-get s :turns)))
+                (dolist (fd (alist-get 'edited-files tn))
+                  (when (equal (alist-get 'path fd) ${JSON.stringify(fileA)})
+                    (setq ec (or (alist-get 'editCount fd) 0)))))))
+          ec)`;
+        return parseInt(ctx.emacs(form), 10);
+      };
+      // Predicate string for cge-wait: file A's editCount reached N.
+      const aCountReached = (n) =>
+        `(let ((ec -1))
+           (let ((s (gethash ${JSON.stringify(sid)} claude-gravity--sessions)))
+             (when s
+               (dolist (tn (claude-gravity--tlist-items (plist-get s :turns)))
+                 (dolist (fd (alist-get 'edited-files tn))
+                   (when (equal (alist-get 'path fd) ${JSON.stringify(fileA)})
+                     (setq ec (or (alist-get 'editCount fd) 0)))))))
+           (= ec ${n}))`;
+
+      // (1) Start a session + one turn.
+      await replay(ctx.HOOK, [
+        { event: "SessionStart", data: { slug: "edited", cwd: "/work/proj" } },
+        { event: "UserPromptSubmit", data: { prompt: "refactor fileA" } },
+      ], { session_id: sid, cwd: "/work/proj" });
+      ctx.emacs("(cge-poll)");
+      ctx.assert(ctx.emacsT(`(cge-wait "(gethash \\"${sid}\\" claude-gravity--sessions)" 5)`),
+        "edited-files session reached the live client");
+
+      // Open the session detail buffer up front (creates the buffer so
+      // `claude-gravity--render-session-buffer` has somewhere to render).
+      ctx.emacsT(`(progn (claude-gravity-open-session ${JSON.stringify(sid)}) t)`);
+      ctx.emacs("(cge-pump 0.3)");
+
+      // (2) Edit file A three times in this one turn. For each edit i:
+      // write the post-edit version to disk FIRST (the server reads
+      // file_path off disk at PostToolUse), then inject Pre/PostToolUse,
+      // then wait until the client's editCount == i before the next write
+      // (avoids the race where the server reads a too-new file version).
+      const aVersions = [A1, A2, A3];
+      for (let i = 1; i <= 3; i++) {
+        writeFileSync(fileA, aVersions[i - 1]);
+        const tid = `s9-a-${i}`;
+        // Edit 1 carries the real baseline→V1 hunk; edits 2/3 carry [] —
+        // the algorithm only reverse-applies the FIRST edit's patch.
+        const structuredPatch = i === 1 ? aFirstHunk : [];
+        await replay(ctx.HOOK, [
+          { event: "PreToolUse", data: { tool_name: "Edit", tool_use_id: tid,
+              tool_input: { file_path: fileA } } },
+          { event: "PostToolUse", data: { tool_name: "Edit", tool_use_id: tid,
+              tool_input: { file_path: fileA },
+              tool_response: { filePath: fileA, structuredPatch } } },
+        ], { session_id: sid, cwd: "/work/proj" });
+
+        let reached = false;
+        for (let k = 0; k < 20 && !reached; k++) {
+          ctx.emacs("(cge-poll)");
+          reached = ctx.emacsT(`(cge-wait ${JSON.stringify(aCountReached(i))} 0.4)`);
+        }
+        ctx.assert(reached,
+          `file A edit ${i}: client-side edited-files entry reached editCount=${i}`);
+      }
+
+      // (3) Edit file B once in the SAME turn.
+      writeFileSync(fileB, B1);
+      await replay(ctx.HOOK, [
+        { event: "PreToolUse", data: { tool_name: "Edit", tool_use_id: "s9-b-1",
+            tool_input: { file_path: fileB } } },
+        { event: "PostToolUse", data: { tool_name: "Edit", tool_use_id: "s9-b-1",
+            tool_input: { file_path: fileB },
+            tool_response: { filePath: fileB, structuredPatch: bFirstHunk } } },
+      ], { session_id: sid, cwd: "/work/proj" });
+
+      // (4) Stop the turn.
+      await replay(ctx.HOOK, [
+        { event: "Stop", data: {} },
+      ], { session_id: sid, cwd: "/work/proj" });
+
+      // Pull the final state so the B patch + Stop land on the client.
+      let bArrived = false;
+      for (let k = 0; k < 20 && !bArrived; k++) {
+        ctx.emacs("(cge-poll)");
+        bArrived = ctx.emacsT(
+          `(cge-wait "(let ((s (gethash \\"${sid}\\" claude-gravity--sessions)) (n 0))
+             (when s (dolist (tn (claude-gravity--tlist-items (plist-get s :turns)))
+               (setq n (+ n (length (alist-get 'edited-files tn))))))
+             (>= n 2))" 0.4)`);
+      }
+
+      // (5a) The turn's client-side edited-files has 2 entries; file A == 3.
+      const editCountA = aEntryEditCount();
+      ctx.assert(editCountA === 3,
+        `file A's client-side edited-files entry reports editCount=3 (got ${editCountA})`);
+
+      const totalEntries = parseInt(ctx.emacs(
+        `(let ((s (gethash ${JSON.stringify(sid)} claude-gravity--sessions)) (n 0))
+           (when s (dolist (tn (claude-gravity--tlist-items (plist-get s :turns)))
+             (setq n (+ n (length (alist-get 'edited-files tn))))))
+           n)`), 10);
+      ctx.assert(totalEntries === 2,
+        `the turn has exactly 2 edited-files entries — A and B (got ${totalEntries})`);
+
+      // (5b) Render the session detail buffer (like S6/S7) and assert the
+      // "Edited Files (2)" subsection renders.
+      ctx.emacs(`(progn (claude-gravity--render-session-buffer
+                          (gethash ${JSON.stringify(sid)} claude-gravity--sessions))
+                        (cge-pump 0.4) t)`);
+      // The turn is frozen after Stop, so its children (incl. the Edited
+      // Files subsection) are deferred to a magit washer that only runs
+      // when the section is shown. Force-expand everything before dumping.
+      ctx.emacsT(`(cge-expand-all-match "\\\\*Claude: refactor fileA")`);
+      ctx.emacs("(cge-pump 0.3)");
+      // The session detail buffer is named after the session label, which
+      // is the first prompt's text ("refactor fileA").
+      const detail = dumpMatch(ctx, `\\*Claude: refactor fileA`);
+      ctx.assert(/Edited Files \(2\)/.test(detail),
+        "session detail shows the 'Edited Files (2)' subsection");
+      ctx.assert(detail.includes(fileA) && detail.includes(fileB),
+        "both edited files (A and B) render in the subsection");
+
+      // Scope assertions to the "Edited Files" subsection — the per-tool
+      // inline diffs (under each Edit tool) coexist in the same buffer and
+      // we must not accidentally match those when proving the roll-up.
+      const efIdx = detail.indexOf("Edited Files (2)");
+      const efSection = efIdx >= 0 ? detail.slice(efIdx) : "";
+      // file A's entry text = from its path line up to file B's path line.
+      const aIdx = efSection.indexOf(fileA + "  ");
+      const bIdx = efSection.indexOf(fileB + "  ");
+      const aEntry = aIdx >= 0 && bIdx > aIdx
+        ? efSection.slice(aIdx, bIdx) : "";
+      const bEntry = bIdx >= 0 ? efSection.slice(bIdx) : "";
+
+      // (5c) THE CORE REQUIREMENT: file A shows ONE consolidated diff
+      // baseline→final (V0→V3). The structured-patch renderer merges a
+      // removed line and its replacement onto one physical line (word-
+      // level refinement lives in faces, stripped by the no-properties
+      // dump) — so V0→V3 renders as `alphaALPHA` / `betaBETA` / `gammaGAMMA`.
+      // All three appear in ONE hunk: this IS the net V0→V3 change, not a
+      // stack of three per-edit diffs.
+      ctx.assert(/alphaALPHA/.test(aEntry),
+        "file A's consolidated diff carries the V0→V3 change for line 1 (alpha→ALPHA)");
+      ctx.assert(/betaBETA/.test(aEntry),
+        "file A's consolidated diff carries beta→BETA");
+      ctx.assert(/gammaGAMMA/.test(aEntry),
+        "file A's consolidated diff carries gamma→GAMMA");
+      ctx.assert(/3 edits/.test(aEntry),
+        "file A's entry shows the '3 edits' label");
+
+      // ONE consolidated diff, not three stacked per-edit diffs: file A's
+      // entry contains exactly ONE `@@` hunk header. Three separate per-
+      // edit diffs would yield three. And `betaBETA` — the V1 change that
+      // would repeat in every naive per-edit diff — appears exactly once.
+      const aHunks = (aEntry.match(/^\s*@@ /mg) || []).length;
+      ctx.assert(aHunks === 1,
+        `file A renders ONE consolidated hunk, not per-edit diffs (got ${aHunks} '@@' headers)`);
+      const betaCount = (aEntry.match(/betaBETA/g) || []).length;
+      ctx.assert(betaCount === 1,
+        `file A's consolidated diff is V0→V3, not stacked — 'betaBETA' appears once (got ${betaCount})`);
+
+      // (5d) File B's single-edit entry renders too.
+      ctx.assert(/1 edit\b/.test(bEntry),
+        "file B's entry shows the '1 edit' label");
+      ctx.assert(/twoTWO/.test(bEntry),
+        "file B's single-edit consolidated diff shows two→TWO");
+
+      // Server emitted update_turn_file patches (one per edit = 4 total).
+      const sp = ctx.proxyMessages().filter((m) =>
+        m.dir === "s2c" && m.msg?.type === "session-patches"
+        && m.msg?.sessionId === sid);
+      const utfCount = sp.length
+        ? (sp[sp.length - 1].msg.patches || [])
+            .filter((p) => p.op === "update_turn_file").length
+        : 0;
+      ctx.assert(utfCount >= 4,
+        `server emitted ≥ 4 update_turn_file patches (3 for A + 1 for B; got ${utfCount})`);
     },
   },
 ];

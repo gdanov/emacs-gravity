@@ -284,6 +284,14 @@ export interface TurnNode {
    * a stop reason).
    */
   stopReason: string | null;
+  /**
+   * Net file changes made during this turn. One entry per file edited
+   * (Edit/Write/MultiEdit/NotebookEdit), each carrying a single
+   * consolidated baseline→final diff regardless of how many times the
+   * file was edited. Populated incrementally via `update_turn_file`
+   * patches; empty until the first edit-class tool completes.
+   */
+  editedFiles: FileDiff[];
 }
 
 export interface StepNode {
@@ -357,6 +365,48 @@ export interface FileEntry {
   lastTouched: number;
 }
 
+/**
+ * One hunk of a unified diff, in the same shape as the `structuredPatch`
+ * field of Claude Code's Edit/Write tool results and jsdiff's
+ * `structuredPatch()` output. Each entry of `lines` is prefixed with
+ * " " (context), "-" (removed), or "+" (added).
+ */
+export interface StructuredPatchHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];
+}
+
+/**
+ * One file's net change within a single turn. When a file is edited
+ * multiple times in a turn, `hunks` holds a single consolidated diff —
+ * the file content before the turn's first edit (baseline) versus the
+ * content after the last edit (final) — never a stack of per-edit diffs.
+ */
+export interface FileDiff {
+  /** Absolute path of the edited file. */
+  path: string;
+  /** Edit-class tool ops applied this turn, in order, e.g. ["edit","edit","write"]. */
+  ops: string[];
+  /** Number of edit-class tool calls that touched this file this turn. */
+  editCount: number;
+  status: "created" | "modified" | "deleted";
+  /** Lines added across the consolidated diff. */
+  added: number;
+  /** Lines removed across the consolidated diff. */
+  removed: number;
+  /**
+   * Consolidated baseline→final diff. Null when the diff could not be
+   * computed (e.g. NotebookEdit with no usable patch, unreadable file)
+   * or was elided for size — terminals then render the entry path-only.
+   */
+  hunks: StructuredPatchHunk[] | null;
+  /** True when `hunks` was elided because the diff exceeded the size cap. */
+  truncated: boolean;
+}
+
 export interface Plan {
   content: string;
   filePath: string | null;
@@ -416,6 +466,7 @@ export type Patch =
   | { op: "complete_agent"; agentId: string; stopText?: string; stopThinking?: string; duration?: number; transcriptPath?: string }
   | { op: "update_task"; taskId: string; task: Task }
   | { op: "track_file"; path: string; fileOp: string }
+  | { op: "update_turn_file"; turnNumber: number; file: FileDiff }
   | { op: "add_prompt"; turnNumber: number; prompt: PromptEntry }
   | { op: "set_prompt_answer"; turnNumber: number; toolUseId: string; answer: string }
   | { op: "set_pi_commands"; commands: PiCommandDescriptor[] }

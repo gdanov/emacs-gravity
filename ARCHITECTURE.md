@@ -200,6 +200,7 @@ type Patch =
   | { op: "complete_agent"; agentId: string; stopText?: string; stopThinking?: string; duration?: number; transcriptPath?: string }
   | { op: "update_task"; taskId: string; task: Task }
   | { op: "track_file"; path: string; fileOp: string }
+  | { op: "update_turn_file"; turnNumber: number; file: FileDiff }
   | { op: "add_prompt"; turnNumber: number; prompt: PromptEntry }
   | { op: "set_prompt_answer"; turnNumber: number; toolUseId: string; answer: string }
 ```
