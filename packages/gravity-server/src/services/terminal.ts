@@ -17,6 +17,13 @@ export interface TerminalConnection {
   writeQueue: string[];
   /** True when socket.write() returned false (buffer full). */
   draining: boolean;
+  /**
+   * Whether the last `inbox-items` reply sent to this connection was
+   * non-empty. Lets `poll` send one empty `inbox-items` when the inbox
+   * transitions to empty — so read-only clients (menu bar) clear their
+   * attention indicator — without re-sending empty arrays on every poll.
+   */
+  inboxWasNonEmpty: boolean;
 }
 
 export interface TerminalService {
@@ -95,6 +102,7 @@ export function makeTerminal(logFn?: (msg: string, level?: string) => void): Ter
         capabilities: new Set(),
         writeQueue: [],
         draining: false,
+        inboxWasNonEmpty: false,
       };
       connections.push(conn);
 

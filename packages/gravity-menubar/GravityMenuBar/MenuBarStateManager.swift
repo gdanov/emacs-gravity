@@ -10,6 +10,9 @@ public class MenuBarStateManager {
     public private(set) var inboxItems: [InboxInfo] = []
     public private(set) var iconState: MenuBarIconState = .disconnected
     public private(set) var noticeText: String? = nil
+    /// Set when the server reports a protocol-version mismatch. Persistent
+    /// (the client must be rebuilt/relaunched) — not auto-cleared like notices.
+    public private(set) var protocolWarning: String? = nil
 
     // MARK: - Internal state (visible for testing via @testable import)
 
@@ -31,6 +34,7 @@ public class MenuBarStateManager {
     public func updateIconState() {
         let newState: MenuBarIconState
         if !connected { newState = .disconnected }
+        else if protocolWarning != nil { newState = .protocolMismatch }
         else if !inboxItems.isEmpty || noticeText != nil { newState = .attention }
         else if justFinished { newState = .justFinished }
         else if hasResponding { newState = .responding }
@@ -55,6 +59,8 @@ public class MenuBarStateManager {
         justFinished = false
         hasResponding = false
         previousStatuses = [:]
+        // Re-evaluated on the next reconnect's hello/handshake.
+        protocolWarning = nil
         updateIconState()
         onStateChange?()
     }
@@ -244,6 +250,15 @@ public class MenuBarStateManager {
 
         case "notice":
             noticeText = msg.text
+            updateIconState()
+
+        case "protocol.mismatch":
+            // Persistent warning: this menu bar binary is out of date relative
+            // to the server. Surface it prominently and keep it until reconnect.
+            let server = msg.serverVersion.map(String.init) ?? "?"
+            let client = msg.clientVersion.map(String.init) ?? "?"
+            protocolWarning = msg.text ?? "Protocol mismatch (server v\(server), this app v\(client)). Rebuild and relaunch the menu bar app."
+            NSLog("gravity-menubar: protocol mismatch — server=v%@ client=v%@", server, client)
             updateIconState()
 
         // Pull mode handlers

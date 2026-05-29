@@ -477,6 +477,22 @@ export type Patch =
 // Newline-delimited JSON over Unix domain socket.
 // WebSocket upgrade path for web terminals later.
 
+/**
+ * Terminal ⇄ server protocol version. Bump on any breaking change to the
+ * message shapes or delivery model.
+ *
+ * History:
+ *  - 1 — push era: server proactively broadcast session.update / inbox.added.
+ *  - 2 — pull-only: server emits `state-changed` signals; clients `poll`.
+ *
+ * Clients send this in their `hello`. A client that omits it (or sends a
+ * lower number) is treated as legacy: the server logs a warning and replies
+ * with a `protocol.mismatch` message so the client can surface it. This is
+ * how a stale, long-running client (e.g. a menu bar app never relaunched
+ * after a protocol change) gets flagged instead of silently degrading.
+ */
+export const PROTOCOL_VERSION = 2;
+
 /** Areas of state that can change on the server. */
 export type ChangedArea = "session" | "inbox" | "overview" | "notice";
 
@@ -507,6 +523,13 @@ export type ServerPushMessage =
   | { type: "overview.snapshot"; projects: ProjectSummary[] }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string }
   /**
+   * Sent once, right after `hello`, when the client's `protocolVersion`
+   * does not match the server's {@link PROTOCOL_VERSION}. Distinct from
+   * `notice` because it is a persistent condition (the client must be
+   * rebuilt/relaunched) — terminals should keep showing it, not auto-clear.
+   */
+  | { type: "protocol.mismatch"; serverVersion: number; clientVersion: number; text: string }
+  /**
    * Pi session lifecycle signal. Out-of-band from the patch stream — used by
    * terminals to track the latest pi session id without waiting for a full
    * snapshot, and to surface server-side rejections.
@@ -527,7 +550,7 @@ export type ServerMessage = ServerPushMessage | ServerSignalMessage;
 
 /** Messages from terminal to server. */
 export type TerminalMessage =
-  | { type: "hello"; capabilities: string[] }
+  | { type: "hello"; capabilities: string[]; protocolVersion?: number }
   | { type: "action.permission"; itemId: number; decision: "allow" | "deny"; message?: string; updatedPermissions?: unknown[] }
   | { type: "action.question"; itemId: number; answers: string[] }
   | { type: "action.plan-review"; itemId: number; decision: "allow" | "deny"; feedback?: PlanFeedback }

@@ -48,6 +48,9 @@ export type {
   HookSocketResponse,
 } from "./types.js";
 
+// Protocol version (runtime value — must be a value export, not `export type`)
+export { PROTOCOL_VERSION } from "./types.js";
+
 export { isSafeBashCommand } from "./safe-bash.js";
 
 // Services

@@ -44,6 +44,12 @@
 (defvar claude-gravity--client-subscribed-sessions (make-hash-table :test 'equal)
   "Set of session IDs we've requested detail for.")
 
+(defconst claude-gravity--protocol-version 2
+  "Terminal <-> server protocol version.
+Must match `PROTOCOL_VERSION' in packages/shared/src/types.ts.  Sent in the
+`hello' handshake; the server replies with `protocol.mismatch' if it speaks
+a different version.")
+
 (defvar claude-gravity--pull-mode nil
   "Non-nil when using pull-based protocol (GRAVITY_PULL_MODE=true on server).")
 
@@ -261,8 +267,9 @@ PROC is the process, EVENT is the status change."
                              claude-gravity-server-terminal-sock)
         ;; Declare capabilities and request overview on connect
         (claude-gravity--send-to-server
-         '((type . "hello")
-           (capabilities . ["action.permission" "action.question" "action.plan-review"])))
+         `((type . "hello")
+           (capabilities . ["action.permission" "action.question" "action.plan-review"])
+           (protocolVersion . ,claude-gravity--protocol-version)))
         ;; In pull mode, we use request.resync to get initial state
         ;; In push mode, we request overview and then session details
         (claude-gravity--send-to-server '((type . "request.resync")))
@@ -743,8 +750,24 @@ Accumulates partial data in a buffer and processes complete newline-delimited JS
        (claude-gravity--handle-state-changed msg))
       ("pi.session"
        (claude-gravity--handle-pi-session msg))
+      ("protocol.mismatch"
+       (claude-gravity--handle-protocol-mismatch msg))
       (_
        (claude-gravity--log 'warn "Unknown server message type: %s" type)))))
+
+(defun claude-gravity--handle-protocol-mismatch (msg)
+  "Warn the user that this client's protocol version differs from the server.
+MSG is the parsed `protocol.mismatch' message.  Indicates this Emacs client
+is out of date relative to gravity-server and should be reloaded."
+  (let ((server-version (alist-get 'serverVersion msg))
+        (client-version (alist-get 'clientVersion msg))
+        (text (claude-gravity--jnil (alist-get 'text msg))))
+    (claude-gravity--log 'warn "Protocol mismatch: server=v%s client=v%s — %s"
+                         server-version client-version (or text ""))
+    (message "claude-gravity: %s"
+             (or text
+                 (format "Protocol mismatch (server v%s, this client v%s). Reload claude-gravity."
+                         server-version client-version)))))
 
 
 ;;; ── JSON null handling ──────────────────────────────────────────────

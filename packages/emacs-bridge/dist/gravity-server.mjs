@@ -103255,6 +103255,88 @@ var flatMapEager2 = flatMapEager;
 var catchEager2 = catchEager;
 var fnUntracedEager2 = fnUntracedEager;
 
+// ../shared/src/types.ts
+var PROTOCOL_VERSION = 2;
+
+// ../shared/src/safe-bash.ts
+import { basename } from "path";
+
+// ../shared/src/services/errors.ts
+var FileReadError = class extends Data_exports.TaggedError("FileReadError") {
+};
+var FileWriteError = class extends Data_exports.TaggedError("FileWriteError") {
+};
+
+// ../shared/src/services/fs.ts
+import {
+  readFileSync,
+  writeFileSync,
+  appendFileSync,
+  existsSync,
+  statSync,
+  openSync,
+  readSync,
+  closeSync,
+  mkdirSync,
+  unlinkSync,
+  renameSync
+} from "fs";
+var Fs = ServiceMap_exports.Service("Fs");
+var FsLive = Layer_exports.succeed(Fs, {
+  readFile: (path) => Effect_exports.try({
+    try: () => readFileSync(path, "utf-8"),
+    catch: (cause) => new FileReadError({ path, cause })
+  }),
+  writeFile: (path, data) => Effect_exports.try({
+    try: () => {
+      writeFileSync(path, data, "utf-8");
+    },
+    catch: (cause) => new FileWriteError({ path, cause })
+  }),
+  appendFile: (path, data) => Effect_exports.try({
+    try: () => {
+      appendFileSync(path, data, "utf-8");
+    },
+    catch: (cause) => new FileWriteError({ path, cause })
+  }),
+  exists: (path) => Effect_exports.sync(() => existsSync(path)),
+  stat: (path) => Effect_exports.try({
+    try: () => {
+      const s = statSync(path);
+      return { size: s.size };
+    },
+    catch: (cause) => new FileReadError({ path, cause })
+  }),
+  readBytes: (path, offset, length) => Effect_exports.try({
+    try: () => {
+      const fd = openSync(path, "r");
+      const buf = Buffer.alloc(length);
+      readSync(fd, buf, 0, length, offset);
+      closeSync(fd);
+      return buf;
+    },
+    catch: (cause) => new FileReadError({ path, cause })
+  }),
+  mkdirp: (path) => Effect_exports.try({
+    try: () => {
+      mkdirSync(path, { recursive: true });
+    },
+    catch: (cause) => new FileWriteError({ path, cause })
+  }),
+  unlinkIfExists: (path) => Effect_exports.sync(() => {
+    try {
+      unlinkSync(path);
+    } catch {
+    }
+  }),
+  rename: (from, to) => Effect_exports.try({
+    try: () => {
+      renameSync(from, to);
+    },
+    catch: (cause) => new FileWriteError({ path: from, cause })
+  })
+});
+
 // src/protocol/messages.ts
 var VALID_TERMINAL_MESSAGE_TYPES = /* @__PURE__ */ new Set([
   "hello",
@@ -103282,6 +103364,18 @@ var VALID_TERMINAL_MESSAGE_TYPES = /* @__PURE__ */ new Set([
   "pi.refresh-commands",
   "pi.refresh-models"
 ]);
+function helloProtocolVersion(msg) {
+  const raw = msg.protocolVersion;
+  return typeof raw === "number" ? raw : 0;
+}
+function protocolMismatch(clientVersion) {
+  if (clientVersion === PROTOCOL_VERSION) return null;
+  const text = clientVersion < PROTOCOL_VERSION ? `This client speaks protocol v${clientVersion} but the server is v${PROTOCOL_VERSION}. It is out of date and may miss inbox/question updates \u2014 rebuild and relaunch it (e.g. \`make menubar\`).` : `This client speaks protocol v${clientVersion} but the server is only v${PROTOCOL_VERSION}. Update gravity-server (e.g. \`make restart-server\`).`;
+  return { serverVersion: PROTOCOL_VERSION, clientVersion, text };
+}
+function shouldSendInboxOnPoll(itemCount, wasNonEmpty) {
+  return itemCount > 0 || wasNonEmpty;
+}
 function isHookMessage(obj) {
   return typeof obj.event === "string" && typeof obj.session_id === "string";
 }
@@ -103538,85 +103632,6 @@ function makeInbox() {
   };
 }
 var InboxLive = Layer_exports.succeed(Inbox, makeInbox());
-
-// ../shared/src/safe-bash.ts
-import { basename } from "path";
-
-// ../shared/src/services/errors.ts
-var FileReadError = class extends Data_exports.TaggedError("FileReadError") {
-};
-var FileWriteError = class extends Data_exports.TaggedError("FileWriteError") {
-};
-
-// ../shared/src/services/fs.ts
-import {
-  readFileSync,
-  writeFileSync,
-  appendFileSync,
-  existsSync,
-  statSync,
-  openSync,
-  readSync,
-  closeSync,
-  mkdirSync,
-  unlinkSync,
-  renameSync
-} from "fs";
-var Fs = ServiceMap_exports.Service("Fs");
-var FsLive = Layer_exports.succeed(Fs, {
-  readFile: (path) => Effect_exports.try({
-    try: () => readFileSync(path, "utf-8"),
-    catch: (cause) => new FileReadError({ path, cause })
-  }),
-  writeFile: (path, data) => Effect_exports.try({
-    try: () => {
-      writeFileSync(path, data, "utf-8");
-    },
-    catch: (cause) => new FileWriteError({ path, cause })
-  }),
-  appendFile: (path, data) => Effect_exports.try({
-    try: () => {
-      appendFileSync(path, data, "utf-8");
-    },
-    catch: (cause) => new FileWriteError({ path, cause })
-  }),
-  exists: (path) => Effect_exports.sync(() => existsSync(path)),
-  stat: (path) => Effect_exports.try({
-    try: () => {
-      const s = statSync(path);
-      return { size: s.size };
-    },
-    catch: (cause) => new FileReadError({ path, cause })
-  }),
-  readBytes: (path, offset, length) => Effect_exports.try({
-    try: () => {
-      const fd = openSync(path, "r");
-      const buf = Buffer.alloc(length);
-      readSync(fd, buf, 0, length, offset);
-      closeSync(fd);
-      return buf;
-    },
-    catch: (cause) => new FileReadError({ path, cause })
-  }),
-  mkdirp: (path) => Effect_exports.try({
-    try: () => {
-      mkdirSync(path, { recursive: true });
-    },
-    catch: (cause) => new FileWriteError({ path, cause })
-  }),
-  unlinkIfExists: (path) => Effect_exports.sync(() => {
-    try {
-      unlinkSync(path);
-    } catch {
-    }
-  }),
-  rename: (from, to) => Effect_exports.try({
-    try: () => {
-      renameSync(from, to);
-    },
-    catch: (cause) => new FileWriteError({ path: from, cause })
-  })
-});
 
 // src/state/session.ts
 var BLOATED_RESULT_FIELDS = ["structured_patch"];
@@ -106133,7 +106148,8 @@ function makeTerminal(logFn) {
         subscribedSessions: /* @__PURE__ */ new Set(),
         capabilities: /* @__PURE__ */ new Set(),
         writeQueue: [],
-        draining: false
+        draining: false,
+        inboxWasNonEmpty: false
       };
       connections.push(conn);
       socket.on("close", () => {
@@ -107919,7 +107935,13 @@ var program = Effect_exports.gen(function* () {
         if (Array.isArray(caps)) {
           conn.capabilities = new Set(caps.filter((c) => typeof c === "string"));
         }
-        logMsg(`Terminal hello: capabilities=[${[...conn.capabilities].join(",")}]`);
+        const clientVersion = helloProtocolVersion(msg);
+        logMsg(`Terminal hello: capabilities=[${[...conn.capabilities].join(",")}] protocol=v${clientVersion}`);
+        const mismatch = protocolMismatch(clientVersion);
+        if (mismatch) {
+          logMsg(`Protocol mismatch: client=v${mismatch.clientVersion} server=v${mismatch.serverVersion} caps=[${[...conn.capabilities].join(",")}] \u2014 ${mismatch.text}`, "warn");
+          terminals.sendTo(conn, { type: "protocol.mismatch", ...mismatch });
+        }
         break;
       }
       case "request.overview": {
@@ -107932,9 +107954,10 @@ var program = Effect_exports.gen(function* () {
       case "poll": {
         sendOverview(conn);
         const items = inbox.all();
-        if (items.length > 0) {
+        if (shouldSendInboxOnPoll(items.length, conn.inboxWasNonEmpty)) {
           terminals.sendTo(conn, { type: "inbox-items", items });
         }
+        conn.inboxWasNonEmpty = items.length > 0;
         for (const sessionId of conn.subscribedSessions) {
           const session = store.get(sessionId);
           if (session) {

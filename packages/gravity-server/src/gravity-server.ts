@@ -14,7 +14,7 @@ import { pathToFileURL } from "url";
 import { Effect, Layer } from "effect";
 
 import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
-import { parseTerminalMessage, isHookMessage } from "./protocol/messages.js";
+import { parseTerminalMessage, isHookMessage, helloProtocolVersion, protocolMismatch, shouldSendInboxOnPoll } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
 import { MermaidRpcServer } from "./handlers/mermaid-rpc-server.js";
 import { sessionEnd, setCost, setContextUsage, setPiCommands, setPiModels, updateMeta } from "./state/session.js";
@@ -926,7 +926,13 @@ const program = Effect.gen(function* () {
         if (Array.isArray(caps)) {
           conn.capabilities = new Set(caps.filter((c): c is string => typeof c === "string"));
         }
-        logMsg(`Terminal hello: capabilities=[${[...conn.capabilities].join(",")}]`);
+        const clientVersion = helloProtocolVersion(msg);
+        logMsg(`Terminal hello: capabilities=[${[...conn.capabilities].join(",")}] protocol=v${clientVersion}`);
+        const mismatch = protocolMismatch(clientVersion);
+        if (mismatch) {
+          logMsg(`Protocol mismatch: client=v${mismatch.clientVersion} server=v${mismatch.serverVersion} caps=[${[...conn.capabilities].join(",")}] — ${mismatch.text}`, "warn");
+          terminals.sendTo(conn, { type: "protocol.mismatch", ...mismatch });
+        }
         break;
       }
 
@@ -942,9 +948,15 @@ const program = Effect.gen(function* () {
         // Pull mode: client requests current state
         sendOverview(conn);
         const items = inbox.all();
-        if (items.length > 0) {
+        // Send inbox-items while non-empty, AND once when it transitions to
+        // empty, so read-only clients (menu bar) clear their attention
+        // indicator promptly. Without the transition send, an emptied inbox
+        // is never communicated via poll and the indicator lingers until the
+        // next reconnect/resync. Avoid re-sending empty arrays every poll.
+        if (shouldSendInboxOnPoll(items.length, conn.inboxWasNonEmpty)) {
           terminals.sendTo(conn, { type: "inbox-items", items });
         }
+        conn.inboxWasNonEmpty = items.length > 0;
         for (const sessionId of conn.subscribedSessions) {
           const session = store.get(sessionId);
           if (session) {
