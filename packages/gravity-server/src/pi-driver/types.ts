@@ -52,19 +52,62 @@ export interface TurnEndEvent extends PiBaseEvent {
   turn_id: string;
 }
 
-/** Agent started (after user prompt submitted). */
+/**
+ * Pi 0.74 sends a bare `{type: "agent_start"}`. Older drafts of this type
+ * declared a `message` field — pi never actually emitted that shape; the
+ * user prompt arrives in a subsequent `message_start` with role "user".
+ */
 export interface AgentStartEvent extends PiBaseEvent {
   type: "agent_start";
-  message: {
-    role: "user";
-    content: Array<{ type: "text"; text: string } | { type: "input_image"; source: { type: "url"; url: string } }>;
-  };
 }
 
-/** Agent finished (all turns complete). */
+/**
+ * One assistant message from pi's `agent_end.messages[]`.
+ *
+ * Pi 0.74 emits the agent run's full message list on `agent_end`. The
+ * trailing `AssistantMessage` carries the final stop reason; the sum of
+ * `usage` across assistant messages is the agent run's total token cost.
+ * See pi `docs/session.md` for the full message-type union.
+ */
+export interface PiAssistantMessage {
+  role: "assistant";
+  content?: unknown;
+  api?: string;
+  provider?: string;
+  model?: string;
+  usage?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    totalTokens?: number;
+    cost?: unknown;
+  };
+  stopReason?: "stop" | "length" | "toolUse" | "error" | "aborted";
+  errorMessage?: string;
+  timestamp?: number;
+}
+
+/** Any message in `agent_end.messages[]`. */
+export interface PiAgentMessage {
+  role: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Agent finished one prompt cycle (not the whole session).
+ *
+ * Pi 0.74 wire shape is `{ messages: AgentMessage[] }`. The legacy
+ * `result: { type, error, usage }` fields are NOT emitted by pi 0.74 — they
+ * are retained on this type for defensive parsing only, in case pi reverts
+ * to that shape on a future version. The translator walks `messages` for
+ * usage and stopReason; do not read `result`.
+ */
 export interface AgentEndEvent extends PiBaseEvent {
   type: "agent_end";
-  result: {
+  messages?: PiAgentMessage[];
+  // Legacy / defensive — pi 0.74 does not emit these.
+  result?: {
     type: "success" | "error" | "aborted";
     error?: string;
     usage?: {
@@ -76,35 +119,127 @@ export interface AgentEndEvent extends PiBaseEvent {
   };
 }
 
-/** Tool execution started. */
+/**
+ * Tool execution started.
+ *
+ * Pi 0.74 emits camelCase fields (`toolCallId`, `toolName`, `args`). The
+ * snake_case variants are kept as optional for defensive parsing if pi
+ * ever changes back — translator code reads both.
+ *
+ * `needs_response` is a forward-compat placeholder; pi 0.74 does not emit
+ * it and the adapter does not currently consume it. See design/pi-adapter.md
+ * "Feature Parity with Claude Code".
+ */
 export interface ToolExecutionStartEvent extends PiBaseEvent {
   type: "tool_execution_start";
-  tool_call_id: string;
-  tool_name: string;
-  tool_input: Record<string, unknown>;
-  needs_response?: boolean; // true for permission/request tools
+  toolCallId?: string;
+  toolName?: string;
+  args?: Record<string, unknown>;
+  // Legacy / defensive
+  tool_call_id?: string;
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  needs_response?: boolean;
 }
 
-/** Tool execution completed. */
+/**
+ * Tool execution completed.
+ *
+ * Pi 0.74 emits `{toolCallId, toolName, result, isError, error?}`. The
+ * snake_case variants are kept as optional for defensive parsing.
+ */
 export interface ToolExecutionEndEvent extends PiBaseEvent {
   type: "tool_execution_end";
-  tool_call_id: string;
-  tool_name: string;
-  tool_result: unknown;
+  toolCallId?: string;
+  toolName?: string;
+  result?: unknown;
+  isError?: boolean;
   error?: string;
+  // Legacy / defensive
+  tool_call_id?: string;
+  tool_name?: string;
+  tool_result?: unknown;
 }
 
-/** Model selected (logged on startup). */
+/**
+ * Pi emits this between `tool_execution_start` and `tool_execution_end`
+ * for streaming partial results (e.g. bash output as the command runs).
+ *
+ * Pi 0.74 wire shape per `docs/json.md`:
+ *   `{ toolCallId, toolName, args, partialResult }`
+ *
+ * The legacy `partial` field is retained for defensive parsing.
+ *
+ * `partialResult`'s shape is tool-specific. For bash it's typically the
+ * accumulated stdout/stderr buffer up to the moment the update was
+ * emitted; for other tools it can be any partial structure pi chooses
+ * to expose.
+ */
+export interface ToolExecutionUpdateEvent extends PiBaseEvent {
+  type: "tool_execution_update";
+  toolCallId?: string;
+  toolName?: string;
+  args?: Record<string, unknown>;
+  partialResult?: unknown;
+  // Legacy / defensive
+  partial?: unknown;
+  tool_call_id?: string;
+}
+
+/**
+ * Model selected. Pi emits this via the extension event channel (see
+ * pi-coding-agent source `agent-session.ts:_extensionRunner.emit({type:
+ * "model_select", ...})`), not as a core session event in `docs/rpc.md`.
+ * Handler retained defensively; harmless if pi never surfaces it on
+ * stdout in RPC mode.
+ */
 export interface ModelSelectEvent extends PiBaseEvent {
   type: "model_select";
   model: string;
   provider: string;
 }
 
-/** Message update (text or thinking delta, or status change). */
+/**
+ * Pi 0.74 emits `message_start` as a full snapshot of one message. For
+ * `role: "user"` it carries the prompt text. For `role: "assistant"` the
+ * text streams in via `message_update` events and this snapshot is a
+ * no-op for our purposes.
+ */
+export interface MessageStartEvent extends PiBaseEvent {
+  type: "message_start";
+  message?: {
+    role?: "user" | "assistant" | "system";
+    // Per pi docs/session.md, UserMessage.content is
+    //   `string | (TextContent | ImageContent)[]`.
+    // Accept both shapes; the translator handles them.
+    content?: string | Array<{ type?: string; text?: string }>;
+  };
+}
+
+/** Counterpart to `message_start`; we don't act on it. */
+export interface MessageEndEvent extends PiBaseEvent {
+  type: "message_end";
+  message?: unknown;
+}
+
+/**
+ * Streaming update inside an assistant message.
+ *
+ * Pi 0.74 uses `assistantMessageEvent`; older drafts of these types used
+ * the inner field name `message_update`. Both shapes are accepted by the
+ * translator.
+ */
 export interface MessageUpdateEvent extends PiBaseEvent {
   type: "message_update";
-  message_update: {
+  assistantMessageEvent?: {
+    type?: "text_delta" | "thinking_delta" | "status" | string;
+    delta?: string;
+    contentIndex?: number;
+    partial?: unknown;
+    status?: "in_progress" | "done" | "error";
+  };
+  // Legacy / defensive
+  message_update?: {
     type: "text_delta" | "thinking_delta" | "status";
     delta?: string;
     status?: "in_progress" | "done" | "error";
@@ -118,6 +253,135 @@ export interface ErrorEvent extends PiBaseEvent {
   code?: string;
 }
 
+/**
+ * Git branch changed (pi emits this when the user switches branches).
+ * Updates the accumulator's branch field so the next SessionStart
+ * carries the correct value.
+ *
+ * Not in pi's documented event vocabulary (`docs/rpc.md` session events)
+ * — sourced from pi's extension event channel. Handler retained
+ * defensively; harmless if pi never emits it.
+ */
+export interface BranchUpdateEvent extends PiBaseEvent {
+  type: "branch_update";
+  /** Git branch name, or null when leaving a git repo. */
+  branch: string | null;
+}
+
+/**
+ * Pending steering / follow-up queue changed. Informational; gravity
+ * doesn't currently surface the queue. See `docs/rpc.md` `queue_update`.
+ */
+export interface QueueUpdateEvent extends PiBaseEvent {
+  type: "queue_update";
+  steering?: string[];
+  followUp?: string[];
+}
+
+/**
+ * Compaction begins. Pi is about to summarize and discard older
+ * conversation history to free context window space.
+ *
+ * `reason` is `"manual"`, `"threshold"`, or `"overflow"`. Compaction can
+ * fire between turns or mid-stream during a long tool loop.
+ */
+export interface CompactionStartEvent extends PiBaseEvent {
+  type: "compaction_start";
+  reason?: "manual" | "threshold" | "overflow" | string;
+}
+
+/**
+ * Compaction completes. Pi has replaced older history with a summary.
+ * The session's cumulative token totals (from `get_session_stats`) are
+ * unaffected — compaction only resets the model's context window, not
+ * the historical token cost. `tokensBefore` records what was discarded.
+ */
+export interface CompactionEndEvent extends PiBaseEvent {
+  type: "compaction_end";
+  reason?: "manual" | "threshold" | "overflow" | string;
+  aborted?: boolean;
+  willRetry?: boolean;
+  result?: {
+    summary?: string;
+    firstKeptEntryId?: string;
+    tokensBefore?: number;
+    details?: unknown;
+  };
+}
+
+/**
+ * Auto-retry begins after a transient provider error (overloaded, rate
+ * limit, 5xx). Informational — gravity could surface as a status
+ * indicator but currently just logs.
+ */
+export interface AutoRetryStartEvent extends PiBaseEvent {
+  type: "auto_retry_start";
+  attempt?: number;
+  maxAttempts?: number;
+  delayMs?: number;
+  errorMessage?: string;
+}
+
+/** Auto-retry completes. `success` reports the outcome. */
+export interface AutoRetryEndEvent extends PiBaseEvent {
+  type: "auto_retry_end";
+  success?: boolean;
+  attempt?: number;
+  finalError?: string;
+}
+
+/** An extension threw an error. Logged; no gravity surface. */
+export interface ExtensionErrorEvent extends PiBaseEvent {
+  type: "extension_error";
+  extensionPath?: string;
+  event?: string;
+  error?: string;
+}
+
+/**
+ * Pi extension UI request — extensions can call `ctx.ui.select`,
+ * `ctx.ui.confirm`, `ctx.ui.input`, `ctx.ui.editor`, etc. Dialog methods
+ * (select / confirm / input / editor) expect an `extension_ui_response`
+ * on stdin keyed by `id`. Fire-and-forget methods (notify / setStatus /
+ * setWidget / setTitle / set_editor_text) expect no response.
+ *
+ * See pi docs/rpc.md "Extension UI Protocol" for the canonical fields
+ * per method.
+ */
+export interface ExtensionUIRequestEvent extends PiBaseEvent {
+  type: "extension_ui_request";
+  id: string;
+  method:
+    | "select"
+    | "confirm"
+    | "input"
+    | "editor"
+    | "notify"
+    | "setStatus"
+    | "setWidget"
+    | "setTitle"
+    | "set_editor_text"
+    | string; // future-proofing against new pi methods
+  // dialog fields (select / confirm / input / editor)
+  title?: string;
+  message?: string;
+  options?: string[];
+  timeout?: number;
+  placeholder?: string;
+  prefill?: string;
+  // notify
+  notifyType?: "info" | "warning" | "error";
+  // setStatus
+  statusKey?: string;
+  statusText?: string;
+  // setWidget
+  widgetKey?: string;
+  widgetLines?: string[];
+  widgetPlacement?: "aboveEditor" | "belowEditor";
+  // setTitle / set_editor_text
+  text?: string;
+}
+
 /** Union of all pi event types. */
 export type PiEvent =
   | TextDeltaEvent
@@ -128,9 +392,20 @@ export type PiEvent =
   | AgentEndEvent
   | ToolExecutionStartEvent
   | ToolExecutionEndEvent
+  | ToolExecutionUpdateEvent
   | ModelSelectEvent
+  | MessageStartEvent
+  | MessageEndEvent
   | MessageUpdateEvent
+  | ExtensionUIRequestEvent
   | ErrorEvent
+  | BranchUpdateEvent
+  | QueueUpdateEvent
+  | CompactionStartEvent
+  | CompactionEndEvent
+  | AutoRetryStartEvent
+  | AutoRetryEndEvent
+  | ExtensionErrorEvent
   | PiBaseEvent; // fallback for unknown events
 
 // ── Translation result types ────────────────────────────────────────
@@ -146,15 +421,19 @@ export interface TranslationResult {
   hookData: HookData;
   /** Optional token usage extracted from this event */
   tokenUsage?: TokenUsage;
+  /** The session ID for routing (set from AccState.sessionId) */
+  sessionId: string;
 }
 
 /**
- * Result of translating a pi event. Either yields a translation,
- * updates accumulator state, or is a no-op.
+ * Result of translating a pi event. Either yields zero or more
+ * gravity events to emit, or is a no-op (state was mutated, no events).
+ *
+ * `results` always has length >= 1 when kind is "emit". State-only
+ * mutations (text_delta, turn_start, tool_execution_start) return "noop".
  */
 export type TranslateEventResult =
-  | { kind: "emit"; result: TranslationResult }
-  | { kind: "accumulate"; state: AccState }
+  | { kind: "emit"; results: TranslationResult[] }
   | { kind: "noop" };
 
 // ── Turn accumulator state ──────────────────────────────────────────
@@ -175,6 +454,7 @@ export interface AccState {
   // Session context
   sessionId: string;
   cwd: string;
+  branch: string | null;  // git branch, populated after session init
   modelName: string | null;
   effortLevel: string;
 
@@ -188,14 +468,24 @@ export interface AccState {
   currentToolUseId: string | null;
   currentToolName: string | null;
   currentToolInput: Record<string, unknown> | null;
+  currentToolStartTime: number | null;
+  /** Snapshot of pendingAssistantText taken at tool_execution_start. The
+   * pending accumulator is cleared after the snapshot so the next tool's
+   * preceding text starts fresh. accToolEnd consumes this. */
+  currentToolAssistantText: string | undefined;
+  currentToolAssistantThinking: string | undefined;
+  /**
+   * Latest `partialResult` from `tool_execution_update`. Replaced on every
+   * update (cumulative-snapshot model). `accToolEnd` uses this as a
+   * fallback for `result` if the final event carries no `result` of its
+   * own. Cleared at tool start.
+   */
+  currentToolPartial: unknown;
 
   // Turn tracking
   turns: AccTurn[];
   currentTurn: number; // index into turns[]
   inTurn: boolean; // true between turn_start and turn_end
-
-  // Pending gravity events (emitted after turn_end)
-  pendingToolEvents: TranslationResult[];
 }
 
 export interface AccTurn {
@@ -222,18 +512,119 @@ export interface AccTool {
 
 // ── RPC command types ───────────────────────────────────────────────
 
+/**
+ * Response delivered back to pi for a dialog `extension_ui_request`. Pi
+ * matches by `id`. Exactly one of `value` / `confirmed` / `cancelled`
+ * should be set, depending on the originating method.
+ */
+export interface ExtensionUIResponsePayload {
+  id: string;
+  value?: string;
+  confirmed?: boolean;
+  cancelled?: boolean;
+}
+
 /** Commands sent to pi via stdin (JSONL). */
 export type PiCommand =
-  | { type: "prompt"; text: string; images?: string[] }
-  | { type: "steer"; text: string }
+  | { type: "prompt"; message: string; images?: string[] }
+  | { type: "steer"; message: string }
   | { type: "abort" }
-  | { type: "set_thinking_level"; level: ThinkingLevel };
+  | { type: "set_thinking_level"; level: ThinkingLevel }
+  | { type: "set_session_name"; name: string }
+  | { type: "set_model"; provider: string; modelId: string }
+  | { type: "get_session_stats" }
+  | { type: "get_state" }
+  | { type: "get_commands" }
+  | { type: "get_available_models" }
+  | { type: "switch_session"; sessionPath: string }
+  | { type: "compact"; customInstructions?: string }
+  | { type: "new_session"; parentSession?: string }
+  | ({ type: "extension_ui_response" } & ExtensionUIResponsePayload);
+
+/**
+ * One entry in pi's `get_commands` response — extension command, prompt
+ * template, or skill. Invoke by sending `/<name>` (or `/skill:<name>`) as a
+ * regular `prompt` message; pi handles the expansion. See pi `docs/rpc.md`
+ * `get_commands`.
+ *
+ * This is the *normalized* shape. pi 0.74 docs show flat `path`/`location`,
+ * but the shipping build nests them under `sourceInfo` ({ path, scope, … }).
+ * `spawn.ts`'s `getCommands` flattens both into the fields below so the
+ * patch stream and Emacs see one stable shape.
+ */
+export interface PiCommandDescriptor {
+  /** Command name without the leading slash. Skills carry the `skill:` prefix. */
+  name: string;
+  /** Human-readable description (optional for extension commands). */
+  description?: string;
+  /** Origin of the command. */
+  source: "extension" | "prompt" | "skill";
+  /** Where it was loaded from (absent for extensions). */
+  location?: "user" | "project" | "path";
+  /** Absolute path of the backing file (optional). */
+  path?: string;
+}
+
+/**
+ * One entry from pi's `get_available_models` RPC, normalized to the subset
+ * gravity needs. Pi's full `Model` shape is `{ id, name, api, provider,
+ * baseUrl, reasoning, input[], contextWindow, maxTokens, cost{} }`; we only
+ * keep what the picker needs. `id` IS the `modelId` accepted by `set_model`.
+ * See pi `docs/rpc.md` `get_available_models`.
+ */
+export interface PiModel {
+  /** Model id — the value passed back as `modelId` to `set_model`. */
+  id: string;
+  /** Human-readable model name (optional). */
+  name?: string;
+  /** Provider key (anthropic / openai / google / …). */
+  provider: string;
+  /** Context window size in tokens (optional; used only for the label). */
+  contextWindow?: number;
+}
 
 /** Event emitted by protocol.ts for parsed pi events. */
 export type PiProtocolEvent = {
   event: PiEvent;
   raw?: string;
 };
+
+/**
+ * Response to an RPC command sent over stdin. Pi 0.74 always sets
+ * `type: "response"`; `command` echoes the request type; `id` is present
+ * iff the request carried one (used for request/response correlation).
+ */
+export interface PiResponse {
+  type: "response";
+  command: string;
+  id?: string;
+  success: boolean;
+  data?: unknown;
+  error?: string;
+}
+
+/**
+ * Subset of `get_session_stats` response data the adapter consumes. Pi's
+ * full response includes message counts and a session file path which the
+ * adapter currently ignores. See pi docs/rpc.md `get_session_stats`.
+ */
+export interface PiSessionStats {
+  tokens?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    total?: number;
+  };
+  cost?: number;
+  contextUsage?: {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  };
+  sessionFile?: string;
+  sessionId?: string;
+}
 
 // ── Driver options ──────────────────────────────────────────────────
 
@@ -249,6 +640,18 @@ export interface PiDriverOptions {
   provider?: string;
   /** Path to pi binary. Defaults to "pi" (PATH lookup). */
   piBinaryPath?: string;
+  /**
+   * Directory where pi stores session files (`--session-dir`). Defaults to
+   * `~/.local/state/gravity-pi-sessions`. The directory is created if it
+   * doesn't exist. Pi writes one `.jsonl` file per session here.
+   */
+  sessionDir?: string;
+  /**
+   * If set, pi spawns with `--session <id-or-path>`, resuming that session.
+   * Accepts a path to a `.jsonl` file or a partial UUID — pi resolves
+   * either form against `--session-dir`.
+   */
+  resumeSession?: string;
 }
 
 // ── Driver API ──────────────────────────────────────────────────────
@@ -272,6 +675,66 @@ export interface PiDriver {
    * Set the thinking/effort level at runtime.
    */
   setThinkingLevel(level: ThinkingLevel): void;
+  /**
+   * Set pi's session name (`set_session_name` RPC). Fire-and-forget: pi
+   * persists the name and surfaces it back via `get_state.sessionName`.
+   */
+  setSessionName(name: string): void;
+  /**
+   * Switch to a specific model at runtime. Pi accepts provider+modelId pairs
+   * (see pi RPC docs: set_model command). Pi 0.74 replies with the full Model
+   * object; the driver doesn't currently surface that response — callers
+   * track the chosen model independently if they care.
+   */
+  setModel(provider: string, modelId: string): void;
+  /**
+   * Request `get_session_stats` from pi (tokens, cost, contextUsage).
+   * Resolves when pi responds; rejects on timeout or pi error.
+   */
+  getSessionStats(): Promise<PiSessionStats>;
+  /**
+   * Request `get_state` from pi. Returns the response data verbatim
+   * (see pi RPC docs `get_state`): contains `sessionFile`, `sessionId`,
+   * `model`, `thinkingLevel`, `messageCount`, …
+   */
+  getState(): Promise<Record<string, unknown>>;
+  /**
+   * Request `get_commands` from pi (`docs/rpc.md`). Returns the unioned list
+   * of extension commands, prompt templates, and skills available in the
+   * current pi process. The list is project-scoped: switching sessions or
+   * editing `.pi/{prompts,skills,extensions}` requires a refresh call.
+   */
+  getCommands(): Promise<PiCommandDescriptor[]>;
+  /**
+   * Request `get_available_models` from pi (`docs/rpc.md`). Returns the
+   * normalized list of models pi can switch to via `set_model`. The list is
+   * pi-process-scoped: a refresh call re-fetches it.
+   */
+  getAvailableModels(): Promise<PiModel[]>;
+  /**
+   * Switch the running pi process to a different session file
+   * (`switch_session` RPC). Pi reloads the .jsonl at `sessionPath`.
+   * Returns whether the switch was accepted (it can be cancelled by a
+   * `session_before_switch` extension event handler).
+   */
+  switchSession(sessionPath: string): Promise<boolean>;
+  /**
+   * Reply to a dialog `extension_ui_request` by pi's request id.
+   * Fire-and-forget — pi does not acknowledge the response.
+   */
+  sendExtensionUIResponse(payload: ExtensionUIResponsePayload): void;
+  /**
+   * Manually compact pi's conversation context (`compact` RPC). Pi
+   * responds with a summary and token-savings info; the driver awaits
+   * the response so callers can surface the result.
+   */
+  compact(customInstructions?: string): Promise<{ summary?: string; tokensBefore?: number }>;
+  /**
+   * Start a fresh session inside the running pi process (`new_session`
+   * RPC). Returns true unless cancelled by a `session_before_switch`
+   * extension event handler.
+   */
+  newSession(parentSession?: string): Promise<boolean>;
   /**
    * Stop the pi subprocess and clean up resources.
    * Returns a promise that resolves when the subprocess exits.

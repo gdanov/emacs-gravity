@@ -17,6 +17,9 @@ import type {
   FileEntry,
   ToolLocation,
   AgentLocation,
+  CompactionMarker,
+  PiCommandDescriptor,
+  PiModel,
 } from "@gravity/shared";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -41,7 +44,11 @@ function stripBloatedFields(result: unknown): unknown {
 
 /** Create a new empty session. */
 export function createSession(sessionId: string, cwd: string, source?: string): Session {
-  const project = cwd.split("/").pop() || cwd;
+  // Strip trailing slash before extracting basename. read-directory-name on the
+  // Emacs side returns paths with a trailing "/", which makes split("/").pop()
+  // return "" and then fall back to the full cwd as the project label.
+  const trimmed = cwd.replace(/\/+$/, "");
+  const project = trimmed.split("/").pop() || trimmed || cwd;
   return {
     sessionId,
     cwd,
@@ -58,6 +65,9 @@ export function createSession(sessionId: string, cwd: string, source?: string): 
     startTime: Date.now(),
     lastEventTime: Date.now(),
     tokenUsage: null,
+    cost: null,
+    contextUsage: null,
+    piSessionFile: null,
     plan: null,
     streamingText: null,
     permissionMode: null,
@@ -67,7 +77,10 @@ export function createSession(sessionId: string, cwd: string, source?: string): 
     agentIndex: {},
     tasks: {},
     files: {},
+    compactions: [],
     totalToolCount: 0,
+    piCommands: null,
+    piModels: null,
   };
 }
 
@@ -83,8 +96,10 @@ export function createTurnNode(turnNumber: number): TurnNode {
     frozen: false,
     stopText: null,
     stopThinking: null,
+    stopReason: null,
     tokenIn: null,
     tokenOut: null,
+    editedFiles: [],
   };
 }
 
@@ -113,10 +128,13 @@ export function resetSession(s: Session): Patch[] {
   s.agentIndex = {};
   s.tasks = {};
   s.files = {};
+  s.compactions = [];
   s.totalToolCount = 0;
   s.plan = null;
   s.streamingText = null;
   s.tokenUsage = null;
+  s.cost = null;
+  s.contextUsage = null;
   s.lastEventTime = Date.now();
   // Emit patches so terminals clear stale data
   return [
@@ -125,6 +143,8 @@ export function resetSession(s: Session): Patch[] {
     { op: "set_plan", plan: null },
     { op: "set_streaming_text", text: null },
     { op: "set_token_usage", usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    { op: "set_cost", cost: null },
+    { op: "set_context_usage", contextUsage: null },
   ];
 }
 
@@ -144,14 +164,50 @@ export function setTokenUsage(s: Session, usage: TokenUsage): Patch[] {
   return [{ op: "set_token_usage", usage }];
 }
 
+export function setCost(s: Session, cost: number | null): Patch[] {
+  s.cost = cost;
+  return [{ op: "set_cost", cost }];
+}
+
+export function setContextUsage(
+  s: Session,
+  contextUsage: Session["contextUsage"],
+): Patch[] {
+  s.contextUsage = contextUsage;
+  return [{ op: "set_context_usage", contextUsage }];
+}
+
 export function setPlan(s: Session, plan: Plan | null): Patch[] {
   s.plan = plan;
   return [{ op: "set_plan", plan }];
 }
 
+/**
+ * Replace pi's command inventory snapshot. Project-scoped — survives turn
+ * resets but is cleared on session purge. Callers should fetch via
+ * `driver.getCommands()` and feed the result here.
+ */
+export function setPiCommands(
+  s: Session,
+  commands: PiCommandDescriptor[],
+): Patch[] {
+  s.piCommands = commands;
+  return [{ op: "set_pi_commands", commands }];
+}
+
+/**
+ * Replace pi's available-model snapshot. Pi-process-scoped — survives turn
+ * resets but is cleared on session purge. Callers should fetch via
+ * `driver.getAvailableModels()` and feed the result here.
+ */
+export function setPiModels(s: Session, models: PiModel[]): Patch[] {
+  s.piModels = models;
+  return [{ op: "set_pi_models", models }];
+}
+
 export function updateMeta(
   s: Session,
-  opts: { pid?: number; slug?: string; displayName?: string; branch?: string; modelName?: string; tmuxSession?: string },
+  opts: { pid?: number; slug?: string; displayName?: string; branch?: string; modelName?: string; tmuxSession?: string; piSessionFile?: string },
 ): Patch[] {
   s.lastEventTime = Date.now();
   if (opts.pid && opts.pid > 0) s.pid = opts.pid;
@@ -160,6 +216,7 @@ export function updateMeta(
   if (opts.branch) s.branch = opts.branch;
   if (opts.modelName) s.modelName = opts.modelName;
   if (opts.tmuxSession && !s.tmuxSession) s.tmuxSession = opts.tmuxSession;
+  if (opts.piSessionFile) s.piSessionFile = opts.piSessionFile;
   return [{ op: "set_meta", ...opts }];
 }
 
@@ -173,56 +230,126 @@ function getTurnNode(s: Session, turnNumber: number): TurnNode | undefined {
   return s.turns.find((t) => t.turnNumber === turnNumber);
 }
 
-export function addPrompt(s: Session, entry: PromptEntry): Patch[] {
+/**
+ * Open a new empty turn.
+ *
+ * Defensively freezes the previous turn if it is still open — this guards
+ * against the restart hazard where a pi subprocess dies mid-turn and the
+ * next spawn would otherwise stack a new turn on top of an unfrozen one.
+ *
+ * Emits `freeze_turn` (prev, if applicable) + `add_turn` (new).
+ */
+export function openTurn(s: Session): Patch[] {
   const patches: Patch[] = [];
 
-  // Freeze previous turn
   const prev = currentTurnNode(s);
   if (prev && !prev.frozen) {
     prev.frozen = true;
     patches.push({ op: "freeze_turn", turnNumber: prev.turnNumber });
   }
 
-  // Create new turn
   s.currentTurn++;
   const turn = createTurnNode(s.currentTurn);
-  turn.prompt = entry;
   s.turns.push(turn);
-
   patches.push({ op: "add_turn", turn });
-  patches.push({ op: "add_prompt", turnNumber: s.currentTurn, prompt: entry });
+
   return patches;
 }
 
-export function finalizeLastPrompt(
+/**
+ * Attach a prompt to the current (last) turn. Does NOT create a new turn —
+ * the caller must have already called `openTurn` if needed. Idempotent: if
+ * the current turn already has a prompt, this is a no-op (the boundary
+ * survives, just no relabel).
+ */
+export function attachPrompt(s: Session, entry: PromptEntry): Patch[] {
+  const turn = currentTurnNode(s);
+  if (!turn) return [];
+  if (turn.prompt) return [];
+  turn.prompt = entry;
+  return [{ op: "add_prompt", turnNumber: turn.turnNumber, prompt: entry }];
+}
+
+/**
+ * Close the current turn: stamp stop text/thinking, mark frozen, record
+ * elapsed time on the prompt. Optionally records token usage on the turn.
+ *
+ * Emits `set_turn_stop` (if any stop text/thinking) + `set_turn_tokens`
+ * (if usage given) + `freeze_turn`. Idempotent under repeated calls — a
+ * second `closeTurn` on the same already-frozen turn is a no-op except for
+ * updating fields that are still null.
+ */
+export function closeTurn(
   s: Session,
-  stopText?: string,
-  stopThinking?: string,
+  opts: {
+    stopText?: string;
+    stopThinking?: string;
+    stopReason?: string;
+    tokenIn?: number;
+    tokenOut?: number;
+  } = {},
 ): Patch[] {
   const turn = currentTurnNode(s);
   if (!turn) return [];
 
   const patches: Patch[] = [];
 
-  // Compute elapsed on prompt
   if (turn.prompt && !turn.prompt.elapsed && turn.prompt.submitted) {
     turn.prompt.elapsed = (Date.now() - turn.prompt.submitted) / 1000;
   }
 
-  // Store stop text/thinking on turn node
-  if (stopText) turn.stopText = stopText;
-  if (stopThinking) turn.stopThinking = stopThinking;
+  if (opts.stopText && !turn.stopText) turn.stopText = opts.stopText;
+  if (opts.stopThinking && !turn.stopThinking) turn.stopThinking = opts.stopThinking;
+  if (opts.stopReason && !turn.stopReason) turn.stopReason = opts.stopReason;
 
-  if (stopText || stopThinking) {
+  if (opts.stopText || opts.stopThinking || opts.stopReason) {
     patches.push({
       op: "set_turn_stop",
       turnNumber: turn.turnNumber,
-      stopText: stopText,
-      stopThinking: stopThinking,
+      stopText: opts.stopText,
+      stopThinking: opts.stopThinking,
+      stopReason: opts.stopReason,
     });
   }
 
+  if (opts.tokenIn != null || opts.tokenOut != null) {
+    const tokenIn = opts.tokenIn ?? 0;
+    const tokenOut = opts.tokenOut ?? 0;
+    turn.tokenIn = tokenIn;
+    turn.tokenOut = tokenOut;
+    patches.push({ op: "set_turn_tokens", turnNumber: turn.turnNumber, tokenIn, tokenOut });
+  }
+
+  if (!turn.frozen) {
+    turn.frozen = true;
+    patches.push({ op: "freeze_turn", turnNumber: turn.turnNumber });
+  }
+
   return patches;
+}
+
+/** Open a new turn and attach a prompt to it. Used by sources where the
+ * boundary and the prompt arrive atomically (Claude Code's
+ * UserPromptSubmit). */
+export function addPrompt(s: Session, entry: PromptEntry): Patch[] {
+  return [...openTurn(s), ...attachPrompt(s, entry)];
+}
+
+/**
+ * Finalize the last prompt: set stop text/thinking AND freeze the turn.
+ *
+ * Historically this only set stop text and left the turn unfrozen — the
+ * next `addPrompt` did the freeze lazily. That left turns open if the
+ * source stopped and never sent another prompt (the pi case, and the
+ * latent bug for Claude Code masked by tight prompt cadence). Now backed
+ * by `closeTurn` so the turn is always frozen on stop.
+ */
+export function finalizeLastPrompt(
+  s: Session,
+  stopText?: string,
+  stopThinking?: string,
+): Patch[] {
+  return closeTurn(s, { stopText, stopThinking });
 }
 
 export function setTurnTokens(s: Session, tokenIn: number, tokenOut: number): Patch[] {
@@ -406,6 +533,31 @@ export function completeTool(
   }];
 }
 
+/**
+ * Update a running tool's partial result (pi's `tool_execution_update`).
+ *
+ * Replaces `tool.partial` with the new value (cumulative-snapshot model,
+ * not append). Returns empty patches if the tool is unknown or already
+ * completed — late `_update`s arriving after `_end` are silently dropped.
+ *
+ * Terminals choose how to render `partial`: ignore for terminals that
+ * only show the final result, or surface live progress for long-running
+ * tools (bash builds, etc.).
+ */
+export function updateToolPartial(
+  s: Session,
+  toolUseId: string,
+  partial: unknown,
+): Patch[] {
+  const loc = s.toolIndex[toolUseId];
+  if (!loc) return [];
+  const tool = findToolByLocation(s, loc);
+  if (!tool) return [];
+  if (tool.status !== "running") return [];
+  tool.partial = partial;
+  return [{ op: "update_tool_partial", toolUseId, partial }];
+}
+
 export function findTool(s: Session, toolUseId: string): Tool | undefined {
   const loc = s.toolIndex[toolUseId];
   if (!loc) return undefined;
@@ -514,6 +666,11 @@ export function trackFile(s: Session, toolName: string, toolInput: Record<string
   switch (toolName) {
     case "Read": path = toolInput.file_path as string; op = "read"; break;
     case "Edit": path = toolInput.file_path as string; op = "edit"; break;
+    case "MultiEdit": path = toolInput.file_path as string; op = "edit"; break;
+    case "NotebookEdit":
+      path = (toolInput.notebook_path ?? toolInput.file_path) as string;
+      op = "edit";
+      break;
     case "Write": path = toolInput.file_path as string; op = "write"; break;
     default: return [];
   }
@@ -613,6 +770,23 @@ export function trackTask(
   }
 
   return [];
+}
+
+// ── Compaction ───────────────────────────────────────────────────────
+
+/**
+ * Record a pi compaction marker on the session. Append-only; never
+ * mutated thereafter. The marker captures the turn that was current at
+ * the time, so terminals can group markers by turn for inline rendering.
+ *
+ * Idempotent under repeated calls only insofar as duplicate markers are
+ * acceptable — the translator should emit one marker per `compaction_end`.
+ * Aborted compactions are still recorded (`aborted: true`) so the user
+ * sees the attempt.
+ */
+export function addCompaction(s: Session, marker: CompactionMarker): Patch[] {
+  s.compactions.push(marker);
+  return [{ op: "add_compaction", marker }];
 }
 
 // ── Token tracking helpers ───────────────────────────────────────────

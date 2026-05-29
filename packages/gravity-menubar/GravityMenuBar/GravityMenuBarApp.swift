@@ -28,6 +28,22 @@ public struct MenuBarDropdown: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            if let warning = monitor.protocolWarning {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(warning)
+                        .font(.system(size: 11))
+                        .foregroundColor(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.12))
+                .cornerRadius(6)
+                Divider()
+            }
+
             if monitor.projects.isEmpty && monitor.inboxItems.isEmpty {
                 if monitor.connected {
                     Text("No active sessions")

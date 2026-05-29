@@ -16,12 +16,19 @@ export type {
   AgentLocation,
   Task,
   FileEntry,
+  FileDiff,
+  StructuredPatchHunk,
   Plan,
   PromptEntry,
 
   // Inbox
   InboxItem,
   InboxItemType,
+
+  // Pi
+  CompactionMarker,
+  PiCommandDescriptor,
+  PiModel,
 
   // Patches
   Patch,
@@ -40,6 +47,9 @@ export type {
   HookSocketMessage,
   HookSocketResponse,
 } from "./types.js";
+
+// Protocol version (runtime value — must be a value export, not `export type`)
+export { PROTOCOL_VERSION } from "./types.js";
 
 export { isSafeBashCommand } from "./safe-bash.js";
 

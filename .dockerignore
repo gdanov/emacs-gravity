@@ -1,0 +1,10 @@
+# Keep the build context lean and prevent `COPY . .` from clobbering the
+# container's `npm ci` with host (wrong-arch) node_modules.
+node_modules
+**/node_modules
+.git
+packages/*/dist
+packages/gravity-menubar/.build
+*.elc
+test/e2e/*.log
+.DS_Store

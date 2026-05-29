@@ -58,7 +58,30 @@ Defined in `claude-gravity-state.el`.
     ├── agent-count    integer    — agents in this turn (pre-computed)
     ├── frozen         bool|nil   — turn is complete (no more tools)
     ├── stop_text      string|nil — trailing assistant text (set by Stop)
-    └── stop_thinking  string|nil — trailing thinking (set by Stop)
+    ├── stop_thinking  string|nil — trailing thinking (set by Stop)
+    └── edited-files   list       — file-diff alists, one per file edited
+                                    this turn (see File Diff Alist below)
+```
+
+### File Diff Alist
+
+Stored in a turn-node's `edited-files` list — one entry per file edited
+(`Edit`/`Write`/`MultiEdit`/`NotebookEdit`) during the turn. The server computes
+a single consolidated diff per file (content before the turn's first edit →
+content after the last edit) regardless of how many times the file was edited,
+and ships it via `update_turn_file` patches.
+
+```
+file-diff (alist)
+├── path        string      — absolute path of the edited file
+├── ops         list        — edit-class ops applied this turn, in order
+├── editCount   integer     — number of edit-class tool calls this turn
+├── status      string      — "created" | "modified" | "deleted"
+├── added       integer     — lines added across the consolidated diff
+├── removed     integer     — lines removed across the consolidated diff
+├── hunks       list|nil    — structuredPatch hunks (baseline→final);
+│                             nil = diff uncomputable or elided for size
+└── truncated   bool        — hunks elided because the diff exceeded the cap
 ```
 
 Turn 0 is always pre-allocated for "pre-prompt activity" (tools that run before any user prompt).

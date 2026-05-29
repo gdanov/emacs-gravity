@@ -1,6 +1,6 @@
 EMACS ?= emacs
 
-.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell build build-bridge build-server sync-marketplace clean menubar kill-server restart-server check-settings
+.PHONY: test test-elisp test-bridge test-server test-menubar test-install test-install-shell test-e2e test-e2e-local build build-bridge build-server sync-marketplace clean menubar kill-server restart-server check-settings
 
 # Discover the published-marketplace install cache dir (newest by mtime).
 # Only needed for sync-marketplace / restart-server (published-plugin testing).
@@ -9,10 +9,11 @@ MARKETPLACE_CACHE := $(shell ls -td $(HOME)/.claude/plugins/cache/emacs-gravity-
 test: test-elisp test-bridge test-server test-menubar check-settings
 
 test-elisp:
-	$(EMACS) -nw --batch -L . -L test \
+	$(EMACS) -nw --batch --eval '(package-initialize)' -L . -L test \
 		-l claude-gravity \
 		-l claude-gravity-test \
 		-l claude-gravity-patch-test \
+		-l claude-gravity-pull-signal-test \
 		-f ert-run-tests-batch-and-exit
 
 test-bridge:
@@ -23,6 +24,20 @@ test-server:
 
 test-menubar:
 	cd packages/gravity-menubar && swift test
+
+# End-to-end: full stack (gravity-server + spy proxy + emacs --daemon
+# running the REAL client) driving gravity features through synthetic
+# hooks. Containerized = hermetic + AF_UNIX bind works (host sandboxes
+# block it). This is the only elisp coverage CI runs.
+test-e2e:
+	docker build -t gravity-e2e -f test/e2e/Dockerfile .
+	docker run --rm gravity-e2e
+
+# Fast host iteration (no Docker). Needs emacs + node on PATH and a
+# host that permits AF_UNIX server bind (i.e. NOT inside a restrictive
+# sandbox). Pass a name substring to run one scenario.
+test-e2e-local:
+	node test/e2e/run.mjs $(SCENARIO)
 
 build: build-bridge build-server
 
@@ -46,11 +61,17 @@ sync-marketplace: build-bridge build-server
 		exit 1; \
 	fi
 	@echo "Staging bundles into $(MARKETPLACE_CACHE)"
-	@mkdir -p "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist" "$(MARKETPLACE_CACHE)packages/gravity-server/dist"
+	@mkdir -p \
+		"$(MARKETPLACE_CACHE)dist" \
+		"$(MARKETPLACE_CACHE)packages/emacs-bridge/dist" \
+		"$(MARKETPLACE_CACHE)packages/gravity-server/dist"
 	install -m 644 packages/emacs-bridge/dist/emacs-bridge.mjs "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/emacs-bridge.mjs"
-	@# Server: stage to BOTH layouts so this works for v4.0.1 (pre-fix) and v4.0.2+ installs.
-	@#   v4.0.1 _ensure-server uses fallback #2 → packages/gravity-server/dist/
-	@#   v4.0.2+ _ensure-server uses only      → packages/emacs-bridge/dist/
+	@# Server: stage to all three known layouts so this works for any released version.
+	@#   v4.0.1 _ensure-server fallback #2 → packages/gravity-server/dist/
+	@#   v4.0.2+ dev layout                → packages/emacs-bridge/dist/
+	@#   v4.0.5+ published-release layout  → dist/  (hooks/_ensure-server resolves
+	@#                                       $(dirname $0)/../dist/gravity-server.mjs)
+	install -m 644 packages/gravity-server/dist/gravity-server.mjs "$(MARKETPLACE_CACHE)dist/gravity-server.mjs"
 	install -m 644 packages/gravity-server/dist/gravity-server.mjs "$(MARKETPLACE_CACHE)packages/gravity-server/dist/gravity-server.mjs"
 	install -m 644 packages/gravity-server/dist/gravity-server.mjs "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/gravity-server.mjs"
 	@echo "Marketplace cache synced."
@@ -84,8 +105,10 @@ restart-server: sync-marketplace kill-server
 	@# (Sourcing _ensure-server directly doesn't work here anyway: under
 	@# `sh -c '. file'` $0 is `sh`, which breaks its $(dirname $0)/... path
 	@# resolution. Direct spawn from MARKETPLACE_CACHE is cleaner.)
+	@# Respawn from the same path _ensure-server uses (top-level dist/), so
+	@# any subsequent hook-driven auto-spawn matches the manual restart.
 	@echo "Respawning server from $(MARKETPLACE_CACHE)..."
-	@nohup node "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/gravity-server.mjs" >>/tmp/gravity-server.log 2>&1 &
+	@nohup node "$(MARKETPLACE_CACHE)dist/gravity-server.mjs" >>/tmp/gravity-server.log 2>&1 &
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		if [ -S "$(HOME)/.local/state/gravity-hooks.sock" ]; then \
 			echo "Server up."; exit 0; \

@@ -44,6 +44,12 @@
 (defvar claude-gravity--client-subscribed-sessions (make-hash-table :test 'equal)
   "Set of session IDs we've requested detail for.")
 
+(defconst claude-gravity--protocol-version 2
+  "Terminal <-> server protocol version.
+Must match `PROTOCOL_VERSION' in packages/shared/src/types.ts.  Sent in the
+`hello' handshake; the server replies with `protocol.mismatch' if it speaks
+a different version.")
+
 (defvar claude-gravity--pull-mode nil
   "Non-nil when using pull-based protocol (GRAVITY_PULL_MODE=true on server).")
 
@@ -52,7 +58,7 @@
 
 (defvar claude-gravity--pending-signal nil
   "Last received state-changed signal, or nil.
-Format: (what . session-id) where what is "session", "inbox", "overview", or "notice".")
+Format: (what . session-id) where what is \"session\", \"inbox\", \"overview\", or \"notice\".")
 
 (defvar claude-gravity--last-seq (make-hash-table :test 'equal)
   "Last acknowledged sequence number per session.")
@@ -261,8 +267,9 @@ PROC is the process, EVENT is the status change."
                              claude-gravity-server-terminal-sock)
         ;; Declare capabilities and request overview on connect
         (claude-gravity--send-to-server
-         '((type . "hello")
-           (capabilities . ["action.permission" "action.question" "action.plan-review"])))
+         `((type . "hello")
+           (capabilities . ["action.permission" "action.question" "action.plan-review"])
+           (protocolVersion . ,claude-gravity--protocol-version)))
         ;; In pull mode, we use request.resync to get initial state
         ;; In push mode, we request overview and then session details
         (claude-gravity--send-to-server '((type . "request.resync")))
@@ -413,78 +420,284 @@ Dispatches to the appropriate server action based on hookEventName."
 
 
 ;;; ── Pi session control ─────────────────────────────────────────────
+;;
+;; Pi supports N concurrent sessions, just like Claude. There is no
+;; "active" pi session — every command takes a sessionId from the
+;; caller (typically the session at point, via the daemon.el unified
+;; dispatcher). The server-side pi driver map is keyed by sessionId.
 
-(defvar claude-gravity--pi-session-id nil
-  "Session ID of the active pi session, or nil if none.")
+(defun claude-gravity--current-session-pi-p ()
+  "Return non-nil if the session at point is a pi session.
+Mirrors `claude-gravity--current-session-daemon-p' and -tmux-p:
+checks the buffer-local session id first, then the magit section."
+  (let ((sid (or claude-gravity--buffer-session-id
+                 (let ((section (magit-current-section)))
+                   (when (and section (eq (oref section type) 'session-entry))
+                     (oref section value))))))
+    (when sid
+      (let ((session (gethash sid claude-gravity--sessions)))
+        (and session (equal (plist-get session :source) "pi"))))))
+
+(defun claude-gravity--current-pi-session-id ()
+  "Return the sessionId of the pi session at point, or signal a user error.
+Used by interactive pi commands to derive their target session."
+  (let ((sid (or claude-gravity--buffer-session-id
+                 (let ((section (magit-current-section)))
+                   (when (and section (eq (oref section type) 'session-entry))
+                     (oref section value))))))
+    (unless sid
+      (user-error "No session at point"))
+    (let ((session (gethash sid claude-gravity--sessions)))
+      (unless (and session (equal (plist-get session :source) "pi"))
+        (user-error "Session at point is not a pi session"))
+      sid)))
 
 (defun claude-gravity--pi-start (&optional cwd thinking-level)
   "Start a new pi session.
-CWD is the working directory (defaults to `default-directory').
-THINKING-LEVEL is the thinking level (off, minimal, low, medium, high, xhigh).
-Returns the session ID if started, nil otherwise."
-  (interactive (list (read-directory-name "Working directory: " default-directory)))
+CWD is the working directory (defaults to the project root of
+`default-directory').  THINKING-LEVEL is one of: off, minimal, low,
+medium, high, xhigh.
+
+The new session id arrives asynchronously via the pi.session
+\"started\" broadcast and shows up in the overview like any other
+session. N concurrent pi sessions are allowed."
+  (interactive
+   (list (read-directory-name "Working directory: "
+                              (or (claude-gravity--normalize-cwd default-directory)
+                                  default-directory))))
   (claude-gravity--ensure-server)
+  (let ((normalized (and cwd (claude-gravity--normalize-cwd cwd))))
+    (claude-gravity--send-to-server
+     `((type . "pi.start")
+       ,@(when normalized `((cwd . ,normalized)))
+       ,@(when thinking-level `((thinkingLevel . ,thinking-level)))))
+    (claude-gravity--log 'info "Pi: starting session (cwd=%s)" (or normalized default-directory))))
+
+(defun claude-gravity--pi-prompt (session-id text &optional images)
+  "Send TEXT as a prompt to pi session SESSION-ID.
+IMAGES is an optional list of image URLs.  Interactive callers
+target the session at point."
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (read-string "Prompt: ")))
+  (claude-gravity--log 'info "Pi[%s]: sending prompt (%d chars)" session-id (length text))
   (claude-gravity--send-to-server
-   `((type . "pi.start")
-     ,@(when cwd `((cwd . ,cwd)))
-     ,@(when thinking-level `((thinkingLevel . ,thinking-level)))))
-  (claude-gravity--log 'info "Pi: starting session (cwd=%s)" (or cwd default-directory)))
+   `((type . "pi.prompt")
+     (sessionId . ,session-id)
+     (text . ,text)
+     ,@(when images `((images . ,images)))))
+  (claude-gravity--log 'debug "Pi[%s]: pi.prompt queued, waiting for response from pi" session-id))
 
-(defun claude-gravity--pi-prompt (text &optional images)
-  "Send TEXT as a prompt to the active pi session.
-IMAGES is an optional list of image URLs."
-  (interactive "sPrompt: ")
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session. Use `claude-gravity--pi-start' first.")
-    (claude-gravity--log 'info "Pi: sending prompt (%d chars)" (length text))
-    (claude-gravity--send-to-server
-     `((type . "pi.prompt")
-       (sessionId . ,claude-gravity--pi-session-id)
-       (text . ,text)
-       ,@(when images `((images . ,images)))))))
-
-(defun claude-gravity--pi-steering (text)
-  "Send TEXT as a steering message to the active pi session.
+(defun claude-gravity--pi-steering (session-id text)
+  "Send TEXT as a steering message to pi session SESSION-ID.
 Steering interrupts/guides the current response."
-  (interactive "sSteering: ")
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: sending steering (%d chars)" (length text))
-    (claude-gravity--send-to-server
-     `((type . "pi.steer")
-       (sessionId . ,claude-gravity--pi-session-id)
-       (text . ,text)))))
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (read-string "Steering: ")))
+  (claude-gravity--log 'info "Pi[%s]: sending steering (%d chars)" session-id (length text))
+  (claude-gravity--send-to-server
+   `((type . "pi.steer")
+     (sessionId . ,session-id)
+     (text . ,text))))
 
-(defun claude-gravity--pi-abort ()
-  "Abort the active pi session."
-  (interactive)
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: aborting session")
-    (claude-gravity--send-to-server
-     `((type . "pi.abort")
-       (sessionId . ,claude-gravity--pi-session-id)))))
+(defun claude-gravity--pi-abort (session-id)
+  "Abort the current turn of pi session SESSION-ID (RPC abort).
+Pi stays alive; only the in-flight LLM operation is interrupted.
+Use `claude-gravity--pi-stop' to terminate pi entirely."
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (claude-gravity--log 'info "Pi[%s]: aborting current turn" session-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.abort")
+     (sessionId . ,session-id))))
 
-(defun claude-gravity--pi-set-thinking (level)
-  "Set the thinking level for the active pi session.
+(defun claude-gravity--pi-stop (session-id)
+  "Stop pi session SESSION-ID — kills its pi process.
+This is the unified \"end session\" verb for pi, matching tmux pane
+kill and daemon stop semantics. Use `claude-gravity--pi-abort' to
+just interrupt the current turn while keeping pi alive."
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (claude-gravity--log 'info "Pi[%s]: stopping session (kill process)" session-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.stop")
+     (sessionId . ,session-id))))
+
+(defun claude-gravity--pi-set-thinking (session-id level)
+  "Set the thinking LEVEL for pi session SESSION-ID.
 LEVEL is one of: off, minimal, low, medium, high, xhigh."
-  (interactive (completing-read "Thinking level: "
-                                '("off" "minimal" "low" "medium" "high" "xhigh")
-                                nil t "medium"))
-  (if (null claude-gravity--pi-session-id)
-      (message "No active pi session.")
-    (claude-gravity--log 'info "Pi: setting thinking level to %s" level)
-    (claude-gravity--send-to-server
-     `((type . "pi.set-thinking")
-       (sessionId . ,claude-gravity--pi-session-id)
-       (level . ,level)))))
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (completing-read "Thinking level: "
+                          '("off" "minimal" "low" "medium" "high" "xhigh")
+                          nil t "medium")))
+  (claude-gravity--log 'info "Pi[%s]: setting thinking level to %s" session-id level)
+  (claude-gravity--send-to-server
+   `((type . "pi.set-thinking")
+     (sessionId . ,session-id)
+     (level . ,level))))
+
+(defun claude-gravity--pi-set-session-name (session-id name)
+  "Set pi session SESSION-ID's name to NAME (`set_session_name' RPC).
+The name flows back through gravity-server's `set_meta'/displayName
+patch, updating the overview label.  Seeds the prompt with the
+current display name, if any."
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (read-string "Session name: "
+                      (let ((s (claude-gravity--get-session
+                                (claude-gravity--current-pi-session-id))))
+                        (and s (plist-get s :display-name))))))
+  (claude-gravity--log 'info "Pi[%s]: set-session-name %s" session-id name)
+  (claude-gravity--send-to-server
+   `((type . "pi.set-session-name")
+     (sessionId . ,session-id)
+     (name . ,name))))
 
 (defun claude-gravity--pi-status ()
-  "Show the status of the active pi session."
+  "List currently active pi sessions."
   (interactive)
-  (if claude-gravity--pi-session-id
-      (message "Pi session active: %s" claude-gravity--pi-session-id)
-    (message "No active pi session.")))
+  (let ((pi-sessions nil))
+    (maphash (lambda (sid s)
+               (when (equal (plist-get s :source) "pi")
+                 (push (format "%s [%s] %s"
+                               sid
+                               (or (plist-get s :project) "?")
+                               (or (plist-get s :status) ""))
+                       pi-sessions)))
+             claude-gravity--sessions)
+    (if pi-sessions
+        (message "Pi sessions (%d): %s"
+                 (length pi-sessions)
+                 (mapconcat #'identity pi-sessions ", "))
+      (message "No active pi sessions."))))
+
+(defun claude-gravity--pi-model-label (m)
+  "Format pi model alist M as a `completing-read' candidate string.
+Shape: \"PROVIDER/ID — NAME\" (NAME omitted when absent)."
+  (let ((provider (or (alist-get 'provider m) ""))
+        (id (or (alist-get 'id m) ""))
+        (name (alist-get 'name m)))
+    (if (and name (not (string-empty-p name)))
+        (format "%s/%s — %s" provider id name)
+      (format "%s/%s" provider id))))
+
+(defun claude-gravity--pi-set-model (session-id provider model-id)
+  "Switch pi session SESSION-ID to PROVIDER + MODEL-ID.
+Pi's `set_model' RPC takes provider and model id as separate fields
+(see pi RPC docs).
+
+Interactive: if the session has a cached model inventory
+\(`:pi-models', populated by the server's `get_available_models' RPC),
+offer a `completing-read' over the real models and resolve the choice
+back to its provider+id.  Otherwise (no inventory yet) fall back to two
+free-text prompts.  A freely-typed entry that does not match a known
+model is still honored: \"provider/id\" is split on the first slash,
+otherwise the whole string is treated as the model id and the provider
+is prompted separately.  This keeps the no-inventory path working and
+never blocks the user on a stale/empty cache."
+  (interactive
+   (let* ((sid (claude-gravity--current-pi-session-id))
+          (session (gethash sid claude-gravity--sessions))
+          (models (and session (plist-get session :pi-models))))
+     (if models
+         (let* ((cands (mapcar (lambda (m)
+                                 (cons (claude-gravity--pi-model-label m) m))
+                               models))
+                (choice (completing-read "Pi model: " cands nil nil))
+                (hit (cdr (assoc choice cands))))
+           (if hit
+               (list sid (alist-get 'provider hit) (alist-get 'id hit))
+             ;; Free-typed entry that matched no known model. Accept
+             ;; "provider/id"; else treat the whole string as the id and
+             ;; ask for the provider separately.
+             (if (string-match "\\`\\([^/]+\\)/\\(.+\\)\\'" choice)
+                 (list sid (match-string 1 choice) (match-string 2 choice))
+               (list sid
+                     (read-string "Provider (anthropic/openai/google/...): "
+                                  "anthropic")
+                     choice))))
+       (list sid
+             (read-string "Provider (anthropic/openai/google/...): "
+                          "anthropic")
+             (read-string "Model id: ")))))
+  (claude-gravity--log 'info "Pi[%s]: set-model provider=%s modelId=%s" session-id provider model-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.set-model")
+     (sessionId . ,session-id)
+     (provider . ,provider)
+     (modelId . ,model-id))))
+
+(defun claude-gravity--pi-compact (session-id &optional custom-instructions)
+  "Manually compact pi session SESSION-ID's context (`compact' RPC).
+Pi runs an LLM-driven summarization to reduce tokens. With prefix arg,
+prompts for custom instructions to guide the summary."
+  (interactive
+   (list (claude-gravity--current-pi-session-id)
+         (when current-prefix-arg
+           (read-string "Compaction focus (optional): "))))
+  (claude-gravity--log 'info "Pi[%s]: compact%s" session-id
+                       (if custom-instructions (format " (instructions=%s)" custom-instructions) ""))
+  (claude-gravity--send-to-server
+   `((type . "pi.compact")
+     (sessionId . ,session-id)
+     ,@(when (and custom-instructions (not (string-empty-p custom-instructions)))
+         `((customInstructions . ,custom-instructions))))))
+
+(defun claude-gravity--pi-refresh-commands (session-id)
+  "Refresh pi's command inventory for SESSION-ID (`get_commands' RPC).
+Asks gravity-server to re-fetch extension commands, prompt templates,
+and skills from the running pi process and broadcast a fresh
+set_pi_commands patch.  Use this after dropping a new .pi/prompts/foo.md
+or reloading an extension while the session is running."
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (claude-gravity--log 'info "Pi[%s]: refresh-commands" session-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.refresh-commands")
+     (sessionId . ,session-id))))
+
+(defun claude-gravity--pi-refresh-models (session-id)
+  "Refresh pi's available-model list for SESSION-ID (`get_available_models').
+Asks gravity-server to re-fetch the model list from the running pi
+process and broadcast a fresh set_pi_models patch.  M-x only, no
+binding — the picker is the primary surface."
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (claude-gravity--log 'info "Pi[%s]: refresh-models" session-id)
+  (claude-gravity--send-to-server
+   `((type . "pi.refresh-models")
+     (sessionId . ,session-id))))
+
+(defun claude-gravity--pi-new-session (session-id)
+  "Start a fresh session inside pi process for SESSION-ID (`new_session' RPC).
+The pi process is reused; only the conversation state is reset.
+Roughly equivalent to Claude Code's /clear."
+  (interactive (list (claude-gravity--current-pi-session-id)))
+  (when (yes-or-no-p "Pi: start a fresh session (current conversation will be cleared)? ")
+    (claude-gravity--log 'info "Pi[%s]: new_session" session-id)
+    (claude-gravity--send-to-server
+     `((type . "pi.new-session")
+       (sessionId . ,session-id)))))
+
+(defun claude-gravity--pi-resume (session-id)
+  "Resume a pi session by SESSION-ID.
+Looks up the gravity Session for SESSION-ID, reads `:pi-session-file'
+(set by gravity-server after spawn), and asks the server to load that
+file via pi's `switch_session' RPC (`pi.resume' terminal message).
+
+If a live pi driver exists for SESSION-ID, the server swaps that
+driver's working session to the recorded path. Otherwise the server
+spawns a fresh pi process resuming the path."
+  (let* ((session (gethash session-id claude-gravity--sessions))
+         (path (and session (plist-get session :pi-session-file))))
+    (cond
+     ((null session)
+      (user-error "Unknown gravity session: %s" session-id))
+     ((null path)
+      (user-error "No pi-session-file recorded for %s (resume not possible)" session-id))
+     (t
+      (claude-gravity--log 'info "Pi[%s]: resume sessionPath=%s" session-id path)
+      (claude-gravity--send-to-server
+       `((type . "pi.resume")
+         (sessionId . ,session-id)
+         (sessionPath . ,path)))))))
 
 
 ;;; ── Message receiving ───────────────────────────────────────────────
@@ -511,6 +724,7 @@ Accumulates partial data in a buffer and processes complete newline-delimited JS
 (defun claude-gravity--handle-server-message (msg)
   "Dispatch a server message MSG to the appropriate handler."
   (let ((type (alist-get 'type msg)))
+    (claude-gravity--log 'debug "→ server msg: type=%s" type)
     (pcase type
       ("session.snapshot"
        (claude-gravity--handle-session-snapshot msg))
@@ -536,8 +750,24 @@ Accumulates partial data in a buffer and processes complete newline-delimited JS
        (claude-gravity--handle-state-changed msg))
       ("pi.session"
        (claude-gravity--handle-pi-session msg))
+      ("protocol.mismatch"
+       (claude-gravity--handle-protocol-mismatch msg))
       (_
        (claude-gravity--log 'warn "Unknown server message type: %s" type)))))
+
+(defun claude-gravity--handle-protocol-mismatch (msg)
+  "Warn the user that this client's protocol version differs from the server.
+MSG is the parsed `protocol.mismatch' message.  Indicates this Emacs client
+is out of date relative to gravity-server and should be reloaded."
+  (let ((server-version (alist-get 'serverVersion msg))
+        (client-version (alist-get 'clientVersion msg))
+        (text (claude-gravity--jnil (alist-get 'text msg))))
+    (claude-gravity--log 'warn "Protocol mismatch: server=v%s client=v%s — %s"
+                         server-version client-version (or text ""))
+    (message "claude-gravity: %s"
+             (or text
+                 (format "Protocol mismatch (server v%s, this client v%s). Reload claude-gravity."
+                         server-version client-version)))))
 
 
 ;;; ── JSON null handling ──────────────────────────────────────────────
@@ -572,7 +802,8 @@ SESSION-JSON is an alist from json-parse-string."
          (tool-index (make-hash-table :test 'equal))
          (agent-index (make-hash-table :test 'equal))
          (tasks-ht (make-hash-table :test 'equal))
-         (files-ht (make-hash-table :test 'equal)))
+         (files-ht (make-hash-table :test 'equal))
+         (compactions nil))
     ;; Convert turns
     (dolist (turn-json turns-json)
       (let ((turn-node (claude-gravity--json-turn-to-alist turn-json)))
@@ -596,6 +827,10 @@ SESSION-JSON is an alist from json-parse-string."
                      (list (cons 'ops (or (funcall jnil (alist-get 'ops entry)) nil))
                            (cons 'last-touched (alist-get 'lastTouched entry)))
                      files-ht)))))
+    ;; Convert compactions (pi only — empty list for CC sessions)
+    (setq compactions
+          (mapcar #'claude-gravity--json-compaction-to-alist
+                  (funcall jnil (alist-get 'compactions session-json))))
     ;; Build turn index from the populated turns tlist
     (let ((turn-index (make-hash-table :test 'eql)))
       (dolist (turn-node (claude-gravity--tlist-items turns-tl))
@@ -603,8 +838,6 @@ SESSION-JSON is an alist from json-parse-string."
       ;; Build plist
       (list :session-id session-id
             :source (or (funcall jnil (alist-get 'source session-json)) "gravity-server")
-            :managed-by (if (equal (funcall jnil (alist-get 'source session-json)) "pi")
-                            'daemon nil)
             :cwd cwd
             :project project
             :status status
@@ -618,12 +851,23 @@ SESSION-JSON is an alist from json-parse-string."
                               (alist-get 'lastEventTime session-json))
             :token-usage (claude-gravity--json-token-usage
                           (funcall jnil (alist-get 'tokenUsage session-json)))
+            :cost (let ((c (funcall jnil (alist-get 'cost session-json))))
+                    (and (numberp c) c))
+            :context-usage (let ((cu (funcall jnil (alist-get 'contextUsage session-json))))
+                             (when cu
+                               (list :tokens (alist-get 'tokens cu)
+                                     :context-window (alist-get 'contextWindow cu)
+                                     :percent (alist-get 'percent cu))))
+            :context-pct (let ((cu (funcall jnil (alist-get 'contextUsage session-json))))
+                           (let ((p (and cu (alist-get 'percent cu))))
+                             (and (numberp p) p)))
             :plan (claude-gravity--json-plan
                    (funcall jnil (alist-get 'plan session-json)))
             :streaming-text (funcall jnil (alist-get 'streamingText session-json))
             :permission-mode (funcall jnil (alist-get 'permissionMode session-json))
             :model-name (funcall jnil (alist-get 'modelName session-json))
             :tmux-session (funcall jnil (alist-get 'tmuxSession session-json))
+            :pi-session-file (funcall jnil (alist-get 'piSessionFile session-json))
             :turns turns-tl
             :turn-index turn-index
             :current-turn (or (alist-get 'currentTurn session-json) 0)
@@ -631,12 +875,39 @@ SESSION-JSON is an alist from json-parse-string."
             :agent-index agent-index
             :tasks tasks-ht
             :files files-ht
+            :compactions compactions
+            :pi-commands (let ((pc (funcall jnil (alist-get 'piCommands session-json))))
+                           (and pc
+                                (mapcar #'claude-gravity--json-pi-command-to-alist
+                                        (if (vectorp pc) (append pc nil) pc))))
+            :pi-models (let ((pm (funcall jnil (alist-get 'piModels session-json))))
+                         (and pm
+                              (mapcar #'claude-gravity--json-pi-model-to-alist
+                                      (if (vectorp pm) (append pm nil) pm))))
             :total-tool-count (or (alist-get 'totalToolCount session-json) 0)
             :header-line-cache nil
             :buffer nil
             :display-name (funcall jnil (alist-get 'displayName session-json))
             :ignored nil
             :allow-patterns nil))))
+
+(defun claude-gravity--json-file-diff-to-alist (file-json)
+  "Convert a JSON FileDiff object to a file-diff alist.
+FILE-JSON has fields path/ops/editCount/status/added/removed/hunks/truncated.
+`hunks' may be JSON null — coerced to nil; otherwise kept as a list of hunk
+alists (the exact shape `claude-gravity--insert-structured-patch' renders)."
+  (let* ((jnil #'claude-gravity--jnil)
+         (hunks (funcall jnil (alist-get 'hunks file-json))))
+    (list (cons 'path (alist-get 'path file-json))
+          (cons 'ops (claude-gravity--as-list
+                      (funcall jnil (alist-get 'ops file-json))))
+          (cons 'editCount (or (funcall jnil (alist-get 'editCount file-json)) 0))
+          (cons 'status (or (funcall jnil (alist-get 'status file-json))
+                            "modified"))
+          (cons 'added (or (funcall jnil (alist-get 'added file-json)) 0))
+          (cons 'removed (or (funcall jnil (alist-get 'removed file-json)) 0))
+          (cons 'hunks (and hunks (claude-gravity--as-list hunks)))
+          (cons 'truncated (eq (alist-get 'truncated file-json) t)))))
 
 (defun claude-gravity--json-turn-to-alist (turn-json)
   "Convert a JSON TurnNode to turn alist."
@@ -645,6 +916,8 @@ SESSION-JSON is an alist from json-parse-string."
          (steps-json (or (funcall jnil (alist-get 'steps turn-json)) nil))
          (agents-json (or (funcall jnil (alist-get 'agents turn-json)) nil))
          (tasks-json (or (funcall jnil (alist-get 'tasks turn-json)) nil))
+         (edited-files-json (or (funcall jnil (alist-get 'editedFiles turn-json))
+                                nil))
          (steps-tl (claude-gravity--tlist-new))
          (agents-tl (claude-gravity--tlist-new)))
     ;; Convert steps
@@ -662,11 +935,20 @@ SESSION-JSON is an alist from json-parse-string."
           (cons 'steps steps-tl)
           (cons 'agents agents-tl)
           (cons 'tasks (mapcar #'claude-gravity--json-task-to-alist tasks-json))
+          ;; Pre-allocated edited-files key — populated from snapshot here
+          ;; and upserted later by `update_turn_file' patches.
+          (cons 'edited-files
+                (mapcar #'claude-gravity--json-file-diff-to-alist
+                        (claude-gravity--as-list edited-files-json)))
           (cons 'tool-count (or (alist-get 'toolCount turn-json) 0))
           (cons 'agent-count (or (alist-get 'agentCount turn-json) 0))
           (cons 'frozen (eq (alist-get 'frozen turn-json) t))
           (cons 'stop_text (funcall jnil (alist-get 'stopText turn-json)))
           (cons 'stop_thinking (funcall jnil (alist-get 'stopThinking turn-json)))
+          ;; Pi-only: trailing AssistantMessage's stopReason from agent_end.
+          ;; Distinguishes "stop" / "length" / "toolUse" / "error" / "aborted".
+          ;; CC sessions leave this nil — CC's Stop hook doesn't carry it.
+          (cons 'stop_reason (funcall jnil (alist-get 'stopReason turn-json)))
           (cons 'token-in (funcall jnil (alist-get 'tokenIn turn-json)))
           (cons 'token-out (funcall jnil (alist-get 'tokenOut turn-json))))))
 
@@ -701,6 +983,10 @@ SESSION-JSON is an alist from json-parse-string."
           (cons 'parent_agent_id (funcall jnil (alist-get 'parentAgentId tool-json)))
           (cons 'ambiguous (eq (alist-get 'ambiguous tool-json) t))
           (cons 'candidate-agents (funcall jnil (alist-get 'candidateAgentIds tool-json)))
+          ;; Pi-only: latest partial result streamed via tool_execution_update.
+          ;; Replaced on each update; carries final-result fallback if pi's
+          ;; tool_execution_end provides no result. CC tools always nil.
+          (cons 'partial (funcall jnil (alist-get 'partial tool-json)))
           (cons 'agent nil))))  ; agent link populated during indexing
 
 (defun claude-gravity--json-agent-to-alist (agent-json)
@@ -734,6 +1020,43 @@ SESSION-JSON is an alist from json-parse-string."
           (cons 'elapsed (funcall jnil (alist-get 'elapsed prompt-json)))
           (cons 'tool_use_id (funcall jnil (alist-get 'toolUseId prompt-json)))
           (cons 'answer (funcall jnil (alist-get 'answer prompt-json))))))
+
+(defun claude-gravity--json-compaction-to-alist (m)
+  "Convert a JSON CompactionMarker to an alist.
+Returns nil if M is nil (used by mapcar over a possibly-empty list)."
+  (when m
+    (let ((jnil #'claude-gravity--jnil))
+      (list (cons 'reason (or (funcall jnil (alist-get 'reason m)) "unknown"))
+            (cons 'turn-number (or (alist-get 'turnNumber m) -1))
+            (cons 'timestamp (claude-gravity--epoch-to-time
+                              (alist-get 'timestamp m)))
+            (cons 'tokens-before (funcall jnil (alist-get 'tokensBefore m)))
+            (cons 'summary (funcall jnil (alist-get 'summary m)))
+            (cons 'aborted (eq (alist-get 'aborted m) t))))))
+
+(defun claude-gravity--json-pi-command-to-alist (c)
+  "Convert a JSON PiCommandDescriptor to an alist.
+Pi emits: { name, description?, source, location?, path? }. Returns
+nil for nil input (used by mapcar over a possibly-empty list)."
+  (when c
+    (let ((jnil #'claude-gravity--jnil))
+      (list (cons 'name (or (funcall jnil (alist-get 'name c)) ""))
+            (cons 'description (funcall jnil (alist-get 'description c)))
+            (cons 'source (or (funcall jnil (alist-get 'source c)) "extension"))
+            (cons 'location (funcall jnil (alist-get 'location c)))
+            (cons 'path (funcall jnil (alist-get 'path c)))))))
+
+(defun claude-gravity--json-pi-model-to-alist (m)
+  "Convert a JSON PiModel to an alist.
+Pi emits: { id, name?, provider, contextWindow? }. Returns nil for nil
+input (used by mapcar over a possibly-empty list)."
+  (when m
+    (let ((jnil #'claude-gravity--jnil))
+      (list (cons 'id (or (funcall jnil (alist-get 'id m)) ""))
+            (cons 'name (funcall jnil (alist-get 'name m)))
+            (cons 'provider (or (funcall jnil (alist-get 'provider m)) ""))
+            (cons 'context-window
+                  (funcall jnil (alist-get 'contextWindow m)))))))
 
 (defun claude-gravity--json-task-to-alist (task-json)
   "Convert a JSON Task to task alist."
@@ -907,6 +1230,23 @@ MSG contains sessionId and patches array."
        (plist-put session :token-usage
                   (claude-gravity--json-token-usage (alist-get 'usage patch))))
 
+      ("set_cost"
+       (let ((cost (alist-get 'cost patch)))
+         (plist-put session :cost (and (numberp cost) cost))))
+
+      ("set_context_usage"
+       (let* ((cu (alist-get 'contextUsage patch))
+              (parsed (when cu
+                        (list :tokens (alist-get 'tokens cu)
+                              :context-window (alist-get 'contextWindow cu)
+                              :percent (alist-get 'percent cu))))
+              (pct (and parsed (plist-get parsed :percent))))
+         (plist-put session :context-usage parsed)
+         ;; Derive :context-pct for the existing UI hookpoint (UI reads
+         ;; the integer percent directly; the structured form is kept on
+         ;; :context-usage for callers that want window/tokens too).
+         (plist-put session :context-pct (and (numberp pct) pct))))
+
       ("set_plan"
        (plist-put session :plan
                   (claude-gravity--json-plan (alist-get 'plan patch))))
@@ -923,7 +1263,8 @@ MSG contains sessionId and patches array."
              (branch (alist-get 'branch patch))
              (pid (alist-get 'pid patch))
              (model-name (alist-get 'modelName patch))
-             (tmux-session (alist-get 'tmuxSession patch)))
+             (tmux-session (alist-get 'tmuxSession patch))
+             (pi-session-file (alist-get 'piSessionFile patch)))
          (when slug (plist-put session :slug slug))
          (when display-name (plist-put session :display-name display-name))
          (when branch (plist-put session :branch branch))
@@ -935,6 +1276,8 @@ MSG contains sessionId and patches array."
            (let ((sid (plist-get session :session-id)))
              (when (and sid (not (gethash sid claude-gravity--tmux-sessions)))
                (puthash sid tmux-session claude-gravity--tmux-sessions))))
+         (when pi-session-file
+           (plist-put session :pi-session-file pi-session-file))
          (plist-put session :last-event-time (current-time))))
 
       ("add_turn"
@@ -958,9 +1301,14 @@ MSG contains sessionId and patches array."
               (turn-node (claude-gravity--get-turn-node session turn-num)))
          (when turn-node
            (let ((st (alist-get 'stopText patch))
-                 (sth (alist-get 'stopThinking patch)))
+                 (sth (alist-get 'stopThinking patch))
+                 (sr (alist-get 'stopReason patch)))
              (when st (setf (alist-get 'stop_text turn-node) st))
-             (when sth (setf (alist-get 'stop_thinking turn-node) sth))))))
+             (when sth (setf (alist-get 'stop_thinking turn-node) sth))
+             ;; stop_reason was pre-allocated nil if turn-alist setup
+             ;; didn't include it (older snapshots); use cons-onto-front
+             ;; fallback by using setf alist-get's auto-prepend.
+             (when sr (setf (alist-get 'stop_reason turn-node) sr))))))
 
       ("set_turn_tokens"
        (let* ((turn-num (alist-get 'turnNumber patch))
@@ -1034,6 +1382,14 @@ MSG contains sessionId and patches array."
            (let ((pth (alist-get 'postThinking patch)))
              (when pth (setf (alist-get 'post_thinking tool) pth))))))
 
+      ("update_tool_partial"
+       ;; Pi streaming partial. Replaces tool.partial; final result takes
+       ;; over on complete_tool. No-op if tool unknown (snapshot lag).
+       (let* ((tid (alist-get 'toolUseId patch))
+              (tool (gethash tid (plist-get session :tool-index))))
+         (when tool
+           (setf (alist-get 'partial tool) (alist-get 'partial patch)))))
+
       ("add_agent"
        (let* ((agent-json (alist-get 'agent patch))
               (agent (claude-gravity--json-agent-to-alist agent-json))
@@ -1068,6 +1424,27 @@ MSG contains sessionId and patches array."
               (task-json (alist-get 'task patch))
               (task (claude-gravity--json-task-to-alist task-json)))
          (puthash task-id task (plist-get session :tasks))))
+
+      ("update_turn_file"
+       ;; Upsert one file's consolidated per-turn diff. Replace the
+       ;; same-`path' entry in the turn's `edited-files' list, else
+       ;; append. Idempotent — safe to re-apply on resync.
+       (let* ((turn-num (alist-get 'turnNumber patch))
+              (file-json (alist-get 'file patch))
+              (turn-node (claude-gravity--get-turn-node session turn-num)))
+         (when (and turn-node file-json)
+           (let* ((fd (claude-gravity--json-file-diff-to-alist file-json))
+                  (path (alist-get 'path fd))
+                  (existing (alist-get 'edited-files turn-node))
+                  (found nil))
+             (dolist (e existing)
+               (when (equal (alist-get 'path e) path)
+                 (setq found e)))
+             (if found
+                 ;; Replace existing entry in place by mutating its conses.
+                 (setcdr found (cdr fd))
+               (setf (alist-get 'edited-files turn-node)
+                     (append existing (list fd))))))))
 
       ("track_file"
        (let* ((path (alist-get 'path patch))
@@ -1106,6 +1483,39 @@ MSG contains sessionId and patches array."
                      (float-time
                       (time-subtract (current-time)
                                      (alist-get 'submitted p)))))))))
+
+      ("set_pi_commands"
+       ;; Pi only: snapshot of `get_commands` (extension commands, prompt
+       ;; templates, skills) usable as /<name> in the compose buffer.
+       ;; Each entry is normalized to an alist with symbol keys so CAPF
+       ;; can read it without case-mapping.
+       (let* ((cmds-json (alist-get 'commands patch))
+              (cmds (mapcar #'claude-gravity--json-pi-command-to-alist
+                            (if (vectorp cmds-json)
+                                (append cmds-json nil)
+                              cmds-json))))
+         (plist-put session :pi-commands cmds)))
+
+      ("set_pi_models"
+       ;; Pi only: snapshot of `get_available_models' (models switchable
+       ;; via set_model). Each entry is normalized to an alist with symbol
+       ;; keys so the picker can read it without case-mapping.
+       (let* ((models-json (alist-get 'models patch))
+              (models (mapcar #'claude-gravity--json-pi-model-to-alist
+                              (if (vectorp models-json)
+                                  (append models-json nil)
+                                models-json))))
+         (plist-put session :pi-models models)))
+
+      ("add_compaction"
+       ;; Append-only chronological list of pi compaction events. Marker
+       ;; carries turnNumber=N (or -1 sentinel) so the renderer can group
+       ;; markers by the turn that was current when compaction completed.
+       (let* ((marker-json (alist-get 'marker patch))
+              (marker (claude-gravity--json-compaction-to-alist marker-json))
+              (existing (plist-get session :compactions)))
+         (plist-put session :compactions (append existing (list marker)))))
+
       (_
        ;; Unknown patch op — request full snapshot to recover
        (claude-gravity--log 'warn "Unknown patch op: %s — requesting snapshot" op)
@@ -1318,22 +1728,25 @@ Also prunes orphan sessions that the server no longer knows about."
 ;; avoiding UI freezes when the user is doing heavy work.
 
 (defun claude-gravity--handle-pi-session (msg)
-  "Handle pi.session messages from gravity-server.
-MSG contains session state updates for pi sessions.
-Updates `claude-gravity--pi-session-id' and triggers UI refresh."
+  "Handle pi.session control messages from gravity-server.
+MSG.event is one of started | stopped | rejected | update. With
+multi-session pi, started/stopped are informational — the actual
+session state arrives via session.snapshot/session.update like any
+other source. We just log and refresh the UI."
   (let* ((session-id (alist-get 'sessionId msg))
          (event (alist-get 'event msg))
-         (cwd (alist-get 'cwd msg)))
+         (cwd (alist-get 'cwd msg))
+         (reason (alist-get 'reason msg)))
     (cond
      ((equal event "started")
-      (setq claude-gravity--pi-session-id session-id)
       (claude-gravity--log 'info "Pi: session started: %s (cwd=%s)" session-id cwd)
       (claude-gravity--schedule-refresh))
      ((equal event "stopped")
       (claude-gravity--log 'info "Pi: session stopped: %s" session-id)
-      (when (equal claude-gravity--pi-session-id session-id)
-        (setq claude-gravity--pi-session-id nil))
       (claude-gravity--schedule-refresh))
+     ((equal event "rejected")
+      (claude-gravity--log 'warn "Pi: start rejected: %s" (or reason "no reason given"))
+      (message "Pi: %s" (or reason "session start rejected")))
      ((equal event "update")
       (claude-gravity--log 'debug "Pi: session update: %s" session-id)
       (claude-gravity--schedule-refresh))
@@ -1353,7 +1766,20 @@ Emacs fetches the actual data when it's ready."
     (setq claude-gravity--pending-signal (cons what session-id))
     (when session-id
       (puthash session-id seq claude-gravity--last-seq))
-    (claude-gravity--schedule-delayed-fetch)))
+    ;; Inbox/notice signals are user-blocking (permission, question,
+    ;; plan-review, alerts) — poll immediately so the action surfaces at
+    ;; once. Since push removal, this is the ONLY path that delivers a
+    ;; permission/question to the UI; a 6ms-lived intercept item must not
+    ;; wait on the idle timer. session/overview stay debounced (the whole
+    ;; point of pull mode: no UI churn during heavy editing).
+    (if (member (format "%s" what) '("inbox" "notice"))
+        (progn
+          (when claude-gravity--poll-timer
+            (cancel-timer claude-gravity--poll-timer)
+            (setq claude-gravity--poll-timer nil))
+          (setq claude-gravity--pending-signal nil)
+          (claude-gravity--poll-now))
+      (claude-gravity--schedule-delayed-fetch))))
 
 (defun claude-gravity--handle-session-patches (msg)
   "Handle session-patches — apply patches and update sequence number.

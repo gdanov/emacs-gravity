@@ -539,8 +539,19 @@ If SESSION-ID is nil, uses the current buffer's session."
   "Open a chat-style compose buffer to send a prompt.
 SESSION-ID defaults to the current buffer's session or any active tmux session."
   (interactive)
-  (let* ((resolved (claude-gravity--resolve-tmux-session session-id))
-         (sid (car resolved))
+  ;; Pi sessions have no tmux pane — resolve the sid directly and skip
+  ;; `claude-gravity--resolve-tmux-session' (which errors without one).
+  ;; Everything else (history, separator, read-only guard, CAPF) is the
+  ;; same buffer machinery the tmux path uses.
+  (let* ((cand-sid (or session-id
+                       claude-gravity--buffer-session-id
+                       (let ((section (ignore-errors (magit-current-section))))
+                         (when (and section (eq (oref section type) 'session-entry))
+                           (oref section value)))))
+         (cand-session (and cand-sid (claude-gravity--get-session cand-sid)))
+         (pi-p (and cand-session (equal (plist-get cand-session :source) "pi")))
+         (resolved (unless pi-p (claude-gravity--resolve-tmux-session session-id)))
+         (sid (if pi-p cand-sid (car resolved)))
          (session (claude-gravity--get-session sid))
          (label (if session (claude-gravity--session-label session) (claude-gravity--short-id sid)))
          (buf-name (format "*Claude Compose: %s*" label))
@@ -572,12 +583,16 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
                 #'claude-gravity--compose-guard-history nil t)
       ;; Buffer-local state (after major mode so they survive)
       (setq-local claude-gravity--compose-session-id sid)
+      (setq-local claude-gravity--compose-backend (if pi-p 'pi 'tmux))
       ;; Minor modes
       (claude-gravity-compose-mode 1)
       (when (fboundp 'olivetti-mode) (olivetti-mode 1))
       ;; C-g support: post-command-hook detects keyboard-quit
       (add-hook 'post-command-hook
                 #'claude-gravity--compose-quit-hook nil t)
+      ;; Pi slash-command autocomplete (no-op for non-pi sessions)
+      (add-hook 'completion-at-point-functions
+                #'claude-gravity--pi-slash-capf nil t)
       ;; Place point at end (compose area)
       (goto-char (point-max)))
     ;; Display in side window
@@ -589,12 +604,15 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
 (declare-function claude-gravity-daemon-compose-send "claude-gravity-daemon")
 (declare-function claude-gravity--current-session-daemon-p "claude-gravity-daemon")
 (declare-function claude-gravity-daemon-set-permission-mode "claude-gravity-daemon")
+(declare-function claude-gravity--pi-prompt "claude-gravity-client")
 
 (defun claude-gravity-compose-send ()
   "Send the composed prompt and close the compose buffer."
   (interactive)
-  (if (eq claude-gravity--compose-backend 'daemon)
-      (claude-gravity-daemon-compose-send)
+  (cond
+   ((eq claude-gravity--compose-backend 'daemon)
+    (claude-gravity-daemon-compose-send))
+   (t
     (let* ((sep claude-gravity--compose-separator)
            (text (string-trim
                   (buffer-substring-no-properties
@@ -602,11 +620,92 @@ SESSION-ID defaults to the current buffer's session or any active tmux session."
                    (point-max)))))
       (if (string-empty-p text)
           (message "Nothing to send")
-        (let* ((sid claude-gravity--compose-session-id)
-               (resolved (claude-gravity--resolve-tmux-session sid)))
-          (claude-gravity--send-prompt-core text (car resolved) (cdr resolved))
+        (let ((sid claude-gravity--compose-session-id))
+          (if (eq claude-gravity--compose-backend 'pi)
+              ;; Pi: send straight to the server (no tmux pane).
+              (claude-gravity--pi-prompt sid text)
+            (let ((resolved (claude-gravity--resolve-tmux-session sid)))
+              (claude-gravity--send-prompt-core text (car resolved) (cdr resolved))))
           (claude-gravity--compose-cleanup)
-          (message "Prompt sent"))))))
+          (message "Prompt sent")))))))
+
+
+;;; ── Pi slash-command autocomplete ──────────────────────────────────
+;;
+;; CAPF that completes `/foo` against pi's `get_commands` inventory
+;; (extension commands, prompt templates, skills). The completion table
+;; reads `:pi-commands` from the session plist on every invocation so
+;; mid-session refreshes via `claude-gravity--pi-refresh-commands` are
+;; picked up automatically.
+
+(defvar claude-gravity--pi-source-order
+  '(("extension" . 0) ("prompt" . 1) ("skill" . 2))
+  "Display order for pi command sources in completion.")
+
+(defun claude-gravity--pi-source-rank (cmd)
+  "Sort key for a pi command alist CMD."
+  (or (alist-get (alist-get 'source cmd) claude-gravity--pi-source-order
+                 nil nil #'equal)
+      99))
+
+(defun claude-gravity--pi-cmd-annotation (commands cand)
+  "Annotation string for CAND in a completion table built from COMMANDS."
+  (let* ((name (if (string-prefix-p "/" cand) (substring cand 1) cand))
+         (cmd (seq-find (lambda (c) (equal (alist-get 'name c) name))
+                        commands))
+         (src (and cmd (alist-get 'source cmd)))
+         (desc (and cmd (alist-get 'description cmd))))
+    (when cmd
+      (concat "  "
+              (when src (propertize (format "[%s]" src)
+                                    'face 'shadow))
+              (when desc (concat " — " desc))))))
+
+(defun claude-gravity--pi-slash-capf ()
+  "Completion-at-point function for pi slash commands.
+Active when point is inside the compose area of a pi-backed session and
+the current token starts with `/'.  Returns nil otherwise so other
+CAPFs may run."
+  (when (and (bound-and-true-p claude-gravity--compose-session-id)
+             claude-gravity--compose-separator
+             (>= (point) (marker-position claude-gravity--compose-separator)))
+    (let* ((sid claude-gravity--compose-session-id)
+           (session (and sid (gethash sid claude-gravity--sessions)))
+           (commands (and session (plist-get session :pi-commands))))
+      (when (and (equal (plist-get session :source) "pi")
+                 commands)
+        (save-excursion
+          (let* ((end (point))
+                 (bol (line-beginning-position))
+                 (beg
+                  (save-excursion
+                    (when (re-search-backward
+                           "\\(?:^\\|[[:space:]]\\)\\(/[A-Za-z0-9:_./-]*\\)"
+                           bol t)
+                      (match-beginning 1)))))
+            (when beg
+              (let* ((sorted (sort (copy-sequence commands)
+                                   (lambda (a b)
+                                     (let ((ra (claude-gravity--pi-source-rank a))
+                                           (rb (claude-gravity--pi-source-rank b)))
+                                       (if (= ra rb)
+                                           (string<
+                                            (alist-get 'name a)
+                                            (alist-get 'name b))
+                                         (< ra rb))))))
+                     (cands (mapcar (lambda (c)
+                                      (concat "/" (alist-get 'name c)))
+                                    sorted)))
+                (list beg end
+                      (lambda (probe pred action)
+                        (complete-with-action action cands probe pred))
+                      :exclusive 'no
+                      :annotation-function
+                      (lambda (cand)
+                        (claude-gravity--pi-cmd-annotation sorted cand))
+                      :company-kind (lambda (_) 'snippet))))))))))
+
+(declare-function claude-gravity--pi-slash-capf nil)
 
 
 (defun claude-gravity-compose-cancel ()

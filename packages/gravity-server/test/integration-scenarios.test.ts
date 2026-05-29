@@ -7,9 +7,22 @@ import type { HookSocketMessage, ServerMessage, Patch, HookEventName, HookData }
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const TMP = join(process.env.TMPDIR || "/tmp", `gravity-scenarios-${process.pid}`);
-const HOOK_SOCK = join(TMP, "hooks.sock");
-const TERMINAL_SOCK = join(TMP, "terminal.sock");
+// Socket location. Default (CI/dev) uses a per-pid subdir under TMPDIR.
+// This suite needs AF_UNIX server bind (`listen()` on a unix path). Some
+// sandboxes block that bind syscall entirely (the Claude Code Bash
+// sandbox does — run sandbox-disabled or in CI). Sandboxes that instead
+// gate by *directory* can point GRAVITY_TEST_SOCK_DIR at their permitted
+// flat dir; sockets are then placed directly there with pid-unique names.
+// No CI impact, default behaviour unchanged.
+const SOCK_FLAT_DIR = process.env.GRAVITY_TEST_SOCK_DIR;
+const TMP = SOCK_FLAT_DIR
+  || join(process.env.TMPDIR || "/tmp", `gravity-scenarios-${process.pid}`);
+const HOOK_SOCK = SOCK_FLAT_DIR
+  ? join(SOCK_FLAT_DIR, `gravity-${process.pid}-hooks.sock`)
+  : join(TMP, "hooks.sock");
+const TERMINAL_SOCK = SOCK_FLAT_DIR
+  ? join(SOCK_FLAT_DIR, `gravity-${process.pid}-terminal.sock`)
+  : join(TMP, "terminal.sock");
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -342,9 +355,12 @@ describe("Integration Scenarios", () => {
       // Verify patch ops sequence
       const ops = patches.map((p) => p.op);
 
-      // Turn freezing: 3 freeze_turn ops (freeze turn 0 before turn 1, freeze turn 1 before turn 2, freeze turn 2 before turn 3)
+      // Turn freezing: 4 freeze_turn ops — turn 0 freezes on the first
+      // UserPromptSubmit, turns 1/2/3 each freeze on Stop (freeze-on-Stop).
+      // The subsequent UserPromptSubmit calls openTurn which no-ops the
+      // freeze because the prev turn is already frozen.
       const freezes = patches.filter((p) => p.op === "freeze_turn");
-      expect(freezes.length).toBe(3);
+      expect(freezes.length).toBe(4);
 
       // 3 add_turn ops (turns 1, 2, 3)
       const addTurns = patches.filter((p) => p.op === "add_turn");
@@ -377,7 +393,8 @@ describe("Integration Scenarios", () => {
       expect(snap.turns[0].frozen).toBe(true);
       expect(snap.turns[1].frozen).toBe(true);
       expect(snap.turns[2].frozen).toBe(true);
-      expect(snap.turns[3].frozen).toBe(false); // last turn not frozen
+      // Last turn is now frozen too (freeze-on-Stop).
+      expect(snap.turns[3].frozen).toBe(true);
       expect(snap.currentTurn).toBe(3);
       expect(snap.totalToolCount).toBe(4);
       expect(snap.tokenUsage.input_tokens).toBe(500);

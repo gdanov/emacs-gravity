@@ -5,3 +5,4 @@
 
 export { startPiDriver } from "./mod.js";
 export type { StartPiDriverOptions, PiDriverInstance, TranslationCallback, SessionLifecycleCallback } from "./mod.js";
+export type { PiSessionStats, PiCommandDescriptor } from "./types.js";

@@ -11,8 +11,8 @@
 // that emits translation results for processing by gravity-server.
 
 import { spawnPiSync } from "./spawn.js";
-import { translatePiEvent, createSessionStart, createSessionEnd, getPendingEvents } from "./hook-translator.js";
-import { createAccState, drainPendingEvents } from "./turn-accumulator.js";
+import { translatePiEvent, createSessionStart, createSessionEnd } from "./hook-translator.js";
+import { createAccState } from "./turn-accumulator.js";
 import {
   createSessionMetadata,
   updateModel,
@@ -27,6 +27,11 @@ import type {
   AccState,
   TranslationResult,
   ThinkingLevel,
+  PiSessionStats,
+  PiCommandDescriptor,
+  PiModel,
+  ExtensionUIRequestEvent,
+  ExtensionUIResponsePayload,
 } from "./types.js";
 
 /** Generate a unique session ID for the pi driver. */
@@ -48,9 +53,25 @@ export type TranslationCallback = (result: TranslationResult) => void;
 export type SessionLifecycleCallback = (event: "start" | "stop" | "error", metadata?: SessionMetadata) => void;
 
 /**
+ * Callback fired when pi emits an `extension_ui_request`. The handler is
+ * responsible for surfacing the dialog to the user and calling the driver's
+ * `sendExtensionUIResponse` with the matching id when the user responds.
+ * Fire-and-forget methods (notify / setStatus / setWidget / setTitle /
+ * set_editor_text) also flow through this callback; the handler may
+ * choose to ignore them or surface them as session notifications.
+ */
+export type ExtensionUIRequestCallback = (request: ExtensionUIRequestEvent) => void;
+
+/**
  * Options for startPiDriver.
  */
 export interface StartPiDriverOptions extends PiDriverOptions {
+  /**
+   * The outer session ID (from startPiSession). Used as the routing key for
+   * all TranslationResult objects emitted by this driver. If not provided,
+   * a new ID is generated internally.
+   */
+  sessionId?: string;
   /**
    * Called with each translation result from pi events.
    */
@@ -60,6 +81,13 @@ export interface StartPiDriverOptions extends PiDriverOptions {
    * Defaults to no-op.
    */
   onLifecycle?: SessionLifecycleCallback;
+  /**
+   * Called when pi emits an `extension_ui_request`. The handler should
+   * eventually call the driver's `sendExtensionUIResponse` for dialog
+   * methods (select / confirm / input / editor). Defaults to no-op
+   * (dialog methods will hang from pi's perspective until timeout).
+   */
+  onExtensionUIRequest?: ExtensionUIRequestCallback;
 }
 
 /**
@@ -76,10 +104,34 @@ export interface PiDriverInstance {
   setThinkingLevel(level: ThinkingLevel): void;
   /** Set thinking level via string (will be normalized). */
   setEffortLevel(level: string): void;
+  /** Set pi's session name (`set_session_name` RPC); pi reflects it via `get_state.sessionName`. */
+  setSessionName(name: string): void;
+  /** Switch model at runtime (pi `set_model` RPC). */
+  setModel(provider: string, modelId: string): void;
+  /** Request session stats from pi (tokens, cost, contextUsage). */
+  getSessionStats(): Promise<PiSessionStats>;
+  /** Request `get_state` from pi (sessionFile, sessionId, model, etc.). */
+  getState(): Promise<Record<string, unknown>>;
+  /** Request `get_commands` from pi (extension commands, prompt templates, skills). */
+  getCommands(): Promise<PiCommandDescriptor[]>;
+  /** Request `get_available_models` from pi (models switchable via `set_model`). */
+  getAvailableModels(): Promise<PiModel[]>;
+  /** Load a different session file into the running pi process. */
+  switchSession(sessionPath: string): Promise<boolean>;
+  /** Send an `extension_ui_response` back to pi for a dialog request id. */
+  sendExtensionUIResponse(payload: ExtensionUIResponsePayload): void;
+  /** Compact pi's conversation context (`compact` RPC). */
+  compact(customInstructions?: string): Promise<{ summary?: string; tokensBefore?: number }>;
+  /** Start a fresh session inside the running pi process (`new_session` RPC). */
+  newSession(parentSession?: string): Promise<boolean>;
   /** Stop the pi subprocess and clean up. */
   stop(): Promise<void>;
-  /** Get current session metadata. */
-  getMetadata(): SessionMetadata;
+  /**
+   * Get the live accumulator state — primarily so gravity-server can update
+   * `branch` after pi's session file resolves. Internal hook, not intended
+   * for general client use.
+   */
+  getAccState(): AccState;
 }
 
 /**
@@ -109,21 +161,19 @@ export interface PiDriverInstance {
  * ```
  */
 export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
-  const sessionId = generateSessionId();
+  const sessionId = options.sessionId ?? generateSessionId();
   const cwd = options.cwd ?? process.cwd();
   const thinkingLevel = options.thinkingLevel ?? "medium";
 
-  // Create accumulator state
+  // Create accumulator state — uses the outer sessionId for all event routing
   let state = createAccState(sessionId, cwd, thinkingToEffort(thinkingLevel));
 
   // Create session metadata
   let metadata = createSessionMetadata(sessionId, cwd, thinkingLevel);
 
-  // Track pending events queue
-  let pendingQueue: TranslationResult[] = [];
-
   // Callback for session lifecycle
   const onLifecycle = options.onLifecycle ?? (() => {});
+  const onExtensionUIRequest = options.onExtensionUIRequest ?? (() => {});
 
   // Spawn pi subprocess
   const { driver, process: childProcess } = spawnPiSync({
@@ -132,43 +182,43 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
     model: options.model,
     provider: options.provider,
     piBinaryPath: options.piBinaryPath,
+    sessionDir: options.sessionDir,
+    resumeSession: options.resumeSession,
   });
 
   // Set up event handler
+  let lifecycleStarted = false;
   driver.setEventHandler((evt: PiProtocolEvent) => {
-    // Translate pi event to gravity event
-    const result = translatePiEvent(evt.event, state);
-
-    if (result.kind === "emit") {
-      // Emit the translation result
-      pendingQueue.push(result.result);
-    } else if (result.kind === "accumulate") {
-      // State was updated, check for pending events
-      const pending = getPendingEvents(state);
-      pendingQueue.push(...pending);
+    // extension_ui_request bypasses the translator — it's a dialog call,
+    // not a session event. The host (gravity-server) owns the inbox flow.
+    if (evt.event.type === "extension_ui_request") {
+      onExtensionUIRequest(evt.event as ExtensionUIRequestEvent);
+      return;
     }
 
-    // Handle special events
+    // Translate pi event into zero or more gravity events.
+    const result = translatePiEvent(evt.event, state);
+    if (result.kind === "emit") {
+      for (const r of result.results) {
+        options.onTranslation(r);
+      }
+    }
+
+    // Driver-level lifecycle. `start` fires once for the lifetime of the pi
+    // process — agent_start repeats per prompt, so gate with a flag.
+    // `stop` is NOT emitted on agent_end: pi stays alive across prompts. The
+    // session-end signal is process exit (handled below).
     switch (evt.event.type) {
       case "model_select":
         metadata = updateModel(metadata, (evt.event as { model: string; provider: string }).model, (evt.event as { model: string; provider: string }).provider);
-        // Also update state model
         state.modelName = (evt.event as { model: string }).model;
         break;
-
       case "agent_start":
-        onLifecycle("start", metadata);
+        if (!lifecycleStarted) {
+          lifecycleStarted = true;
+          onLifecycle("start", metadata);
+        }
         break;
-
-      case "agent_end":
-        onLifecycle("stop", metadata);
-        break;
-    }
-
-    // Emit pending events
-    while (pendingQueue.length > 0) {
-      const toEmit = pendingQueue.shift()!;
-      options.onTranslation(toEmit);
     }
   });
 
@@ -212,12 +262,38 @@ export function startPiDriver(options: StartPiDriverOptions): PiDriverInstance {
       state.effortLevel = thinkingToEffort(normalized);
     },
 
+    setSessionName: (name) => driver.setSessionName(name),
+
+    setModel: (provider: string, modelId: string) => {
+      driver.setModel(provider, modelId);
+      // Optimistically reflect in metadata/state. Pi's `set_model` response
+      // carries the canonical Model object; if/when we wire response parsing
+      // we can reconcile from that.
+      metadata = updateModel(metadata, modelId, provider);
+      state.modelName = modelId;
+    },
+
+    getSessionStats: () => driver.getSessionStats(),
+
+    getState: () => driver.getState(),
+
+    getCommands: () => driver.getCommands(),
+
+    getAvailableModels: () => driver.getAvailableModels(),
+
+    switchSession: (sessionPath: string) => driver.switchSession(sessionPath),
+
+    sendExtensionUIResponse: (payload: ExtensionUIResponsePayload) =>
+      driver.sendExtensionUIResponse(payload),
+
+    compact: (customInstructions?: string) => driver.compact(customInstructions),
+
+    newSession: (parentSession?: string) => driver.newSession(parentSession),
+
     stop: () => {
       return driver.stop();
     },
 
-    getMetadata: () => {
-      return metadata;
-    },
+    getAccState: () => state,
   };
 }

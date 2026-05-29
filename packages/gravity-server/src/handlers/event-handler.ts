@@ -32,9 +32,15 @@ import {
   setPlan,
   updateMeta,
   addPrompt,
+  attachPrompt,
+  openTurn,
+  closeTurn,
   finalizeLastPrompt,
   addTool,
   completeTool,
+  findTool,
+  updateToolPartial,
+  addCompaction,
   addAgent,
   completeAgent,
   trackFile,
@@ -43,7 +49,16 @@ import {
   finalizeTurnTokens,
   updatePromptAnswer,
 } from "../state/session.js";
+import { recordEdit, clearSession as clearFileDiffScratch } from "../enrichment/file-diff.js";
 import type { Socket } from "net";
+
+/** Edit-class tools whose effect is rolled up into per-turn file diffs. */
+const EDIT_TOOLS: ReadonlySet<string> = new Set([
+  "Edit",
+  "Write",
+  "MultiEdit",
+  "NotebookEdit",
+]);
 
 // ── Pure helpers (no Effect wrapping needed) ─────────────────────────
 
@@ -166,6 +181,12 @@ const handleSessionStart = (ctx: EventContext) =>
     const patches: Patch[] = [];
 
     const existing = store.get(ctx.sessionId);
+    // Reset on re-start with the same session id (Claude Code's /clear shape
+    // and resume cases). Pi no longer triggers SessionStart per prompt —
+    // pi's per-prompt boundary is TurnOpen — so there is no pi case to
+    // exempt here. SessionStart for a pi session fires once, synthesized
+    // eagerly by `startPiSession`, before any pi events arrive; that path
+    // creates a fresh session and the `existing` branch is not taken.
     if (existing) {
       patches.push(...resetSession(existing));
     }
@@ -193,6 +214,8 @@ const handleSessionEnd = (ctx: EventContext) =>
     const store = yield* Effect.service(SessionStore);
     const session = store.get(ctx.sessionId);
     if (!session) return [];
+    // Drop per-turn file-diff scratch (full file contents) for this session.
+    clearFileDiffScratch(ctx.sessionId);
     return sessionEnd(session);
   });
 
@@ -211,16 +234,34 @@ const handleUserPromptSubmit = (ctx: EventContext) =>
         && lastTurn.prompt.submitted != null
         && (Date.now() - lastTurn.prompt.submitted) < 500;
       if (!isDuplicate) {
-        patches.push(
-          ...addPrompt(session, {
-            type: "user",
-            text: displayText,
-            submitted: Date.now(),
-            elapsed: null,
-            toolUseId: null,
-            answer: null,
-          }),
-        );
+        const entry = {
+          type: "user" as const,
+          text: displayText,
+          submitted: Date.now(),
+          elapsed: null,
+          toolUseId: null,
+          answer: null,
+        };
+        // Pi opens the turn separately via TurnOpen (agent_start). The user
+        // message arrives later as a UserPromptSubmit; attach to the
+        // already-opened, still-empty turn instead of creating a new one.
+        // Claude Code's UserPromptSubmit is atomic (open + attach), so it
+        // falls through to addPrompt.
+        //
+        // Guard against attaching to turn 0 (pre-prompt activity): if pi
+        // ever emits `message_start role=user` before `agent_start` the
+        // "current" turn is turn 0, which by convention has no prompt.
+        // Attaching there would orphan the prompt off the pre-prompt
+        // bucket and skip actual turn creation.
+        const attachToOpen =
+          (ctx.data.source === "pi" || session.source === "pi") &&
+          lastTurn && !lastTurn.prompt && !lastTurn.frozen &&
+          lastTurn.turnNumber !== 0;
+        if (attachToOpen) {
+          patches.push(...attachPrompt(session, entry));
+        } else {
+          patches.push(...addPrompt(session, entry));
+        }
         if (!session.displayName) {
           const name = displayText.length <= 60
             ? displayText
@@ -230,6 +271,76 @@ const handleUserPromptSubmit = (ctx: EventContext) =>
       }
     }
     patches.push(...setClaudeStatus(session, "responding"));
+    return patches;
+  });
+
+/**
+ * Internal pi-driver event: open an empty turn (boundary signal). Emitted
+ * by the translator on pi's `agent_start`. The corresponding UserPromptSubmit
+ * (carried by pi's `message_start role=user`) will attach the prompt label
+ * to this turn. If the user message never arrives or is empty, the turn
+ * shows up unlabeled — the boundary is still in place.
+ */
+const handleTurnOpen = (ctx: EventContext) =>
+  Effect.gen(function* () {
+    const store = yield* Effect.service(SessionStore);
+    const session = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session, ctx.data.source as string | undefined);
+    const patches: Patch[] = [];
+    patches.push(...openTurn(session));
+    patches.push(...setClaudeStatus(session, "responding"));
+    return patches;
+  });
+
+/**
+ * Internal pi-driver event: close the current turn (stamp stop text,
+ * record tokens, freeze). Emitted by the translator on pi's `agent_end`.
+ * Mirrors the work that `handleStop` does for Claude Code (idle status,
+ * inbox idle item), but routes through `closeTurn` to guarantee the turn
+ * is frozen — even if the next prompt never comes.
+ */
+const handleTurnClose = (ctx: EventContext) =>
+  Effect.gen(function* () {
+    const store = yield* Effect.service(SessionStore);
+    const inbox = yield* Effect.service(Inbox);
+    const session = store.get(ctx.sessionId);
+    if (!session) return [];
+
+    const patches: Patch[] = [];
+    patches.push(...setClaudeStatus(session, "idle"));
+
+    const stopText = stripSystemTags(ctx.data.stop_text as string) ?? undefined;
+    const stopThinking = stripSystemTags(ctx.data.stop_thinking as string) ?? undefined;
+    const stopReason = typeof ctx.data.stop_reason === "string" ? ctx.data.stop_reason : undefined;
+    const tokenUsage = ctx.data.token_usage;
+    const closeOpts: { stopText?: string; stopThinking?: string; stopReason?: string; tokenIn?: number; tokenOut?: number } = {
+      stopText,
+      stopThinking,
+      stopReason,
+    };
+    if (tokenUsage) {
+      const tokenIn =
+        (tokenUsage.input_tokens ?? 0) +
+        (tokenUsage.cache_read_input_tokens ?? 0) +
+        (tokenUsage.cache_creation_input_tokens ?? 0);
+      const tokenOut = tokenUsage.output_tokens ?? 0;
+      closeOpts.tokenIn = tokenIn;
+      closeOpts.tokenOut = tokenOut;
+      patches.push(...setTokenUsage(session, tokenUsage));
+    }
+    patches.push(...closeTurn(session, closeOpts));
+
+    const turn = session.currentTurn;
+    const snippet = stopText
+      ? stopText.replace(/[\n\r\t]+/g, " ").substring(0, 80)
+      : "idle";
+    inbox.add(
+      "idle",
+      ctx.sessionId,
+      session.project,
+      session.slug || ctx.sessionId.substring(0, 8),
+      snippet,
+      { turn, snippet },
+    );
     return patches;
   });
 
@@ -311,6 +422,7 @@ const handlePreToolUse = (ctx: EventContext) =>
       input: (ctx.data.tool_input as Record<string, unknown>) || {},
       status: "running" as const,
       result: null as unknown,
+      partial: null as unknown,
       timestamp: Date.now(),
       duration: null,
       turn: session.currentTurn,
@@ -387,6 +499,26 @@ const handlePostToolUse = (ctx: EventContext) =>
     patches.push(
       ...trackTask(session, "PostToolUse", toolName, ctx.data.tool_input as Record<string, unknown>, toolUseId || "", toolResponse),
     );
+
+    // Per-turn consolidated file diff. `recordEdit` consumes the RAW
+    // `toolResponse` (with `structuredPatch` intact) — `completeTool` above
+    // strips bloated result fields from the STORED result, but the local
+    // `toolResponse` reference is untouched. Use the completed tool's turn
+    // number (the tool carries `.turn`).
+    if (EDIT_TOOLS.has(toolName) && toolUseId) {
+      const tool = findTool(session, toolUseId);
+      if (tool && tool.status === "done") {
+        patches.push(
+          ...(yield* recordEdit(
+            session,
+            tool.turn,
+            toolName,
+            ctx.data.tool_input as Record<string, unknown>,
+            toolResponse,
+          )),
+        );
+      }
+    }
 
     if (toolName === "AskUserQuestion" && toolUseId) {
       const answer = extractAskAnswer(toolResponse);
@@ -465,6 +597,34 @@ const handlePermissionRequest = (ctx: EventContext) =>
     const patches: Patch[] = [];
     patches.push(...setClaudeStatus(session, "idle"));
 
+    // AskUserQuestion is owned by the dedicated AskUserQuestionIntercept
+    // hook, which creates a proper "question" inbox item rendered with the
+    // option-pick UI. Claude Code also fires PermissionRequest (matcher "")
+    // for the same AskUserQuestion ~150ms later; creating a generic
+    // "permission" item here would render the raw tool_input as a JSON
+    // dump and bury the real question UI. Unblock this redundant hook
+    // socket with an allow passthrough so Claude proceeds — the intercept
+    // collects the actual answer on its own hook socket. Without this the
+    // PermissionRequest bridge would hang until its 96h timeout.
+    if (toolName === "AskUserQuestion") {
+      if (ctx.hookSocket) {
+        try {
+          ctx.hookSocket.write(
+            JSON.stringify({
+              hookSpecificOutput: {
+                hookEventName: "PermissionRequest",
+                decision: { behavior: "allow" },
+              },
+            }) + "\n",
+          );
+          ctx.hookSocket.end();
+        } catch {
+          /* socket may already be closed */
+        }
+      }
+      return patches;
+    }
+
     if (ctx.hookSocket) {
       inbox.add(
         inboxType,
@@ -508,6 +668,65 @@ const handleAskUserQuestionIntercept = (ctx: EventContext) =>
     return patches;
   });
 
+/**
+ * Internal pi-driver event: pi completed a compaction. Records a
+ * `CompactionMarker` on the session capturing the reason, the turn that
+ * was current at the time, optional token-savings info, and pi's summary
+ * of the discarded history. Does NOT move turn boundaries; the marker is
+ * a session-level record terminals can render inline by `turnNumber`.
+ *
+ * Aborted compactions are still recorded (`aborted: true`) so the user
+ * sees the attempt; summary is typically null in that case.
+ */
+const handleCompaction = (ctx: EventContext) =>
+  Effect.gen(function* () {
+    const store = yield* Effect.service(SessionStore);
+    const session = ensureSession(
+      store,
+      ctx.sessionId,
+      ctx.cwd,
+      ctx.data.tmux_session,
+      ctx.data.source as string | undefined,
+    );
+    const reason = typeof ctx.data.compaction_reason === "string"
+      ? (ctx.data.compaction_reason as string)
+      : "unknown";
+    const tokensBefore = typeof ctx.data.compaction_tokens_before === "number"
+      ? (ctx.data.compaction_tokens_before as number)
+      : null;
+    const summary = stripSystemTags(ctx.data.compaction_summary as string) ?? null;
+    const aborted = ctx.data.compaction_aborted === true;
+
+    return addCompaction(session, {
+      reason,
+      // -1 sentinel if no user turn has been opened yet (compaction during
+      // turn 0 — the pre-prompt activity bucket). Terminals can render
+      // such markers as session-prelude entries.
+      turnNumber: session.currentTurn > 0 ? session.currentTurn : -1,
+      timestamp: Date.now(),
+      tokensBefore,
+      summary,
+      aborted,
+    });
+  });
+
+/**
+ * Internal pi-driver event: streaming partial result from a running tool.
+ * Emitted by the translator on pi's `tool_execution_update`. Replaces
+ * `tool.partial` with the new value; no-op if the tool is unknown or
+ * already completed (late `_update` arriving after `_end` is dropped).
+ */
+const handleToolPartial = (ctx: EventContext) =>
+  Effect.gen(function* () {
+    const store = yield* Effect.service(SessionStore);
+    const session = store.get(ctx.sessionId);
+    if (!session) return [];
+    const toolUseId = ctx.data.tool_use_id as string | undefined;
+    if (!toolUseId) return [];
+    const partial = (ctx.data as Record<string, unknown>).partial;
+    return updateToolPartial(session, toolUseId, partial);
+  });
+
 // ── Dispatch map ─────────────────────────────────────────────────────
 
 type Handler = (ctx: EventContext) => Effect.Effect<Patch[], never, SessionStoreService | InboxService | FsService>;
@@ -525,6 +744,10 @@ const dispatch: Record<string, Handler> = {
   Notification: () => Effect.succeed([]),
   PermissionRequest: handlePermissionRequest,
   AskUserQuestionIntercept: handleAskUserQuestionIntercept,
+  TurnOpen: handleTurnOpen,
+  TurnClose: handleTurnClose,
+  ToolPartial: handleToolPartial,
+  Compaction: handleCompaction,
 };
 
 // ── Post-stop race detection ─────────────────────────────────────────

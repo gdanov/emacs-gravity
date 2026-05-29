@@ -28,6 +28,16 @@
 (declare-function claude-gravity-unified-interrupt "claude-gravity-daemon")
 (declare-function claude-gravity-unified-resume "claude-gravity-daemon")
 (declare-function claude-gravity-debug-show "claude-gravity-debug")
+(declare-function claude-gravity--inbox-act-permission "claude-gravity-actions")
+(declare-function claude-gravity--inbox-act-question "claude-gravity-actions")
+(declare-function claude-gravity--inbox-act-plan-review "claude-gravity-actions")
+(declare-function claude-gravity--inbox-act-idle "claude-gravity-actions")
+(declare-function claude-gravity--force-resync-session "claude-gravity-client")
+(declare-function claude-gravity--force-resync-all "claude-gravity-client")
+(declare-function claude-gravity--current-session-pi-p "claude-gravity-client")
+(declare-function claude-gravity--read-project-dir "claude-gravity-tmux")
+(declare-function claude-gravity-start-session "claude-gravity-tmux")
+(declare-function markdown-view-mode "markdown-mode")
 (defvar claude-gravity--tmux-sessions)
 (defvar claude-gravity--notice-text)
 
@@ -109,7 +119,10 @@ Shows bridge type: Pi (pi-agent), CC (Claude Code), CCT (Claude Code+tmux), OC (
         (sid (plist-get session :session-id))
         (managed-by (plist-get session :managed-by)))
     (cond
-     ;; Pi-agent bridge (daemon-managed sessions)
+     ;; Pi-agent bridge — server stamps :source "pi" on the session.
+     ((equal source "pi")
+      (propertize "[Pi]" 'face 'claude-gravity-detail-label))
+     ;; Agent SDK daemon (on hold — see claude-gravity-daemon.el).
      ((eq managed-by 'daemon)
       (propertize "[Pi]" 'face 'claude-gravity-detail-label))
      ;; OpenCode
@@ -1287,6 +1300,9 @@ Used to instrument per-section render latency."
               (push (claude-gravity--section-timing "files"
 																										(lambda () (claude-gravity-insert-files session)))
                     section-times)
+              (push (claude-gravity--section-timing "pi-commands"
+																											(lambda () (claude-gravity-insert-pi-commands session)))
+                    section-times)
               (push (claude-gravity--section-timing "patterns"
 																										(lambda () (claude-gravity-insert-allow-patterns session)))
                     section-times)
@@ -1422,6 +1438,7 @@ Used to instrument per-section render latency."
 
 (define-key claude-gravity-session-cmd-map (kbd "s") 'claude-gravity-start-menu)
 (define-key claude-gravity-session-cmd-map (kbd "n") 'claude-gravity-daemon-start-session)
+(define-key claude-gravity-session-cmd-map (kbd "p") 'claude-gravity--pi-start)
 (define-key claude-gravity-session-cmd-map (kbd "h") 'claude-gravity-start-session-here)
 (define-key claude-gravity-session-cmd-map (kbd "r") 'claude-gravity-unified-resume)
 (define-key claude-gravity-session-cmd-map (kbd "w") 'claude-gravity-resume-in-tmux)
@@ -1430,7 +1447,9 @@ Used to instrument per-section render latency."
 (define-key claude-gravity-session-cmd-map (kbd "m") 'claude-gravity-set-model)
 (define-key claude-gravity-session-cmd-map (kbd "l") 'claude-gravity-set-permission-mode)
 (define-key claude-gravity-session-cmd-map (kbd "/") 'claude-gravity-slash-command)
-(define-key claude-gravity-session-cmd-map (kbd "c") 'claude-gravity-reset-session)
+(define-key claude-gravity-session-cmd-map (kbd "c") 'claude-gravity-unified-reset)
+(define-key claude-gravity-session-cmd-map (kbd "t") 'claude-gravity--pi-set-thinking)
+(define-key claude-gravity-session-cmd-map (kbd "z") 'claude-gravity--pi-compact)
 (define-key claude-gravity-session-cmd-map (kbd "$") 'claude-gravity-terminal-session)
 (define-key claude-gravity-session-cmd-map (kbd "<backtab>") 'claude-gravity-toggle-permission-mode)
 (define-key claude-gravity-session-cmd-map (kbd ",") 'claude-gravity-rename-session)
@@ -1659,6 +1678,18 @@ Otherwise toggle."
         (if (and file-path (file-exists-p file-path))
             (find-file file-path)
           (magit-section-toggle section))))
+     ;; Per-turn edited-file diff → visit the file (value is the path)
+     ((and section (eq (oref section type) 'turn-file-diff))
+      (let ((path (oref section value)))
+        (if (and path (stringp path) (file-exists-p path))
+            (find-file path)
+          (magit-section-toggle section))))
+     ;; Pi command → open its backing file (template/skill/extension)
+     ((and section (eq (oref section type) 'pi-command))
+      (let ((path (alist-get 'path (oref section value))))
+        (if (and path (file-exists-p path))
+            (find-file path)
+          (magit-section-toggle section))))
      ;; Config: empty category → dired on directory
      ((and section (eq (oref section type) 'config-category))
       (let ((dir-path (alist-get 'dir-path (oref section value))))
@@ -1754,6 +1785,11 @@ Works on config-category sections (Rules, Skills, Agents, Commands)."
            (if (and file-path (file-exists-p file-path))
                (find-file file-path)
              (message "No file path for this entry"))))
+        ('pi-command
+         (let ((path (alist-get 'path (oref section value))))
+           (if (and path (file-exists-p path))
+               (find-file path)
+             (message "No file path for this pi command"))))
         ('config-leaf
          (let ((file-path (alist-get 'file-path (oref section value))))
            (when file-path (find-file file-path))))
@@ -1923,27 +1959,66 @@ When point is on a project section, returns the :cwd of the first matching sessi
         cwd)))))
 
 
-(defun claude-gravity-start-session-here ()
-  "Start a Claude session rooted at the current buffer's project.
-Detects project root via `project-current' or `vc-root-dir', then
-prompts to confirm the directory before starting."
-  (interactive)
-  (let* ((proj-root (or (and (fboundp 'project-root)
-                             (when-let ((proj (project-current)))
-                               (project-root proj)))
-                        (vc-root-dir)
-                        default-directory))
-         (dir (claude-gravity--read-project-dir
-               "Project directory: "
-               (expand-file-name proj-root))))
-    (claude-gravity-start-session dir)))
+;; Forward declarations for backend starters (loaded lazily)
+(defvar claude-gravity--last-project-dir)
+(declare-function claude-gravity-start-session "claude-gravity-tmux")
+(declare-function claude-gravity-daemon-start-session "claude-gravity-daemon")
+(declare-function claude-gravity--pi-start "claude-gravity-client")
+
+(defun claude-gravity--start-session-here--detect-dir ()
+  "Detect project root from current buffer.
+Used as the default directory for session starters."
+  (or (and (fboundp 'project-root)
+           (when-let ((proj (project-current)))
+             (project-root proj)))
+      (vc-root-dir)
+      default-directory))
+
+(defun claude-gravity-start-session-here (&optional backend)
+  "Start a coding-agent session rooted at the current buffer's project.
+Prompts for the project directory and the backend to use.
+
+BACKEND can be one of:
+- `tmux'  — Interactive Claude Code session in a tmux window
+- `pi'    — Pi coding agent (stateless, one prompt at a time)
+- `cloud' — Cloud-daemon session (uses the SDK bridge)
+
+If BACKEND is nil, prompts the user to pick one.  When called
+non-interactively, BACKEND must be provided.
+
+Detects project root via `project-current' or `vc-root-dir'."
+  (interactive
+   (list (let ((choices '(("tmux" . "tmux  — Interactive Claude in a tmux window")
+                          ("pi"   . "pi    — Pi coding agent (prompt-driven)")
+                          ("cloud". "cloud — Cloud daemon (SDK bridge)"))))
+           (pcase (completing-read
+                   "Session backend: "
+                   (mapcar #'cdr choices)
+                   nil t nil nil
+                   (cdar choices))
+             ((pred (string-match "^tmux" )) 'tmux)
+             ((pred (string-match "^pi"   )) 'pi)
+             ((pred (string-match "^cloud")) 'cloud)
+             (_ (user-error "Unknown backend"))))))
+  (let* ((dir-raw (claude-gravity--read-project-dir
+                  "Project directory: "
+                  (expand-file-name (claude-gravity--start-session-here--detect-dir))))
+         (dir (claude-gravity--normalize-cwd dir-raw)))
+    (pcase backend
+      ('tmux  (claude-gravity-start-session dir))
+      ('pi    (claude-gravity--pi-start dir))
+      ('cloud (claude-gravity-daemon-start-session dir))
+      (_      (user-error "Invalid backend: %S" backend)))))
 
 
 ;;; Commands
 
 ;;;###autoload (autoload 'claude-gravity-overview-menu "claude-gravity" nil t)
 (transient-define-prefix claude-gravity-overview-menu ()
-  "Overview buffer menu: manage sessions and inbox."
+  "Overview buffer menu: manage sessions and inbox.
+Backend-specific operations (thinking level, compact, reset, slash
+commands, etc.) all live under the `S' prefix and grey out via
+`:inapt-if-not' on backends that don't support them."
   [["Actions"
     ("g" "Refresh" claude-gravity-refresh)
     ("G" "Force resync" claude-gravity-force-resync)
@@ -1952,7 +2027,8 @@ prompts to confirm the directory before starting."
    ["Session Lifecycle (S prefix)"
     ("S s" "Start (tmux)" claude-gravity-start-menu)
     ("S n" "Start (Cloud)" claude-gravity-daemon-start-menu)
-    ("S h" "Start here" claude-gravity-start-session-here)
+    ("S p" "Start (Pi)"   claude-gravity--pi-start)
+    ("S h" "Start here"   claude-gravity-start-session-here)
     ("S r" "Resume session" claude-gravity-unified-resume)
     ("S w" "Resume (picker)" claude-gravity-resume-in-tmux)
     ("S ," "Rename session" claude-gravity-rename-session)]
@@ -1973,7 +2049,12 @@ prompts to confirm the directory before starting."
 
 ;;;###autoload (autoload 'claude-gravity-session-menu "claude-gravity" nil t)
 (transient-define-prefix claude-gravity-session-menu ()
-  "Session buffer menu: interact with current session."
+  "Session buffer menu: interact with current session.
+
+Common verbs (compose, stop, interrupt, set model, reset/clear,
+resume) dispatch to the right backend based on the session at point.
+Backend-specific operations live in the \"Backend-specific\" group
+and grey out when not applicable."
   [["View & Navigate"
     ("g" "Refresh" claude-gravity-refresh)
     ("G" "Force resync" claude-gravity-force-resync)
@@ -1989,6 +2070,10 @@ prompts to confirm the directory before starting."
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("S e" "Interrupt" claude-gravity-unified-interrupt
      :inapt-if-not claude-gravity--current-session-managed-p)
+    ("S c" "Reset/clear" claude-gravity-unified-reset
+     :inapt-if-not (lambda ()
+                     (or (claude-gravity--current-session-tmux-p)
+                         (claude-gravity--current-session-pi-p))))
     ("S m" "Set model" claude-gravity-set-model
      :inapt-if-not claude-gravity--current-session-managed-p)
     ("S l" "Set permission mode" claude-gravity-set-permission-mode
@@ -2002,22 +2087,15 @@ prompts to confirm the directory before starting."
     ("y" "Copy issue ID" claude-gravity-copy-issue-id)
     ("T" "Parse transcript" claude-gravity-view-agent-transcript)
     ("V" "Open transcript" claude-gravity-open-agent-transcript)]
-   ["Tmux (S prefix)"
-    ("S /" "Slash command" claude-gravity-slash-command
+   ["Backend-specific (S prefix)"
+    ("S /" "Slash command (tmux)" claude-gravity-slash-command
      :inapt-if-not claude-gravity--current-session-tmux-p)
-    ("S $" "Terminal" claude-gravity-terminal-session
+    ("S $" "Terminal (tmux)" claude-gravity-terminal-session
      :inapt-if-not claude-gravity--current-session-tmux-p)
-    ("S c" "Reset/clear" claude-gravity-reset-session
-     :inapt-if-not claude-gravity--current-session-tmux-p)]
-   ["Pi Sessions"
-    ("P s" "Start pi session" claude-gravity--pi-start)
-    ("P p" "Send prompt" claude-gravity--pi-prompt
-     :inapt-if-not (lambda () (null claude-gravity--pi-session-id)))
-    ("P t" "Set thinking level" claude-gravity--pi-set-thinking
-     :inapt-if-not (lambda () (null claude-gravity--pi-session-id)))
-    ("P a" "Abort" claude-gravity--pi-abort
-     :inapt-if-not (lambda () (null claude-gravity--pi-session-id)))
-    ("P ?" "Status" claude-gravity--pi-status)]
+    ("S t" "Thinking level (pi)" claude-gravity--pi-set-thinking
+     :inapt-if-not claude-gravity--current-session-pi-p)
+    ("S z" "Compact context (pi)" claude-gravity--pi-compact
+     :inapt-if-not claude-gravity--current-session-pi-p)]
    ["Permissions"
     ("A" "Copy allow pattern" claude-gravity-add-allow-pattern)
     ("a" "Add to settings" claude-gravity-add-allow-pattern-to-settings)]
@@ -2248,21 +2326,29 @@ summary.  Otherwise expands the last turn and its last step."
                     (with-selected-window win
                       (goto-char (oref last-stop start))
                       (recenter -3)))))
-            ;; No stop message: expand last turn and its last step
+            ;; No top-level stop message: expand last turn and its last step.
+            ;; For frozen turns (e.g. pi sessions) the stop-message is nested
+            ;; inside the turn — show it too.
             (when last-turn
               (magit-section-show last-turn)
-              (let ((last-step nil))
+              (let ((last-step nil)
+                    (nested-stop nil))
                 (dolist (child (oref last-turn children))
-                  (when (eq (oref child type) 'response-step)
-                    (magit-section-hide child)
-                    (setq last-step child)))
+                  (pcase (oref child type)
+                    ('response-step
+                     (magit-section-hide child)
+                     (setq last-step child))
+                    ('stop-message
+                     (setq nested-stop child))))
                 (when last-step
-                  (magit-section-show last-step)))
-              (let ((win (get-buffer-window (current-buffer))))
-                (when win
-                  (with-selected-window win
-                    (goto-char (1- (oref last-turn end)))
-                    (recenter -3)))))))))))
+                  (magit-section-show last-step))
+                (when nested-stop
+                  (magit-section-show nested-stop))
+                (let ((win (get-buffer-window (current-buffer))))
+                  (when win
+                    (with-selected-window win
+                      (goto-char (1- (oref last-turn end)))
+                      (recenter -3))))))))))))
 
 
 (defun claude-gravity-return-to-overview (&optional bury)

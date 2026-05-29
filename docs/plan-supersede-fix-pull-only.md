@@ -1,0 +1,163 @@
+# Plan: Fix AskUserQuestion supersede regression + remove push terminal communication
+
+> Status: **in progress** (started 2026-05-19, branch `fix/pi-driver`)
+>
+> Done: Phase 0 (scoping; tool_use_id identity confirmed structurally for
+> AskUserQuestion, deferred-to-test for ExitPlanMode), Phase 1.1–1.3
+> (forceCloseStaleForSession preserveToolUseId guard + supersede wiring +
+> handlePermissionRequest skip), Phase 3.2 (preserve-contract tests).
+> 191/191 gravity-server tests green, tsc clean. **Not committed** (awaiting
+> explicit request per source-control rule).
+>
+> Done (uncommitted): Phase 3.1 — extracted `processHookMessage` to a
+> module-level DI function + entrypoint guard (`isEntrypoint`) so the
+> module is importable without starting sockets. Phase 3.3 — socket-free
+> harness (`test/hook-message-harness.test.ts`): FakeTerminals + simulated
+> poll; AskUserQuestion liveness invariant (both hook orderings),
+> supersede-still-works, ExitPlanMode guard tests (Phase 0.2 open item
+> documented in-test). 197/197 vitest, tsc clean, bundle builds.
+>
+> Behaviour preservation: extraction was a verbatim move (closure→deps.*);
+> bracketed by the full unit suite (191→197) + tsc. True before/after
+> characterization impossible (zero prior coverage of this path) — locked
+> in going forward by the new harness instead.
+>
+> Phase 2 DONE (committed): server pull-only (`51b748f`), Emacs
+> immediate-poll-on-inbox (`64a98ea`), docs + protocol deprecation
+> (`5a1b7bb`). **Audit correction:** the Swift menubar did NOT need a
+> rewrite — it already implements a complete pull path (state-changed →
+> instantly-drained poll, inbox-items + session-patches handlers,
+> request.resync on connect, 10s heartbeat). Verified `swift build`
+> clean against the pull-only server, zero Swift changes. Protocol types
+> kept (deprecation-annotated, not deleted): deleting has no functional
+> benefit and real risk (EPERM'd integration test, untested Swift).
+>
+> Commits: 03af644 fix · 5154726 harness · 51b748f server pull-only ·
+> 64a98ea emacs poll · 5a1b7bb docs. Nothing pushed.
+>
+> 3.4 DONE (`2ecf7ba`): pull state-machine tests, 11/11 harness.
+> 3.5 DONE (`2ecf7ba`): signal-fed client ERT, 5/5.
+> 3.6 DONE (`cf08322`): integration-scenarios 13/13 green against the
+> pull-only server (sandbox-disabled — the Bash sandbox blocks AF_UNIX
+> bind categorically; not path-fixable, corrected assumption). Optional
+> GRAVITY_TEST_SOCK_DIR override added (zero CI impact). Full
+> gravity-server suite: 15/15 test files green.
+>
+> Remaining: Phase 4 — full `make test` (elisp+bridge+server), memory
+> update, then push (NEEDS EXPLICIT USER GO per source-control rule).
+
+## Objective
+
+1. **Root cause fix:** stop the generic `PreToolUse` from force-closing the
+   concurrent `AskUserQuestionIntercept` question item (same tool invocation).
+   Generalizes to ExitPlanMode plan-review.
+2. **Remove push terminal communication:** pull becomes the sole delivery
+   path; client polls *immediately* on an inbox signal.
+3. Test infrastructure that makes both safe and covers the only remaining
+   delivery path.
+
+## Root cause (established)
+
+For one `AskUserQuestion`, three hooks fire (all original since `a9c7e4c`):
+
+1. `AskUserQuestionIntercept` (PreToolUse matcher=`AskUserQuestion`,
+   bidirectional) → creates `question` inbox item + pending socket.
+2. generic `PreToolUse` (matcher=`''`, not bidirectional) → supersede block →
+   `forceCloseStaleForSession()` → **force-closes the question item** (writes
+   `{}` to intercept socket).
+3. `PermissionRequest` (matcher=`''`, bidirectional) → creates `permission`
+   item → survives → Emacs renders it via `json-encode` fallback.
+
+Push masked this (item delivered synchronously in the ~6ms window). The
+**pull-mode default flip `dd4c850` (2026-05-06)** exposed it: a contentless
+signal + later poll never catches a 6ms-lived item.
+
+`removeStaleForSession` already preserves pending items
+(`inbox.ts:101`). Only `forceCloseStaleForSession` kills the pending
+question item. Minimal correct guard: do not force-close a pending item
+whose `data.tool_use_id` equals the triggering event's `tool_use_id` — the
+generic `PreToolUse` and the intercept are the *same* tool invocation, not a
+stale prior interaction. Also protects ExitPlanMode plan-review.
+
+## Phases
+
+### Phase 0 — Scoping & safety net
+- 0.1 Two separate commits (fix; push-removal).
+- 0.2 Verify `tool_use_id` present + identical across sibling hooks.
+- 0.3 Document current symptom repro.
+
+### Phase 1 — Root-cause fix (server, shippable alone)
+- 1.1 `forceCloseStaleForSession(sessionId, preserveToolUseId?)` — skip item
+  whose `data.tool_use_id === preserveToolUseId`. Undefined → unchanged.
+- 1.2 Supersede block passes incoming `tool_use_id`.
+- 1.3 Keep `handlePermissionRequest` AskUserQuestion skip+unblock (done).
+- 1.4 ExitPlanMode plan-review now also preserved — intended; callout + test.
+
+### Phase 2 — Remove push terminal communication
+- 2.1 Audit every `terminals.broadcast(`; classify push-only vs pull.
+- 2.2 Delete `PULL_MODE`/`GRAVITY_PUSH_MODE` + push branches; trim shared
+  protocol types.
+- 2.3 Emacs client: pull-only; **inbox signal → immediate poll** (bypass idle
+  debounce).
+- 2.4 Docs (ARCHITECTURE, refactor-implementation, README, MEMORY).
+
+### Phase 3 — Test infrastructure
+- 3.1 Socket-free `processHookMessage` harness + `FakeTerminals` + simulated
+  poll. Characterization test brackets the extraction.
+- 3.2 Invert the `forceCloseStaleForSession` test (preserve same
+  tool_use_id; still reap different; undefined → full reap).
+- 3.3 Property/liveness test: both hook orderings × poll points ⇒ exactly one
+  renderable question item, never permission, intercept socket still pending;
+  ExitPlanMode variant.
+- 3.4 Pull state-machine: seq monotonic/no-gap; coalesced signal keeps net
+  change; create+remove-between-polls contract.
+- 3.5 Client ERT driven by recorded server *signals* (not synthetic items);
+  asserts immediate poll on inbox signal + option UI opens.
+- 3.6 Revive `integration-scenarios` in-sandbox (`$TMPDIR`/loopback sockets).
+
+### Phase 4 — Verify & land
+Tests green, byte-compile clean, manual repro, memory update, Conventional
+Commits (`fix(server): …`; `refactor(server,emacs)!: remove push …`), PR.
+
+## Acceptance criteria
+- CC-hook AskUserQuestion → Emacs option UI within ~one poll, both orderings.
+- `forceCloseStaleForSession` preserves same-`tool_use_id` pending item;
+  still supersedes genuinely stale prior interactions.
+- ExitPlanMode + permission flows unaffected/improved (tested).
+- No `PULL_MODE`/`GRAVITY_PUSH_MODE`/dead push code.
+- `handleHookMessage` reachable by in-sandbox tests; integration revived.
+- Inverted supersede test fails pre-fix, passes post-fix.
+
+## Phase 0.2 resolution — ExitPlanMode `tool_use_id` known-unknown (2026-05-19)
+
+Investigated authoritatively (Claude Code hook docs, code.claude.com/docs/en/hooks):
+
+- **`PreToolUse` carries `tool_use_id`** — confirmed verbatim ("PreToolUse
+  hooks receive `tool_name`, `tool_input`, and `tool_use_id`"). The
+  generic-PreToolUse ↔ AskUserQuestionIntercept pair (the reported bug) is
+  therefore structurally guaranteed and is proven end-to-end (e2e S2).
+- **`PermissionRequest` input schema is undocumented** — the docs show
+  only its decision *output*, never its input fields. Whether the
+  ExitPlanMode `PermissionRequest` payload carries the same `tool_use_id`
+  as its sibling generic `PreToolUse` **remains unverified**. No on-disk
+  artifact can answer it: bridge logs carry no payload; the raw-dump
+  feature (`CLAUDE_GRAVITY_DUMP=1` → `{transcript_dir}/gravity/dumps/`)
+  was never enabled in past sessions.
+
+**Risk: zero downside.** AskUserQuestion does not depend on this at all
+(`handlePermissionRequest` skips it; the guard acts on the generic
+PreToolUse). ExitPlanMode is purely opportunistic: if the
+`PermissionRequest` payload carries the matching `tool_use_id`,
+plan-review is also protected; if not, the guard no-ops for plan-review
+and behaviour is exactly pre-fix — **no regression in either case**. The
+harness ExitPlanMode tests use synthetic payloads (they pin the guard
+*mechanism*, not Claude's real shape — stated in-test).
+
+**Definitive closure (one live capture, user-side):** set
+`CLAUDE_GRAVITY_DUMP=1`, run a real plan-mode session through
+ExitPlanMode, then compare `tool_use_id` between the dumped
+`*__PermissionRequest__raw.json` and the sibling
+`*__PreToolUse__raw.json` under `{transcript_dir}/gravity/dumps/`. If
+they match, the ExitPlanMode generalization is confirmed; if absent,
+remove the "also protects ExitPlanMode" claim (no code change needed —
+the guard already no-ops safely).

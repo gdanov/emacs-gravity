@@ -1,31 +1,42 @@
 import SwiftUI
 
+// MARK: - Protocol version
+
+/// Terminal ⇄ server protocol version. Must match `PROTOCOL_VERSION` in
+/// packages/shared/src/types.ts. Sent in `hello`; if the server speaks a
+/// different version it replies with `protocol.mismatch` and this app shows
+/// a warning. Bump in lockstep with the shared constant on protocol changes.
+public let GRAVITY_PROTOCOL_VERSION = 2
+
 // MARK: - Menu Bar Icon State
 
 public enum MenuBarIconState: Equatable {
-    case neutral       // connected, all idle or no sessions
-    case responding    // at least one session is responding
-    case justFinished  // a session just went responding→idle
-    case attention     // inbox items present
-    case disconnected  // not connected to server
+    case neutral          // connected, all idle or no sessions
+    case responding       // at least one session is responding
+    case justFinished     // a session just went responding→idle
+    case attention        // inbox items present
+    case protocolMismatch // client/server protocol version mismatch
+    case disconnected     // not connected to server
 
     public var systemImage: String {
         switch self {
-        case .neutral:      return "bolt.fill"
-        case .responding:   return "bolt.fill"
-        case .justFinished: return "bolt.fill"
-        case .attention:    return "message.fill"
-        case .disconnected: return "bolt.slash.fill"
+        case .neutral:          return "bolt.fill"
+        case .responding:       return "bolt.fill"
+        case .justFinished:     return "bolt.fill"
+        case .attention:        return "message.fill"
+        case .protocolMismatch: return "exclamationmark.triangle.fill"
+        case .disconnected:     return "bolt.slash.fill"
         }
     }
 
     public var color: Color {
         switch self {
-        case .neutral:      return .white
-        case .responding:   return .orange
-        case .justFinished: return .green
-        case .attention:    return .orange
-        case .disconnected: return .secondary
+        case .neutral:          return .white
+        case .responding:       return .orange
+        case .justFinished:     return .green
+        case .attention:        return .orange
+        case .protocolMismatch: return .red
+        case .disconnected:     return .secondary
         }
     }
 }
@@ -134,16 +145,20 @@ public struct ServerMessage: Decodable {
     // state-changed (pull mode signal)
     public let what: String?
 
-    // notice
+    // notice / protocol.mismatch
     public let level: String?
     public let text: String?
 
+    // protocol.mismatch
+    public let serverVersion: Int?
+    public let clientVersion: Int?
+
     enum CodingKeys: String, CodingKey {
-        case type, projects, item, itemId, items, sessionId, patches, seq, what, level, text
+        case type, projects, item, itemId, items, sessionId, patches, seq, what, level, text, serverVersion, clientVersion
     }
 
     /// Memberwise init for test factories
-    public init(type: String, projects: [ProjectSummaryJSON]? = nil, item: InboxItemJSON? = nil, itemId: Int? = nil, items: [InboxItemJSON]? = nil, sessionId: String? = nil, patches: [PatchJSON]? = nil, seq: Int? = nil, what: String? = nil, level: String? = nil, text: String? = nil) {
+    public init(type: String, projects: [ProjectSummaryJSON]? = nil, item: InboxItemJSON? = nil, itemId: Int? = nil, items: [InboxItemJSON]? = nil, sessionId: String? = nil, patches: [PatchJSON]? = nil, seq: Int? = nil, what: String? = nil, level: String? = nil, text: String? = nil, serverVersion: Int? = nil, clientVersion: Int? = nil) {
         self.type = type
         self.projects = projects
         self.item = item
@@ -155,6 +170,8 @@ public struct ServerMessage: Decodable {
         self.what = what
         self.level = level
         self.text = text
+        self.serverVersion = serverVersion
+        self.clientVersion = clientVersion
     }
 }
 
@@ -253,9 +270,11 @@ public struct PatchJSON: Decodable {
 public struct TerminalRequest: Encodable, Equatable {
     public let type: String
     public let capabilities: [String]?
+    public let protocolVersion: Int?
 
-    public init(type: String, capabilities: [String]? = nil) {
+    public init(type: String, capabilities: [String]? = nil, protocolVersion: Int? = nil) {
         self.type = type
         self.capabilities = capabilities
+        self.protocolVersion = protocolVersion
     }
 }

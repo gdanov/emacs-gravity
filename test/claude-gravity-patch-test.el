@@ -1067,5 +1067,458 @@ ensure setf alist-get works in-place."
   "text-subsumes-p requires double newline, not single."
   (should-not (claude-gravity--text-subsumes-p "hello\nworld" "hello")))
 
+;;; ═══════════════════════════════════════════════════════════════════
+;;; Pi commands (set_pi_commands + slash-command CAPF)
+;;; ═══════════════════════════════════════════════════════════════════
+
+(defun cgp--pi-cmd (name source &optional description location path)
+  "Build a wire-shape pi command alist (as it arrives from JSON)."
+  (let ((c `((name . ,name) (source . ,source))))
+    (when description (setq c (append c `((description . ,description)))))
+    (when location    (setq c (append c `((location . ,location)))))
+    (when path        (setq c (append c `((path . ,path)))))
+    c))
+
+(ert-deftest cgp-set-pi-commands-stores-on-session ()
+  "set_pi_commands replaces :pi-commands with a list of alists."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "review" "prompt" "Review staged changes" "project" "/p/review.md")
+                                 ,(cgp--pi-cmd "skill:brave-search" "skill" "Web search" "user" "/u/s/SKILL.md")
+                                 ,(cgp--pi-cmd "stats" "extension")])))
+    (let ((cmds (plist-get s :pi-commands)))
+      (should (= 3 (length cmds)))
+      (should (equal "review" (alist-get 'name (nth 0 cmds))))
+      (should (equal "prompt" (alist-get 'source (nth 0 cmds))))
+      (should (equal "Review staged changes" (alist-get 'description (nth 0 cmds))))
+      (should (equal "skill:brave-search" (alist-get 'name (nth 1 cmds))))
+      (should (equal "stats" (alist-get 'name (nth 2 cmds))))
+      ;; Extension entries may lack description/location/path — must round-trip as nil.
+      (should-not (alist-get 'description (nth 2 cmds)))
+      (should-not (alist-get 'location (nth 2 cmds))))))
+
+(ert-deftest cgp-set-pi-commands-empty-array-clears ()
+  "set_pi_commands with empty vector yields an empty list (not nil)."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s '((op . "set_pi_commands") (commands . [])))
+    (should (equal '() (plist-get s :pi-commands)))))
+
+(ert-deftest cgp-set-pi-commands-list-form ()
+  "set_pi_commands accepts a list (not vector) of commands too."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . (,(cgp--pi-cmd "foo" "prompt")))))
+    (let ((cmds (plist-get s :pi-commands)))
+      (should (= 1 (length cmds)))
+      (should (equal "foo" (alist-get 'name (nth 0 cmds)))))))
+
+(ert-deftest cgp-pi-slash-capf-returns-nil-for-non-pi-session ()
+  "CAPF must be inert when the compose buffer's session isn't pi-backed."
+  (require 'claude-gravity-tmux)
+  (let* ((s (cgp--fresh-session)))
+    (plist-put s :source "claude-code")
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "foo" "prompt")])))
+    (with-temp-buffer
+      (setq-local claude-gravity--compose-session-id (plist-get s :session-id))
+      (setq-local claude-gravity--compose-separator (point-marker))
+      (insert "/fo")
+      (should-not (claude-gravity--pi-slash-capf)))))
+
+(ert-deftest cgp-pi-slash-capf-completes-from-inventory ()
+  "CAPF on `/' returns sorted candidates with annotations."
+  (require 'claude-gravity-tmux)
+  (let* ((s (cgp--fresh-session)))
+    (plist-put s :source "pi")
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "review" "prompt" "Review code")
+                                 ,(cgp--pi-cmd "skill:web" "skill" "Web search")
+                                 ,(cgp--pi-cmd "stats" "extension" "Show stats")])))
+    (with-temp-buffer
+      (setq-local claude-gravity--compose-session-id (plist-get s :session-id))
+      (setq-local claude-gravity--compose-separator (point-marker))
+      (insert "/")
+      (let* ((result (claude-gravity--pi-slash-capf))
+             (table (nth 2 result))
+             (annot (plist-get (nthcdr 3 result) :annotation-function))
+             (matches (all-completions "/" table)))
+        (should result)
+        ;; All three commands are visible
+        (should (= 3 (length matches)))
+        (should (member "/review" matches))
+        (should (member "/stats" matches))
+        (should (member "/skill:web" matches))
+        ;; Source ordering: extension → prompt → skill
+        (should (equal '("/stats" "/review" "/skill:web") matches))
+        ;; Annotations show source + description
+        (should (string-match-p "extension" (funcall annot "/stats")))
+        (should (string-match-p "Show stats" (funcall annot "/stats")))))))
+
+(ert-deftest cgp-pi-slash-capf-respects-separator ()
+  "CAPF must not fire above the compose separator (history area)."
+  (require 'claude-gravity-tmux)
+  (let* ((s (cgp--fresh-session)))
+    (plist-put s :source "pi")
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "foo" "prompt")])))
+    (with-temp-buffer
+      (setq-local claude-gravity--compose-session-id (plist-get s :session-id))
+      (insert "history above\n")
+      (setq-local claude-gravity--compose-separator (point-marker))
+      (insert "compose below\n/fo")
+      ;; Point is in compose area — CAPF should fire
+      (should (claude-gravity--pi-slash-capf))
+      ;; Move to history area — CAPF should be silent
+      (goto-char (point-min))
+      (should-not (claude-gravity--pi-slash-capf)))))
+
+
+;;; ═══════════════════════════════════════════════════════════════════
+;;; Pi Commands section renderer (claude-gravity-insert-pi-commands)
+;;; ═══════════════════════════════════════════════════════════════════
+
+(defun cgp--render-pi-commands (session)
+  "Render SESSION's pi-commands section into a temp buffer; return text."
+  (require 'claude-gravity-render)
+  (with-temp-buffer
+    (magit-insert-section (root)
+      (claude-gravity-insert-pi-commands session))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(ert-deftest cgp-pi-commands-section-empty-renders-nothing ()
+  "No section when :pi-commands is nil or empty."
+  (let ((s (cgp--fresh-session)))
+    (should (equal "" (cgp--render-pi-commands s)))
+    (plist-put s :pi-commands nil)
+    (should (equal "" (cgp--render-pi-commands s)))
+    (plist-put s :pi-commands '())
+    (should (equal "" (cgp--render-pi-commands s)))))
+
+(ert-deftest cgp-pi-commands-section-renders-grouped ()
+  "Populated inventory renders a heading and groups extension→prompt→skill."
+  (let ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_commands")
+                    (commands . [,(cgp--pi-cmd "skill:web" "skill" "Web search" "user" "/u/SKILL.md")
+                                 ,(cgp--pi-cmd "review" "prompt" "Review changes" "project" "/p/review.md")
+                                 ,(cgp--pi-cmd "run" "extension" "Run subagent")])))
+    (let ((txt (cgp--render-pi-commands s)))
+      (should (string-match-p "Pi Commands (3)" txt))
+      ;; Source grouping order: extension first, skill last.
+      (let ((i-ext (string-match "/run" txt))
+            (i-prm (string-match "/review" txt))
+            (i-skl (string-match "/skill:web" txt)))
+        (should (and i-ext i-prm i-skl))
+        (should (< i-ext i-prm))
+        (should (< i-prm i-skl)))
+      ;; Source labels + descriptions are shown.
+      (should (string-match-p "\\[extension\\]" txt))
+      (should (string-match-p "\\[prompt · project\\]" txt))
+      (should (string-match-p "Web search" txt)))))
+
+;;; ═══════════════════════════════════════════════════════════════════
+;;; Part N: Pi input/editor text-entry inbox surface (T1.1)
+;;; ═══════════════════════════════════════════════════════════════════
+
+(require 'claude-gravity-actions)
+
+(defun cgp--pi-text-item (&optional prefill placeholder)
+  "Build a synthetic `question' inbox item carrying pi_ui.kind=text."
+  `((id . 42)
+    (type . question)
+    (session-id . "test-sess")
+    (project . "test")
+    (label . "test")
+    (summary . "Commit message")
+    (data . ((tool_name . "pi:input")
+             (tool_input . ((questions . [((question . "Commit message")
+                                           (options . []))])))
+             (pi_ui . ((method . "input")
+                       (id . "req-1")
+                       (kind . "text")
+                       ,@(when prefill `((prefill . ,prefill)))
+                       ,@(when placeholder `((placeholder . ,placeholder)))
+                       (title . "Enter commit message")
+                       (message . "Describe the change")
+                       (multiline . :json-false)))))
+    (socket-proc . nil)))
+
+(ert-deftest cgp-pi-text-buffer-created-with-prefill ()
+  "input/editor request opens a *Claude Pi Input* buffer seeded with prefill."
+  (cgp--fresh-session)
+  (let ((item (cgp--pi-text-item "fix: initial" "type here")))
+    (unwind-protect
+        (progn
+          (claude-gravity--inbox-act-question item)
+          (let ((buf (get-buffer "*Claude Pi Input #42*")))
+            (should (buffer-live-p buf))
+            (with-current-buffer buf
+              (let ((txt (buffer-substring-no-properties (point-min) (point-max))))
+                ;; Header carries the prompt + placeholder hint.
+                (should (string-match-p "Enter commit message" txt))
+                (should (string-match-p "Describe the change" txt))
+                (should (string-match-p "type here" txt))
+                ;; Editable area seeded with prefill.
+                (should (string-match-p "fix: initial" txt))
+                ;; Separator marker installed past the header.
+                (should claude-gravity--pi-text-separator)
+                (should (> (marker-position claude-gravity--pi-text-separator)
+                           (point-min)))))))
+      (let ((b (get-buffer "*Claude Pi Input #42*")))
+        (when (buffer-live-p b) (kill-buffer b))))))
+
+(ert-deftest cgp-pi-text-submit-and-cancel-answer-shaping ()
+  "Submit yields answers=[text]; cancel yields an empty answers vector."
+  (cgp--fresh-session)
+  (let (captured)
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured))))
+      ;; Submit path
+      (let ((item (cgp--pi-text-item)))
+        (unwind-protect
+            (progn
+              (claude-gravity--inbox-act-question item)
+              (with-current-buffer (get-buffer "*Claude Pi Input #42*")
+                (goto-char (point-max))
+                (insert "hello pi")
+                (claude-gravity-pi-text-submit)))
+          (let ((b (get-buffer "*Claude Pi Input #42*")))
+            (when (buffer-live-p b) (kill-buffer b)))))
+      (let* ((msg (car captured))
+             (answers (alist-get 'answers msg)))
+        (should (equal (alist-get 'type msg) "action.question"))
+        (should (equal (aref answers 0) "hello pi")))
+      ;; Cancel path — empty answers vector → server sees no value.
+      (setq captured nil)
+      (let ((item (cgp--pi-text-item "ignored prefill")))
+        (unwind-protect
+            (progn
+              (claude-gravity--inbox-act-question item)
+              (with-current-buffer (get-buffer "*Claude Pi Input #42*")
+                (claude-gravity-pi-text-cancel)))
+          (let ((b (get-buffer "*Claude Pi Input #42*")))
+            (when (buffer-live-p b) (kill-buffer b)))))
+      (let* ((msg (car captured))
+             (answers (alist-get 'answers msg)))
+        (should (equal (alist-get 'type msg) "action.question"))
+        ;; Empty vector ⇒ JSON [] ⇒ answers[0] === undefined ⇒ cancel.
+        (should (= (length answers) 0))))))
+
+
+(ert-deftest cgp-pi-set-session-name-sends-action ()
+  "`claude-gravity--pi-set-session-name' sends a pi.set-session-name message."
+  (let (captured)
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured))))
+      (claude-gravity--pi-set-session-name "pi-x" "my name"))
+    (should (equal (car captured)
+                   '((type . "pi.set-session-name")
+                     (sessionId . "pi-x")
+                     (name . "my name"))))))
+
+
+;;; ═══════════════════════════════════════════════════════════════════
+;;; T2.3: pi model inventory (set_pi_models) + model picker
+;;; ═══════════════════════════════════════════════════════════════════
+
+(defun cgp--pi-model (id provider &optional name context-window)
+  "Build a wire-shape pi model alist (as it arrives from JSON)."
+  (let ((m `((id . ,id) (provider . ,provider))))
+    (when name           (setq m (append m `((name . ,name)))))
+    (when context-window (setq m (append m `((contextWindow . ,context-window)))))
+    m))
+
+(ert-deftest cgp-set-pi-models-stores-on-session ()
+  "set_pi_models replaces :pi-models with a list of alists (vector form)."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_models")
+                    (models . [,(cgp--pi-model "claude-sonnet-4" "anthropic" "Claude Sonnet 4" 200000)
+                               ,(cgp--pi-model "gpt-4o" "openai")])))
+    (let ((models (plist-get s :pi-models)))
+      (should (= 2 (length models)))
+      (should (equal "claude-sonnet-4" (alist-get 'id (nth 0 models))))
+      (should (equal "anthropic" (alist-get 'provider (nth 0 models))))
+      (should (equal "Claude Sonnet 4" (alist-get 'name (nth 0 models))))
+      (should (equal 200000 (alist-get 'context-window (nth 0 models))))
+      (should (equal "gpt-4o" (alist-get 'id (nth 1 models))))
+      ;; Minimal entries lack name/contextWindow — must round-trip as nil.
+      (should-not (alist-get 'name (nth 1 models)))
+      (should-not (alist-get 'context-window (nth 1 models))))))
+
+(ert-deftest cgp-set-pi-models-list-form ()
+  "set_pi_models accepts a list (not vector) of models too."
+  (let* ((s (cgp--fresh-session)))
+    (cgp--apply s `((op . "set_pi_models")
+                    (models . (,(cgp--pi-model "m1" "prov")))))
+    (let ((models (plist-get s :pi-models)))
+      (should (= 1 (length models)))
+      (should (equal "m1" (alist-get 'id (nth 0 models)))))))
+
+(ert-deftest cgp-pi-set-model-picks-from-inventory ()
+  "With a populated inventory, the picker resolves the choice to provider+id."
+  (let* ((s (cgp--fresh-session))
+         captured)
+    (plist-put s :source "pi")
+    (cgp--apply s `((op . "set_pi_models")
+                    (models . [,(cgp--pi-model "claude-sonnet-4" "anthropic" "Claude Sonnet 4")
+                               ,(cgp--pi-model "gpt-4o" "openai" "GPT-4o")])))
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured)))
+              ((symbol-function 'claude-gravity--current-pi-session-id)
+               (lambda () "test-sess"))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _) "anthropic/claude-sonnet-4 — Claude Sonnet 4")))
+      (call-interactively #'claude-gravity--pi-set-model))
+    (should (equal (car captured)
+                   '((type . "pi.set-model")
+                     (sessionId . "test-sess")
+                     (provider . "anthropic")
+                     (modelId . "claude-sonnet-4"))))))
+
+(ert-deftest cgp-pi-set-model-free-typed-provider-slash-id ()
+  "A free-typed `provider/id' that matches no model is still honored."
+  (let* ((s (cgp--fresh-session))
+         captured)
+    (plist-put s :source "pi")
+    (cgp--apply s `((op . "set_pi_models")
+                    (models . [,(cgp--pi-model "gpt-4o" "openai")])))
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured)))
+              ((symbol-function 'claude-gravity--current-pi-session-id)
+               (lambda () "test-sess"))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _) "google/gemini-2.0")))
+      (call-interactively #'claude-gravity--pi-set-model))
+    (should (equal (car captured)
+                   '((type . "pi.set-model")
+                     (sessionId . "test-sess")
+                     (provider . "google")
+                     (modelId . "gemini-2.0"))))))
+
+(ert-deftest cgp-pi-refresh-models-sends-action ()
+  "`claude-gravity--pi-refresh-models' sends a pi.refresh-models message."
+  (let (captured)
+    (cl-letf (((symbol-function 'claude-gravity--send-to-server)
+               (lambda (msg) (push msg captured))))
+      (claude-gravity--pi-refresh-models "pi-x"))
+    (should (equal (car captured)
+                   '((type . "pi.refresh-models")
+                     (sessionId . "pi-x"))))))
+
+
+;;; ── Session creation in the client ─────────────────────────────────
+;;
+;; The session-creation path is what S1 of the e2e harness proves
+;; end-to-end; these pin it deterministically at the unit level so a
+;; shape regression in `claude-gravity--handle-session-snapshot' or
+;; `claude-gravity--ensure-session' is caught without bringing up the
+;; whole stack.
+
+(defun cgp--snapshot-msg (sid &rest overrides)
+  "Build a synthetic session.snapshot msg with sensible defaults +
+OVERRIDES on the inner `session' alist (a flat alist of pairs)."
+  (let ((session `((sessionId . ,sid)
+                   (cwd . "/work/proj")
+                   (project . "proj")
+                   (status . "active")
+                   (claudeStatus . "idle")
+                   (slug . "snap")
+                   (branch . "main")
+                   (pid . 42)
+                   (startTime . 0)
+                   (lastEventTime . 0)
+                   (turns . nil)
+                   (tasks . nil)
+                   (files . nil)
+                   (compactions . nil)
+                   (totalToolCount . 0)
+                   (currentTurn . 0))))
+    (dolist (pair overrides)
+      (let ((cell (assq (car pair) session)))
+        (if cell (setcdr cell (cdr pair))
+          (push pair session))))
+    `((type . "session.snapshot") (sessionId . ,sid) (session . ,session))))
+
+(defmacro cgp--with-quiet-client (&rest body)
+  "Stub refresh/load helpers so the snapshot handler stays pure in batch."
+  `(cl-letf (((symbol-function 'claude-gravity--schedule-refresh) #'ignore)
+             ((symbol-function 'claude-gravity--schedule-session-refresh) #'ignore)
+             ((symbol-function 'claude-gravity--load-allow-patterns) #'ignore))
+     ,@body))
+
+(ert-deftest cgp-handle-session-snapshot-creates-session ()
+  "A session.snapshot for an unknown id creates a populated session
+plist in claude-gravity--sessions with every identity field set and the
+pre-allocated indexes/hashtables in place."
+  (clrhash claude-gravity--sessions)
+  (cgp--with-quiet-client
+   (claude-gravity--handle-session-snapshot (cgp--snapshot-msg "s-snap-1")))
+  (let ((s (gethash "s-snap-1" claude-gravity--sessions)))
+    (should s)
+    (should (equal "s-snap-1" (plist-get s :session-id)))
+    (should (equal "/work/proj" (plist-get s :cwd)))
+    (should (equal "proj" (plist-get s :project)))
+    (should (eq 'active (plist-get s :status)))
+    (should (eq 'idle (plist-get s :claude-status)))
+    (should (equal "snap" (plist-get s :slug)))
+    (should (equal "main" (plist-get s :branch)))
+    (should (eq 42 (plist-get s :pid)))
+    (should (hash-table-p (plist-get s :tool-index)))
+    (should (hash-table-p (plist-get s :agent-index)))
+    (should (hash-table-p (plist-get s :tasks)))
+    (should (hash-table-p (plist-get s :files)))
+    (should (hash-table-p (plist-get s :turn-index)))))
+
+(ert-deftest cgp-handle-session-snapshot-applies-trailing-patches ()
+  "A session.snapshot carrying `patches' applies them after building the
+session — verifies the snapshot + resync patch pipeline composes."
+  (clrhash claude-gravity--sessions)
+  (let ((msg (append (cgp--snapshot-msg "s-snap-2")
+                     `((patches . (((op . "set_claude_status")
+                                    (claudeStatus . "responding"))))))))
+    (cgp--with-quiet-client (claude-gravity--handle-session-snapshot msg)))
+  (let ((s (gethash "s-snap-2" claude-gravity--sessions)))
+    (should s)
+    (should (eq 'responding (plist-get s :claude-status)))))
+
+(ert-deftest cgp-handle-session-snapshot-preserves-buffer-on-resync ()
+  "Receiving a second snapshot for an existing session must NOT clobber
+the local-only :buffer (user might be reading it). Same for :display-name."
+  (clrhash claude-gravity--sessions)
+  (let ((buf (generate-new-buffer " *cgp-test-keep*")))
+    (unwind-protect
+        (progn
+          (cgp--with-quiet-client
+           (claude-gravity--handle-session-snapshot (cgp--snapshot-msg "s-snap-3")))
+          (plist-put (gethash "s-snap-3" claude-gravity--sessions) :buffer buf)
+          (plist-put (gethash "s-snap-3" claude-gravity--sessions) :display-name "My Name")
+          (cgp--with-quiet-client
+           (claude-gravity--handle-session-snapshot
+            (cgp--snapshot-msg "s-snap-3" '(slug . "snap-v2"))))
+          (let ((s (gethash "s-snap-3" claude-gravity--sessions)))
+            (should (eq buf (plist-get s :buffer)))
+            (should (equal "My Name" (plist-get s :display-name)))
+            (should (equal "snap-v2" (plist-get s :slug)))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest cgp-ensure-session-creates-fresh-with-defaults ()
+  "`claude-gravity--ensure-session' for a brand-new id creates a plist
+with default fields, pre-allocates turn 0, and indexes it; second call
+for the same id returns the SAME plist (idempotent)."
+  (clrhash claude-gravity--sessions)
+  (cl-letf (((symbol-function 'claude-gravity--load-allow-patterns) #'ignore))
+    (let ((s (claude-gravity--ensure-session "s-fresh" "/work/proj")))
+      (should s)
+      (should (equal "s-fresh" (plist-get s :session-id)))
+      (should (eq 'active (plist-get s :status)))
+      (should (eq 'idle (plist-get s :claude-status)))
+      (should (equal "proj" (plist-get s :project)))
+      (let ((turns (claude-gravity--tlist-items (plist-get s :turns)))
+            (turn-index (plist-get s :turn-index)))
+        (should (= 1 (length turns)))
+        (should (= 0 (alist-get 'turn-number (car turns))))
+        (should (gethash 0 turn-index)))
+      (should (eq s (claude-gravity--ensure-session "s-fresh" "/work/proj"))))))
+
+
 (provide 'claude-gravity-patch-test)
 ;;; claude-gravity-patch-test.el ends here

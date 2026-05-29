@@ -220,7 +220,7 @@ Returns nil on error."
           (setq proc (make-network-process
                       :name "daemon-cmd"
                       :family 'local
-                      :remote claude-gravity--daemon-socket-path
+                      :service claude-gravity--daemon-socket-path
                       :buffer buf
                       :coding 'utf-8
                       :noquery t))
@@ -577,49 +577,102 @@ Returns non-nil if a daemon session was re-keyed."
 (declare-function claude-gravity--current-session-tmux-p "claude-gravity-tmux")
 (declare-function claude-gravity-tmux-set-model "claude-gravity-tmux")
 (declare-function claude-gravity-tmux-set-permission-mode "claude-gravity-tmux")
+(declare-function claude-gravity--current-session-pi-p "claude-gravity-client")
+(declare-function claude-gravity--current-pi-session-id "claude-gravity-client")
+(declare-function claude-gravity--pi-set-model "claude-gravity-client")
+(declare-function claude-gravity--pi-resume "claude-gravity-client")
+(declare-function claude-gravity--pi-prompt "claude-gravity-client")
+(declare-function claude-gravity--pi-abort "claude-gravity-client")
+(declare-function claude-gravity--pi-stop "claude-gravity-client")
+(declare-function claude-gravity--pi-new-session "claude-gravity-client")
+(declare-function claude-gravity-reset-session "claude-gravity-tmux")
 
 (defun claude-gravity--current-session-managed-p ()
-  "Return non-nil if the session at point is managed (daemon or tmux)."
+  "Return non-nil if the session at point is managed (daemon, tmux, or pi)."
   (or (claude-gravity--current-session-daemon-p)
-      (claude-gravity--current-session-tmux-p)))
+      (claude-gravity--current-session-tmux-p)
+      (claude-gravity--current-session-pi-p)))
 
 (defun claude-gravity-unified-compose (&optional session-id)
-  "Open compose buffer for the current session (daemon or tmux)."
+  "Open the multi-line compose buffer for the current session.
+Daemon, tmux, and pi sessions all use the same chat-style compose
+buffer.  Pi sessions additionally get `/'-command autocomplete from
+pi's command inventory."
   (interactive)
   (cond
    ((claude-gravity--current-session-daemon-p)
     (claude-gravity-daemon-compose-prompt session-id))
    ((claude-gravity--current-session-tmux-p)
     (claude-gravity-compose-prompt session-id))
+   ((claude-gravity--current-session-pi-p)
+    (claude-gravity-compose-prompt session-id))
    (t (user-error "No managed session at point"))))
 
 (defun claude-gravity-unified-stop (&optional session-id)
-  "Stop the current session (daemon or tmux)."
+  "Stop the current session entirely (daemon, tmux, or pi).
+- Daemon: stops the daemon-managed session.
+- Tmux: kills the tmux pane.
+- Pi: terminates the pi process for the session at point. Use
+  `claude-gravity-unified-interrupt' if you only want to abort the
+  current turn while keeping pi alive."
   (interactive)
   (cond
    ((claude-gravity--current-session-daemon-p)
     (claude-gravity-daemon-stop-session session-id))
    ((claude-gravity--current-session-tmux-p)
     (claude-gravity-stop-session session-id))
+   ((claude-gravity--current-session-pi-p)
+    (claude-gravity--pi-stop (claude-gravity--current-pi-session-id)))
    (t (user-error "No managed session at point"))))
 
 (defun claude-gravity-unified-interrupt ()
-  "Interrupt the current session (daemon: interrupt, tmux: send Escape)."
+  "Interrupt the current session's in-flight operation.
+- Daemon: interrupt.
+- Tmux: send Escape.
+- Pi: abort current LLM turn for the session at point (pi stays alive)."
   (interactive)
   (cond
    ((claude-gravity--current-session-daemon-p)
     (claude-gravity-daemon-interrupt))
    ((claude-gravity--current-session-tmux-p)
     (claude-gravity-send-escape))
+   ((claude-gravity--current-session-pi-p)
+    (claude-gravity--pi-abort (claude-gravity--current-pi-session-id)))
+   (t (user-error "No managed session at point"))))
+
+(defun claude-gravity-unified-reset ()
+  "Reset/clear the current session's conversation.
+- Tmux: send /clear via `claude-gravity-reset-session'.
+- Pi: send `new_session' RPC for the session at point.
+- Daemon: not supported."
+  (interactive)
+  (cond
+   ((claude-gravity--current-session-tmux-p)
+    (claude-gravity-reset-session))
+   ((claude-gravity--current-session-pi-p)
+    (claude-gravity--pi-new-session (claude-gravity--current-pi-session-id)))
+   ((claude-gravity--current-session-daemon-p)
+    (user-error "Reset/clear is not supported for daemon sessions"))
    (t (user-error "No managed session at point"))))
 
 (defun claude-gravity-unified-resume (session-id &optional cwd model)
-  "Resume an ended session (daemon or tmux).
-SESSION-ID is the session to resume."
+  "Resume an ended session (daemon, tmux, or pi).
+SESSION-ID is the session to resume.
+
+Backend dispatch:
+- pi sessions (`:source' = \"pi\"): asks gravity-server to load the
+  session's `:pi-session-file' via `switch_session' RPC.
+- daemon (if `--daemon-alive-p'): `claude-gravity-daemon-resume-session'.
+- otherwise: tmux `claude-gravity-resume-session'.
+
+The candidate list is filtered to ended sessions for CC backends but
+includes any pi session — pi's resume is also useful to swap between
+two live pi session files in the running process."
   (interactive
    (let* ((candidates nil))
      (maphash (lambda (id session)
-                (when (eq (plist-get session :status) 'ended)
+                (when (or (eq (plist-get session :status) 'ended)
+                          (equal (plist-get session :source) "pi"))
                   (push (cons (format "%s [%s]"
                                       (or (plist-get session :slug) id)
                                       (plist-get session :project))
@@ -631,15 +684,23 @@ SESSION-ID is the session to resume."
                 (sid (cdr (assoc choice candidates))))
            (list sid))
        (list (read-string "Session ID to resume: ")))))
-  ;; Decide backend: if daemon is running, use it; otherwise tmux
-  (if (claude-gravity--daemon-alive-p)
-      (claude-gravity-daemon-resume-session session-id cwd model)
-    (claude-gravity-resume-session session-id cwd model)))
+  (let ((session (gethash session-id claude-gravity--sessions)))
+    (cond
+     ((and session (equal (plist-get session :source) "pi"))
+      (claude-gravity--pi-resume session-id))
+     ((claude-gravity--daemon-alive-p)
+      (claude-gravity-daemon-resume-session session-id cwd model))
+     (t
+      (claude-gravity-resume-session session-id cwd model)))))
 
 
 (defun claude-gravity-set-model (model)
   "Set MODEL for the current managed session.
-Dispatches to the appropriate backend (daemon or tmux)."
+Dispatches to the appropriate backend (daemon, tmux, or pi).
+
+For pi sessions, MODEL is unused — pi's RPC `set_model' requires both
+provider and model id, so the pi branch invokes its own interactive
+helper (`claude-gravity--pi-set-model') which prompts for both fields."
   (interactive
    (let* ((choices '("1. opus" "2. sonnet" "3. haiku"))
           (choice (completing-read "Model: " choices nil t))
@@ -648,6 +709,7 @@ Dispatches to the appropriate backend (daemon or tmux)."
   (cond
    ((claude-gravity--current-session-daemon-p) (claude-gravity-daemon-set-model model))
    ((claude-gravity--current-session-tmux-p)   (claude-gravity-tmux-set-model model))
+   ((claude-gravity--current-session-pi-p)     (call-interactively #'claude-gravity--pi-set-model))
    (t (user-error "No managed session at point"))))
 
 (defun claude-gravity-set-permission-mode (mode)

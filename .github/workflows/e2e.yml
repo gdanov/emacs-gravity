@@ -1,0 +1,29 @@
+name: E2E
+
+# End-to-end gravity coverage: full stack (gravity-server + socket-spy
+# proxy + `emacs --daemon` running the REAL Emacs client) driven through
+# synthetic hook events. This is the ONLY elisp coverage in CI — the
+# release workflow runs node-only (bridge + server vitest). AF_UNIX
+# server bind works in the container (no host sandbox).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    # Skip the release bot's own bump commits (mirrors release.yml).
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build e2e image
+        run: docker build -t gravity-e2e -f test/e2e/Dockerfile .
+      - name: Run e2e scenarios
+        run: docker run --rm gravity-e2e

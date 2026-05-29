@@ -1195,6 +1195,43 @@ describe("Event Handler", () => {
       expect(items.length).toBe(0);
     });
 
+    // Regression: Claude Code fires PermissionRequest (matcher "") for
+    // AskUserQuestion ~150ms after AskUserQuestionIntercept. A generic
+    // "permission" item here renders the raw tool_input as a JSON dump and
+    // buries the real question UI. handlePermissionRequest must skip it and
+    // unblock the redundant hook socket with an allow passthrough.
+    it("does not create a permission item for AskUserQuestion (owned by intercept)", () => {
+      startSession(deps);
+      const socket = makeMockSocket();
+      fire(deps, "PermissionRequest", "s1", {
+        tool_name: "AskUserQuestion",
+        tool_input: { questions: [{ question: "Pick one", options: [] }] },
+      }, 123, socket);
+
+      const items = deps.inbox.all().filter(
+        i => i.type === "permission" || i.type === "plan-review",
+      );
+      expect(items.length).toBe(0);
+    });
+
+    it("unblocks the redundant AskUserQuestion PermissionRequest socket with allow", () => {
+      startSession(deps);
+      const socket = makeMockSocket();
+      fire(deps, "PermissionRequest", "s1", {
+        tool_name: "AskUserQuestion",
+        tool_input: { questions: [{ question: "Pick one", options: [] }] },
+      }, 123, socket);
+
+      const written = (socket as unknown as { _written: string[] })._written;
+      expect(written.length).toBe(1);
+      expect(JSON.parse(written[0])).toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: "allow" },
+        },
+      });
+    });
+
     it("uses session slug as label when available", () => {
       fire(deps, "SessionStart", "s1", { slug: "my-slug" });
       const socket = makeMockSocket();
@@ -1333,7 +1370,9 @@ describe("Event Handler", () => {
       expect(session.currentTurn).toBe(2);
       expect(session.totalToolCount).toBe(2); // t1 + t2, no dups
       expect(session.turns[1].frozen).toBe(true);
-      expect(session.turns[2].frozen).toBe(false);
+      // Stop now freezes the turn (was previously only frozen by the next
+      // UserPromptSubmit — see design/pi-adapter.md "freeze on Stop").
+      expect(session.turns[2].frozen).toBe(true);
       expect(session.turns[1].stopText).toBe("Done first");
       expect(session.turns[2].stopText).toBe("Done second");
     });
@@ -1864,10 +1903,10 @@ describe("Event Handler", () => {
       expect(session.turns[2].agents[0].status).toBe("done");
       expect(session.turns[2].agents[0].toolCount).toBe(1);
 
-      // Turn freeze
+      // Turn freeze — Stop now freezes the current turn (freeze-on-Stop).
       expect(session.turns[0].frozen).toBe(true);
       expect(session.turns[1].frozen).toBe(true);
-      expect(session.turns[2].frozen).toBe(false);
+      expect(session.turns[2].frozen).toBe(true);
 
       // Stop text
       expect(session.turns[1].stopText).toBe("Fixed the auth bug");
@@ -2070,6 +2109,115 @@ describe("Event Handler", () => {
       expect(resetSession.totalToolCount).toBe(0);
       expect(resetSession.turns.length).toBe(1);
       expect(resetSession.plan).toBeNull();
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Compaction marker (pi compaction_end → CompactionMarker)
+  // ────────────────────────────────────────────────────────────────────
+
+  describe("Compaction event handler", () => {
+    it("records a CompactionMarker on the session with the correct turn number", () => {
+      startSession(deps, "s1", { source: "pi" });
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "do work", source: "pi" });
+      // currentTurn is now 1.
+      const patches = fire(deps, "Compaction", "s1", {
+        source: "pi",
+        compaction_reason: "threshold",
+        compaction_aborted: false,
+        compaction_tokens_before: 47000,
+        compaction_summary: "Earlier conversation summarized.",
+      } as HookData);
+
+      const session = deps.store.get("s1")!;
+      expect(session.compactions).toHaveLength(1);
+      expect(session.compactions[0]).toMatchObject({
+        reason: "threshold",
+        turnNumber: 1,
+        tokensBefore: 47000,
+        summary: "Earlier conversation summarized.",
+        aborted: false,
+      });
+      expect(session.compactions[0].timestamp).toBeGreaterThan(0);
+
+      const compactionPatch = patches.find((p) => p.op === "add_compaction");
+      expect(compactionPatch).toBeDefined();
+      // @ts-expect-error narrowing through patch union
+      expect(compactionPatch?.marker.reason).toBe("threshold");
+    });
+
+    it("does NOT move turn boundaries (mid-stream compaction between PreToolUse and PostToolUse)", () => {
+      startSession(deps, "s1", { source: "pi" });
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "long build", source: "pi" });
+      fire(deps, "PreToolUse", "s1", {
+        tool_name: "Bash",
+        tool_use_id: "b1",
+        tool_input: { command: "make build" },
+      });
+      const turnsBefore = deps.store.get("s1")!.turns.length;
+      const currentTurnBefore = deps.store.get("s1")!.currentTurn;
+
+      fire(deps, "Compaction", "s1", {
+        source: "pi",
+        compaction_reason: "overflow",
+        compaction_tokens_before: 99000,
+        compaction_summary: "Compacted",
+      } as HookData);
+
+      const session = deps.store.get("s1")!;
+      // Turn count and currentTurn must be unchanged.
+      expect(session.turns.length).toBe(turnsBefore);
+      expect(session.currentTurn).toBe(currentTurnBefore);
+      // The running tool is still in place.
+      expect(session.toolIndex["b1"]).toBeDefined();
+      // Marker is attached to the current turn (the in-progress one).
+      expect(session.compactions[0].turnNumber).toBe(currentTurnBefore);
+
+      // PostToolUse can still complete the tool.
+      fire(deps, "PostToolUse", "s1", {
+        tool_name: "Bash",
+        tool_use_id: "b1",
+        tool_response: { stdout: "done" },
+      });
+      const post = deps.store.get("s1")!;
+      const loc = post.toolIndex["b1"]!;
+      const tool = post.turns[loc.turnNumber].steps[loc.stepIndex].tools[loc.toolIndex];
+      expect(tool.status).toBe("done");
+    });
+
+    it("records aborted compactions with aborted=true and safely handles missing summary", () => {
+      startSession(deps, "s1", { source: "pi" });
+      fire(deps, "Compaction", "s1", {
+        source: "pi",
+        compaction_reason: "manual",
+        compaction_aborted: true,
+        // No tokens_before, no summary.
+      } as HookData);
+
+      const session = deps.store.get("s1")!;
+      expect(session.compactions[0]).toMatchObject({
+        reason: "manual",
+        aborted: true,
+        tokensBefore: null,
+        summary: null,
+      });
+    });
+
+    it("compaction during turn 0 (pre-prompt) records turnNumber=-1 sentinel", () => {
+      startSession(deps, "s1", { source: "pi" });
+      // No UserPromptSubmit yet — currentTurn is 0 (pre-prompt activity).
+      fire(deps, "Compaction", "s1", {
+        source: "pi",
+        compaction_reason: "manual",
+      } as HookData);
+      const session = deps.store.get("s1")!;
+      expect(session.compactions[0].turnNumber).toBe(-1);
+    });
+
+    it("defaults reason to 'unknown' when not provided", () => {
+      startSession(deps, "s1", { source: "pi" });
+      fire(deps, "Compaction", "s1", { source: "pi" } as HookData);
+      expect(deps.store.get("s1")!.compactions[0].reason).toBe("unknown");
     });
   });
 });

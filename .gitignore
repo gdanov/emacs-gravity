@@ -1,3 +1,6 @@
+*.elc
+.emacs.d/**
+
 node_modules/
 packages/*/dist/*
 # Committed release artifacts (built by CI on release, also by `make build-*` locally)
@@ -11,11 +14,6 @@ result
 .direnv
 .envrc
 .vscode/
-
-# Dolt database files (added by bd init)
-.dolt/
-*.db
-.beads/.beads-credential-key
 
 # Taskplane runtime artifacts
 .pi/

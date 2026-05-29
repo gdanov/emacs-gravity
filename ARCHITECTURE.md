@@ -100,38 +100,42 @@ Makefile                         -- Build orchestration
 
 ## Terminal Protocol
 
-The terminal protocol supports two modes:
-- **Pull mode** (default): Server sends lightweight signals, client fetches data on demand
-- **Push mode**: Server broadcasts full payloads immediately
+The terminal protocol is **pull-only**. Push terminal communication has been removed; there is no `GRAVITY_PUSH_MODE`. The server never proactively broadcasts replicated state — it emits lightweight `state-changed` signals and clients fetch on demand via `poll`.
 
-Enable push mode with `GRAVITY_PUSH_MODE=true` (legacy).
-
-### Pull Mode Flow
+### Pull Flow
 
 ```
 Hook event → Server → state-changed signal (lightweight) → Terminal
                                      ↓
-                    Client polls when idle → poll request
+        what=inbox|notice → poll immediately (user-blocking actions)
+        what=session|overview → poll when idle (debounced; no UI churn)
                                      ↓
-                    Server → overview.snapshot + session-patches (full data)
+                    Server → inbox-items + session-patches (full data)
 ```
 
-This prevents UI freezes during heavy editing: the server only sends a small
-signal while the client fetches data when it's idle.
+Inbox/notice signals poll at once so permission/question/plan-review actions surface immediately (since push removal this signal+poll path is the *only* delivery route for them). Session/overview stay debounced to prevent UI freezes during heavy editing.
 
-### Server → Terminal Messages (Push mode)
+### Server → Terminal Messages (request-reply / out-of-band)
+
+The server only sends these as **replies to explicit client requests**, never proactively:
 
 ```typescript
-{ type: "session.snapshot", sessionId: string, session: Session }
-{ type: "session.update", sessionId: string, patches: Patch[] }
-{ type: "session.removed", sessionId: string }
-{ type: "inbox.added", item: InboxItem }
-{ type: "inbox.removed", itemId: number }
-{ type: "inbox.snapshot", items: InboxItem[] }
-{ type: "overview.snapshot", projects: ProjectSummary[] }
+{ type: "session.snapshot", sessionId, session }   // reply to request.session / request.resync
+{ type: "inbox.snapshot", items }                  // reply to request.resync
+{ type: "overview.snapshot", projects }            // reply to request.overview / request.resync
 ```
 
-### Server → Terminal Messages (Pull mode)
+Out-of-band lifecycle / alert events (not replicated state) remain direct messages:
+
+```typescript
+{ type: "session.removed", sessionId }
+{ type: "notice", level, text }
+{ type: "pi.session", sessionId, event, ... }
+```
+
+`session.update` / `inbox.added` / `inbox.removed` still exist in the protocol type union (so a newer terminal can decode an older server) but are **never sent** by the current server.
+
+### Server → Terminal Messages (pull)
 
 ```typescript
 // Signals (lightweight, no payload)
@@ -155,7 +159,7 @@ signal while the client fetches data when it's idle.
 { type: "request.overview" }
 { type: "request.resync" }
 { type: "hint.session-dead", sessionId: string }
-{ type: "poll" }  // Pull mode: request current state
+{ type: "poll" }  // request current state (server replies inbox-items + session-patches)
 ```
 
 ### Patch Store (Pull Mode)
@@ -196,6 +200,7 @@ type Patch =
   | { op: "complete_agent"; agentId: string; stopText?: string; stopThinking?: string; duration?: number; transcriptPath?: string }
   | { op: "update_task"; taskId: string; task: Task }
   | { op: "track_file"; path: string; fileOp: string }
+  | { op: "update_turn_file"; turnNumber: number; file: FileDiff }
   | { op: "add_prompt"; turnNumber: number; prompt: PromptEntry }
   | { op: "set_prompt_answer"; turnNumber: number; toolUseId: string; answer: string }
 ```

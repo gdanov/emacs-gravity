@@ -1,25 +1,35 @@
 // protocol.ts — JSONL parser and RPC command formatter for pi
 //
-// Reads pi's JSONL stdout and emits typed PiEvent objects.
-// Formats RPC commands (prompt, steer, abort, set_thinking_level) to JSONL for pi's stdin.
+// Reads pi's JSONL stdout, dispatching events to onEvent and RPC responses
+// (`{type: "response", ...}`) to outstanding command promises.
+// Formats RPC commands (prompt, steer, abort, set_thinking_level, set_model,
+// and request/response style commands like get_session_stats / get_state)
+// to JSONL for pi's stdin.
 
-import type { PiEvent, PiCommand, ThinkingLevel, PiProtocolEvent } from "./types.js";
+import type { PiEvent, PiCommand, ThinkingLevel, PiProtocolEvent, PiResponse } from "./types.js";
+
+/** Parsed form of one JSONL line from pi's stdout. */
+type ParsedLine =
+  | { kind: "event"; event: PiEvent }
+  | { kind: "response"; response: PiResponse };
 
 /**
- * Parse a single JSON line into a PiEvent (or unknown fallback).
+ * Parse a single JSON line. Pi 0.74 emits two kinds of stdout messages:
+ * - Events: `{type: "<event_name>", ...}` (no `command` field)
+ * - Responses: `{type: "response", command: "...", success: bool, ...}`
  */
-function parseJsonLine(line: string): PiEvent {
+function parseJsonLine(line: string): ParsedLine {
   try {
     const parsed = JSON.parse(line);
-    // Validate it has a type field
     if (parsed && typeof parsed === "object" && "type" in parsed) {
-      return parsed as PiEvent;
+      if (parsed.type === "response" && typeof parsed.command === "string") {
+        return { kind: "response", response: parsed as PiResponse };
+      }
+      return { kind: "event", event: parsed as PiEvent };
     }
-    // Unknown event with type field
-    return { type: "unknown", ...parsed };
+    return { kind: "event", event: { type: "unknown", ...parsed } as PiEvent };
   } catch {
-    // Malformed JSON — wrap as unknown event
-    return { type: "unknown", raw: line } as PiEvent;
+    return { kind: "event", event: { type: "unknown", raw: line } as PiEvent };
   }
 }
 
@@ -37,6 +47,15 @@ export interface PiProtocolOptions {
    * Defaults to logging to stderr.
    */
   onStderr?: (line: string) => void;
+}
+
+/**
+ * Generate a unique request id for RPC correlation. Pi accepts any string;
+ * the adapter uses a monotonic counter with a per-process prefix.
+ */
+let requestCounter = 0;
+function nextRequestId(): string {
+  return `gr-${process.pid}-${++requestCounter}`;
 }
 
 /**
@@ -61,6 +80,12 @@ export class PiProtocol {
   private readonly onEvent: (evt: PiProtocolEvent) => void;
   private readonly onStderr: (line: string) => void;
   private commandWriter: ((line: string) => void) | null = null;
+  /** In-flight RPC requests awaiting a matching response (keyed by request id). */
+  private pendingRequests: Map<string, {
+    resolve: (response: PiResponse) => void;
+    reject: (err: Error) => void;
+    timer: NodeJS.Timeout;
+  }> = new Map();
 
   constructor(options: PiProtocolOptions) {
     this.onEvent = options.onEvent;
@@ -71,7 +96,8 @@ export class PiProtocol {
 
   /**
    * Feed a text chunk from pi's stdout into the parser.
-   * Calls onEvent for each complete JSON line.
+   * Dispatches events to onEvent and responses to outstanding request
+   * promises (matched by id when present).
    */
   feed(data: string): void {
     this.buffer += data;
@@ -80,9 +106,52 @@ export class PiProtocol {
       const line = this.buffer.substring(0, newlineIdx).trim();
       this.buffer = this.buffer.substring(newlineIdx + 1);
       if (line.length === 0) continue;
-      const event = parseJsonLine(line);
-      this.onEvent({ event, raw: line });
+      const parsed = parseJsonLine(line);
+      if (parsed.kind === "response") {
+        this.dispatchResponse(parsed.response);
+      } else {
+        this.onEvent({ event: parsed.event, raw: line });
+      }
     }
+  }
+
+  /** Route a response to its waiter, or drop it if unmatched. */
+  private dispatchResponse(response: PiResponse): void {
+    const id = response.id;
+    if (!id) {
+      // Untagged response — could not be correlated. Pi sends these for
+      // commands that didn't carry an id; we don't currently consume them.
+      return;
+    }
+    const pending = this.pendingRequests.get(id);
+    if (!pending) return;
+    this.pendingRequests.delete(id);
+    clearTimeout(pending.timer);
+    pending.resolve(response);
+  }
+
+  /**
+   * Send an RPC command with request/response correlation. Returns a promise
+   * resolving to pi's response. Times out after `timeoutMs` (default 10s).
+   *
+   * Use for commands where the caller cares about the response: get_state,
+   * get_session_stats, set_model, etc. For fire-and-forget commands use
+   * `sendCommand`.
+   */
+  request(command: PiCommand, timeoutMs = 10_000): Promise<PiResponse> {
+    if (!this.commandWriter) {
+      return Promise.reject(new Error("pi command writer not connected"));
+    }
+    const id = nextRequestId();
+    const line = PiProtocol.formatCommand(command, id);
+    return new Promise<PiResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new Error(`pi RPC ${command.type} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pendingRequests.set(id, { resolve, reject, timer });
+      this.commandWriter!(line);
+    });
   }
 
   /**
@@ -125,26 +194,67 @@ export class PiProtocol {
   }
 
   /**
-   * Format any PiCommand to a JSONL string.
+   * Format any PiCommand to a JSONL string. If `id` is provided, it is
+   * attached for request/response correlation (pi echoes it on the
+   * matching `{type:"response", id}` line).
    */
-  static formatCommand(cmd: PiCommand): string {
+  static formatCommand(cmd: PiCommand, id?: string): string {
+    const withId = (obj: object) => (id ? { ...obj, id } : obj);
     switch (cmd.type) {
-      case "prompt":
-        return PiProtocol.formatPrompt(cmd.text, cmd.images);
+      case "prompt": {
+        const base: Record<string, unknown> = { type: "prompt", message: cmd.message };
+        if (cmd.images && cmd.images.length > 0) base.images = cmd.images;
+        return JSON.stringify(withId(base)) + "\n";
+      }
       case "steer":
-        return PiProtocol.formatSteer(cmd.text);
+        return JSON.stringify(withId({ type: "steer", message: cmd.message })) + "\n";
       case "abort":
-        return PiProtocol.formatAbort();
+        return JSON.stringify(withId({ type: "abort" })) + "\n";
       case "set_thinking_level":
-        return PiProtocol.formatThinkingLevel(cmd.level);
+        return JSON.stringify(withId({ type: "set_thinking_level", level: cmd.level })) + "\n";
+      case "set_session_name":
+        return JSON.stringify(withId({ type: "set_session_name", name: cmd.name })) + "\n";
+      case "set_model":
+        return JSON.stringify(withId({ type: "set_model", provider: cmd.provider, modelId: cmd.modelId })) + "\n";
+      case "get_session_stats":
+        return JSON.stringify(withId({ type: "get_session_stats" })) + "\n";
+      case "get_state":
+        return JSON.stringify(withId({ type: "get_state" })) + "\n";
+      case "get_commands":
+        return JSON.stringify(withId({ type: "get_commands" })) + "\n";
+      case "get_available_models":
+        return JSON.stringify(withId({ type: "get_available_models" })) + "\n";
+      case "switch_session":
+        return JSON.stringify(withId({ type: "switch_session", sessionPath: cmd.sessionPath })) + "\n";
+      case "compact": {
+        const body: Record<string, unknown> = { type: "compact" };
+        if (cmd.customInstructions) body.customInstructions = cmd.customInstructions;
+        return JSON.stringify(withId(body)) + "\n";
+      }
+      case "new_session": {
+        const body: Record<string, unknown> = { type: "new_session" };
+        if (cmd.parentSession) body.parentSession = cmd.parentSession;
+        return JSON.stringify(withId(body)) + "\n";
+      }
+      case "extension_ui_response": {
+        // extension_ui_response carries pi's own request id (`cmd.id`) — do
+        // NOT overwrite it with the optional RPC correlation id. Pi matches
+        // the response back to its in-flight UI request by the inner id.
+        const body: Record<string, unknown> = { type: "extension_ui_response", id: cmd.id };
+        if (cmd.value !== undefined) body.value = cmd.value;
+        if (cmd.confirmed !== undefined) body.confirmed = cmd.confirmed;
+        if (cmd.cancelled !== undefined) body.cancelled = cmd.cancelled;
+        return JSON.stringify(body) + "\n";
+      }
     }
   }
 
   /**
-   * Format a prompt command for pi's stdin.
+   * Format a prompt command for pi's stdin. Pi expects { message, images? } —
+   * field name is `message`, not `text` (verified against pi 0.74).
    */
   static formatPrompt(text: string, images?: string[]): string {
-    const cmd: PiCommand = { type: "prompt", text };
+    const cmd: PiCommand = { type: "prompt", message: text };
     if (images && images.length > 0) {
       cmd.images = images;
     }
@@ -155,7 +265,7 @@ export class PiProtocol {
    * Format a steer command for pi's stdin.
    */
   static formatSteer(text: string): string {
-    return JSON.stringify({ type: "steer", text } as PiCommand) + "\n";
+    return JSON.stringify({ type: "steer", message: text } as PiCommand) + "\n";
   }
 
   /**
@@ -170,5 +280,21 @@ export class PiProtocol {
    */
   static formatThinkingLevel(level: ThinkingLevel): string {
     return JSON.stringify({ type: "set_thinking_level", level } as PiCommand) + "\n";
+  }
+
+  /**
+   * Format a set_session_name command for pi's stdin.
+   */
+  static formatSessionName(name: string): string {
+    return JSON.stringify({ type: "set_session_name", name } as PiCommand) + "\n";
+  }
+
+  /**
+   * Format a set_model command for pi's stdin.
+   * Pi expects { type: "set_model", provider, modelId } (verified against
+   * pi 0.74 RPC docs).
+   */
+  static formatSetModel(provider: string, modelId: string): string {
+    return JSON.stringify({ type: "set_model", provider, modelId } as PiCommand) + "\n";
   }
 }

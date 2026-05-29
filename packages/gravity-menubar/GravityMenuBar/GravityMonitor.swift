@@ -9,6 +9,7 @@ public class GravityMonitor: ObservableObject {
     @Published public var projects: [ProjectInfo] = []
     @Published public var inboxItems: [InboxInfo] = []
     @Published public var iconState: MenuBarIconState = .disconnected
+    @Published public var protocolWarning: String? = nil
 
     public let stateManager = MenuBarStateManager()
 
@@ -50,6 +51,7 @@ public class GravityMonitor: ObservableObject {
         projects = stateManager.projects
         inboxItems = stateManager.inboxItems
         iconState = stateManager.iconState
+        protocolWarning = stateManager.protocolWarning
     }
 
     // MARK: - Connection
@@ -138,7 +140,7 @@ public class GravityMonitor: ObservableObject {
         }
 
         startReading()
-        sendRequest(TerminalRequest(type: "hello", capabilities: []))
+        sendRequest(TerminalRequest(type: "hello", capabilities: [], protocolVersion: GRAVITY_PROTOCOL_VERSION))
         sendRequest(TerminalRequest(type: "request.overview"))
         sendRequest(TerminalRequest(type: "request.resync"))
     }

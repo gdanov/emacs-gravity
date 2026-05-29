@@ -10,12 +10,14 @@ import { createServer } from "net";
 import type { Server, Socket } from "net";
 import { unlinkSync } from "fs";
 import { dirname } from "path";
+import { pathToFileURL } from "url";
 import { Effect, Layer } from "effect";
 
 import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
-import { parseTerminalMessage, isHookMessage } from "./protocol/messages.js";
+import { parseTerminalMessage, isHookMessage, helloProtocolVersion, protocolMismatch, shouldSendInboxOnPoll } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
-import { sessionEnd } from "./state/session.js";
+import { MermaidRpcServer } from "./handlers/mermaid-rpc-server.js";
+import { sessionEnd, setCost, setContextUsage, setPiCommands, setPiModels, updateMeta } from "./state/session.js";
 
 // Effect services
 import { ServerConfig, ServerConfigLive } from "./services/config.js";
@@ -28,7 +30,8 @@ import type { FsService } from "@gravity/shared";
 import type { ServerConfigData } from "./services/config.js";
 
 // Pi driver (optional)
-import { startPiDriver, type StartPiDriverOptions } from "./pi-driver/index.js";
+import { startPiDriver, type StartPiDriverOptions, type PiSessionStats } from "./pi-driver/index.js";
+import type { ExtensionUIRequestEvent } from "./pi-driver/types.js";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -44,9 +47,6 @@ const HOOKS_SILENCE_REARM_MS = 600_000;
 const BIDIRECTIONAL_EVENTS: ReadonlySet<HookEventName> = new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 const OVERVIEW_EVENTS: ReadonlySet<HookEventName> = new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
 
-// Pull mode: server sends lightweight signals instead of full payloads
-// Default: true. Set to false via GRAVITY_PUSH_MODE=true to use push (legacy).
-const PULL_MODE = process.env.GRAVITY_PUSH_MODE !== "true";
 
 // ── Logging helper (simple, no service dependency for socket callbacks) ──
 
@@ -56,6 +56,143 @@ function logMsg(message: string, level: string = "info"): void {
     process.stderr.write(`[${ts}] [${level}] ${message}\n`);
   } catch { /* best effort */ }
 }
+
+// ── Pull-only state emission ─────────────────────────────────────────
+//
+// The server NEVER proactively pushes replicated state. It stores patches
+// and emits a lightweight `state-changed` signal; clients fetch via poll.
+// (Push terminal communication removed — see docs/refactor-implementation.)
+
+function emitSessionPatches(
+  store: SessionStoreService,
+  terminals: TerminalService,
+  sessionId: string,
+  patches: Patch[],
+): void {
+  if (patches.length === 0) return;
+  const stored = store.appendPatches(sessionId, patches);
+  const seq = stored.length > 0
+    ? stored[stored.length - 1].seq
+    : store.getSessionSeq(sessionId);
+  terminals.signalChanged("session", sessionId, seq);
+}
+
+// ── Hook message processing (extracted for socket-free testing) ──────
+//
+// The hook dispatch was an inner closure of `program`; extracted to a
+// module-level function with explicit dependency injection so it can be
+// driven by a test harness without real Unix sockets. Behaviour is a
+// verbatim move — closure refs become `deps.*`, module consts unchanged.
+
+export interface HookMessageDeps {
+  readonly store: SessionStoreService;
+  readonly inbox: InboxService;
+  readonly terminals: TerminalService;
+  readonly runEvent: (
+    eventName: HookEventName, sessionId: string, cwd: string,
+    data: HookData, pid: number | null, hookSocket?: Socket,
+  ) => Patch[];
+  readonly waitForCapableTerminal: (capability: string, timeoutMs: number) => Promise<boolean>;
+  readonly schedulePurge: (sessionId: string) => void;
+  readonly markHookReceived: () => void;
+}
+
+export const processHookMessage = async (
+  deps: HookMessageDeps,
+  msg: Record<string, unknown>,
+  socket: Socket,
+): Promise<void> => {
+  const eventName = msg.event as HookEventName;
+  const sessionId = (msg.session_id as string) || "unknown";
+  const cwd = (msg.cwd as string) || "";
+  const pid = (msg.pid as number) || null;
+  const data = (msg.data as HookData) || {};
+  const needsResponse = msg.needs_response === true;
+
+  logMsg(`Hook event: ${eventName} session=${sessionId}`);
+  deps.markHookReceived();
+
+  // Reject bidirectional events if no capable terminal is connected
+  if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
+    if (!deps.terminals.hasCapableTerminal("action.permission")) {
+      logMsg(`No capable terminal connected — waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
+      const arrived = await deps.waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
+      if (!arrived) {
+        logMsg(`No capable terminal after ${CAPABILITY_WAIT_MS}ms — rejecting ${eventName}`, "warn");
+        try {
+          socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
+          socket.end();
+        } catch { /* socket may already be closed */ }
+        return;
+      }
+      logMsg(`Capable terminal connected during wait — proceeding with ${eventName}`);
+    }
+  }
+
+  // Clean up stale bidirectional inbox items before processing
+  if (!BIDIRECTIONAL_EVENTS.has(eventName)) {
+    const staleRemoved = deps.inbox.removeStaleForSession(sessionId);
+    for (const item of staleRemoved) {
+      logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`);
+      deps.terminals.signalChanged("inbox");
+    }
+
+    if (eventName !== "Notification") {
+      // Preserve a sibling item from the SAME tool invocation: the generic
+      // PreToolUse fires concurrently with AskUserQuestionIntercept (and the
+      // ExitPlanMode PermissionRequest) for one tool_use_id. Without this,
+      // PreToolUse force-closes the live question/plan-review item ~6ms
+      // after the intercept created it. Supersede is for PRIOR tools only.
+      const incomingToolUseId = (data as Record<string, unknown> | undefined)
+        ?.tool_use_id as string | undefined;
+      const forceClosed = deps.inbox.forceCloseStaleForSession(sessionId, incomingToolUseId);
+      for (const item of forceClosed) {
+        logMsg(`Inbox item ${item.id} (${item.type}) force-closed: superseded by ${eventName}`);
+        deps.terminals.signalChanged("inbox");
+      }
+    }
+  }
+
+  const patches = deps.runEvent(eventName, sessionId, cwd, data, pid, needsResponse ? socket : undefined);
+
+  if (patches.length > 0) {
+    // Pull mode: store patches and signal, don't broadcast
+    const stored = deps.store.appendPatches(sessionId, patches);
+    const seq = stored.length > 0 ? stored[stored.length - 1].seq : deps.store.getSessionSeq(sessionId);
+    deps.terminals.signalChanged("session", sessionId, seq);
+  }
+
+  // Schedule purge for ended sessions, cancel if session self-heals
+  const session = deps.store.get(sessionId);
+  if (session && session.status === "ended") {
+    deps.schedulePurge(sessionId);
+  } else if (session && session.status === "active") {
+    deps.store.cancelPurge(sessionId);
+  }
+
+  const hasStatusPatch = patches.some(p =>
+    p.op === "set_claude_status" || p.op === "set_status"
+  );
+  if (OVERVIEW_EVENTS.has(eventName) || hasStatusPatch) {
+    deps.terminals.signalChanged("overview");
+  }
+
+  if (eventName === "SessionStart") {
+    const ss = deps.store.get(sessionId);
+    if (ss) {
+      deps.terminals.signalChanged("session", sessionId, deps.store.getSessionSeq(sessionId));
+    }
+  }
+
+  if (eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept") {
+    const items = deps.inbox.all();
+    if (items.length > 0) {
+      const item = items[0];
+      logMsg(`Inbox broadcast: type=${item.type} tool_name=${(item.data as Record<string, unknown>)?.tool_name} id=${item.id}`);
+      deps.terminals.signalChanged("inbox");
+    }
+  }
+};
 
 // ── Program ──────────────────────────────────────────────────────────
 
@@ -84,21 +221,23 @@ const program = Effect.gen(function* () {
     ));
 
   /** Process a translation result from the pi driver. */
-  const handlePiTranslation = (result: { hookEvent: HookEventName; hookData: HookData }): void => {
-    const sessionId = result.hookData.session_id as string || "pi-session";
+  const handlePiTranslation = (
+    outerSessionId: string,
+    result: { hookEvent: HookEventName; hookData: HookData },
+  ): void => {
+    // Use the outer session ID from startPiSession — do NOT read from hookData.session_id
+    // (that would be the inner ID generated by startPiDriver's own generateSessionId)
+    const sessionId = outerSessionId;
     const cwd = result.hookData.cwd as string || config.piCwd || process.cwd();
 
     logMsg(`Pi driver event: ${result.hookEvent} session=${sessionId}`);
     const patches = runEvent(result.hookEvent, sessionId, cwd, result.hookData, null);
 
     if (patches.length > 0) {
-      if (PULL_MODE) {
-        const stored = store.appendPatches(sessionId, patches);
-        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-        terminals.signalChanged("session", sessionId, seq);
-      } else {
-        terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-      }
+      const stored = store.appendPatches(sessionId, patches);
+      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+      terminals.signalChanged("session", sessionId, seq);
+      logMsg(`Pi driver: ${patches.length} patches for ${result.hookEvent}, signaled session seq=${seq}`);
     }
 
     // Handle session lifecycle for overview updates
@@ -106,14 +245,7 @@ const program = Effect.gen(function* () {
       p.op === "set_claude_status" || p.op === "set_status"
     );
     if (OVERVIEW_EVENTS.has(result.hookEvent) || hasStatusPatch) {
-      if (PULL_MODE) {
-        terminals.signalChanged("overview");
-      } else {
-        terminals.broadcast({
-          type: "overview.snapshot",
-          projects: store.getProjectSummaries(),
-        });
-      }
+      terminals.signalChanged("overview");
     }
 
     // Schedule purge for ended sessions
@@ -123,6 +255,235 @@ const program = Effect.gen(function* () {
     } else if (session && session.status === "active") {
       store.cancelPurge(sessionId);
     }
+  };
+
+  /**
+   * Handle a pi `extension_ui_request`. Dialog methods create an inbox
+   * item and stash the pi request id in `pendingPiUIResponses` so the
+   * subsequent `action.permission` / `action.question` from a terminal
+   * can be routed back to pi. Fire-and-forget methods are logged and
+   * dropped (UI integration TBD).
+   *
+   * Method mapping:
+   * - confirm → permission inbox; allow → {confirmed:true}, deny → {confirmed:false}
+   * - select  → question inbox; answer[0] → {value:<choice>}
+   * - input / editor → auto-cancel (no matching inbox surface yet)
+   * - notify / setStatus / setWidget / setTitle / set_editor_text → log only
+   */
+  const handlePiExtensionUIRequest = (
+    sessionId: string,
+    request: ExtensionUIRequestEvent,
+  ): void => {
+    const session = store.get(sessionId);
+    if (!session) {
+      logMsg(`pi extension_ui_request for unknown session ${sessionId}`, "warn");
+      return;
+    }
+    const method = request.method;
+    const sendResponse = (payload: { value?: string; confirmed?: boolean; cancelled?: boolean }): void => {
+      const driver = piDrivers.get(sessionId);
+      if (!driver) {
+        logMsg(`pi extension_ui_response: no driver for session ${sessionId} (request id=${request.id})`, "warn");
+        return;
+      }
+      driver.sendExtensionUIResponse({ id: request.id, ...payload });
+    };
+
+    switch (method) {
+      case "confirm": {
+        const summary = request.title ?? request.message ?? "Pi confirm";
+        const item = inbox.add(
+          "permission",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          {
+            // Shape the action.permission handler expects: tool_name +
+            // tool_input. We use a synthetic tool name so the UI label
+            // makes sense.
+            tool_name: "pi:confirm",
+            tool_input: { title: request.title, message: request.message },
+            // Pi-specific fields for renderers that want them:
+            pi_ui: { method, id: request.id, options: ["Allow", "Block"] },
+          },
+        );
+        pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request.id, method });
+        terminals.signalChanged("inbox");
+        break;
+      }
+      case "select": {
+        const options = request.options ?? [];
+        const summary = request.title ?? "Pi select";
+        const item = inbox.add(
+          "question",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          {
+            tool_name: "pi:select",
+            tool_input: {
+              // action.question's handler reads tool_input.questions[] —
+              // synthesize a single question entry with the option list.
+              questions: [{ question: summary, options }],
+            },
+            pi_ui: { method, id: request.id, options },
+          },
+        );
+        pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request.id, method });
+        terminals.signalChanged("inbox");
+        break;
+      }
+      case "input":
+      case "editor": {
+        // Route free-text input/editor like `select` (into the question
+        // inbox) so any connected terminal can answer. The discriminator
+        // `pi_ui.kind: "text"` + empty options[] tells the terminal to
+        // render a text-entry surface instead of pick-one. The existing
+        // `action.question` pi-branch already turns answers[0] into
+        // {value} (and an absent answer into {cancelled:true}), so no
+        // change to the response handler is needed.
+        const summary =
+          request.title ?? request.message ??
+          (method === "editor" ? "Pi editor" : "Pi input");
+        const item = inbox.add(
+          "question",
+          sessionId,
+          session.project,
+          session.slug || sessionId.substring(0, 8),
+          summary,
+          {
+            tool_name: "pi:input",
+            tool_input: {
+              // Empty options[] — action.question's handler still finds a
+              // question entry, but the terminal branches on pi_ui.kind.
+              questions: [{ question: summary, options: [] }],
+            },
+            pi_ui: {
+              method,
+              id: request.id,
+              kind: "text",
+              prefill: request.prefill,
+              placeholder: request.placeholder,
+              title: request.title,
+              message: request.message,
+              multiline: method === "editor",
+            },
+          },
+        );
+        pendingPiUIResponses.set(item.id, { sessionId, piRequestId: request.id, method });
+        terminals.signalChanged("inbox");
+        break;
+      }
+      case "notify": {
+        // Surface pi-extension notifications as gravity notices (the
+        // `notice` ServerPushMessage already exists and Emacs already
+        // renders it). Fire-and-forget — pi does not expect a response.
+        const level: "info" | "warn" | "error" =
+          request.notifyType === "error"
+            ? "error"
+            : request.notifyType === "warning"
+              ? "warn"
+              : "info";
+        terminals.broadcast({ type: "notice", level, text: request.message ?? "" });
+        break;
+      }
+      // Fire-and-forget: pi doesn't expect a response. Log for visibility;
+      // wiring these into the UI (status bar, window title) is a follow-up.
+      case "setStatus":
+      case "setWidget":
+      case "setTitle":
+      case "set_editor_text":
+        logMsg(`pi UI notice ${method}: ${JSON.stringify({
+          text: request.text, message: request.message, statusText: request.statusText, title: request.title,
+        })}`);
+        break;
+      default:
+        logMsg(`pi extension_ui_request unknown method ${method} — cancelling`, "warn");
+        sendResponse({ cancelled: true });
+    }
+  };
+
+  /**
+   * Apply a `get_session_stats` response from pi to the session. Emits
+   * `set_cost` and `set_context_usage` patches as needed. Token usage is
+   * already covered by Stop's hookData.token_usage; we don't overwrite it
+   * here to avoid double-counting.
+   */
+  /**
+   * Extract git branch from pi's session file (first JSONL line has gitBranch)
+   * and update both the session and the driver's accumulator state.
+   * Retries until the session file has content or max attempts reached.
+   */
+  const captureBranch = (sessionId: string, sessionFile: string, driver: PiDriver): void => {
+    const attemptRead = (attempt = 0): void => {
+      if (piDrivers.get(sessionId) !== driver) return;
+      try {
+        // Read just the first line — that's where gitBranch lives
+        const { readFileSync } = require("fs") as { readFileSync: (path: string, enc: string) => string };
+        let branch: string | null = null;
+        try {
+          const fd = require("fs").openSync(sessionFile, "r");
+          const buf = Buffer.alloc(64 * 1024);
+          const n = require("fs").readSync(fd, buf, 0, buf.length, 0);
+          require("fs").closeSync(fd);
+          if (n > 0) {
+            const firstLine = buf.toString("utf-8", 0, n).split("\n")[0];
+            if (firstLine) {
+              const obj = JSON.parse(firstLine) as { gitBranch?: string | null };
+              branch = obj.gitBranch ?? null;
+            }
+          }
+        } catch {
+          // File not ready yet — retry
+        }
+        if (branch === null && attempt < 5) {
+          setTimeout(() => attemptRead(attempt + 1), 200 * (attempt + 1));
+          return;
+        }
+        // Update accumulator so subsequent SessionStarts carry branch
+        if (branch !== null) {
+          const accState = driver.getAccState();
+          accState.branch = branch;
+        }
+        // Update session metadata
+        const session = store.get(sessionId);
+        if (session && branch !== null) {
+          const patches = updateMeta(session, { branch });
+          if (patches.length > 0) {
+            const stored = store.appendPatches(sessionId, patches);
+            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+            terminals.signalChanged("session", sessionId, seq);
+          }
+        }
+      } catch (err) {
+        if (attempt < 3) {
+          setTimeout(() => attemptRead(attempt + 1), 200 * (attempt + 1));
+        }
+      }
+    };
+    setImmediate(() => attemptRead());
+  };
+
+  const applyPiSessionStats = (sessionId: string, stats: PiSessionStats): void => {
+    const session = store.get(sessionId);
+    if (!session) return;
+    const patches: Patch[] = [];
+    if (typeof stats.cost === "number") {
+      patches.push(...setCost(session, stats.cost));
+    }
+    if (stats.contextUsage) {
+      patches.push(...setContextUsage(session, {
+        tokens: stats.contextUsage.tokens,
+        contextWindow: stats.contextUsage.contextWindow,
+        percent: stats.contextUsage.percent,
+      }));
+    }
+    if (patches.length === 0) return;
+    const stored = store.appendPatches(sessionId, patches);
+    const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+    terminals.signalChanged("session", sessionId, seq);
   };
 
   // Define helper functions before pi driver check
@@ -150,130 +511,360 @@ const program = Effect.gen(function* () {
       inbox.removeForSession(sessionId);
       terminals.broadcast({ type: "session.removed", sessionId });
       terminals.unsubscribeAll(sessionId);
-      terminals.broadcast({
-        type: "overview.snapshot",
-        projects: store.getProjectSummaries(),
-      });
+      terminals.signalChanged("overview");
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
 
   // ── Pi driver session management ───────────────────────────────
 
-  // Mutable reference to the active pi driver (null if not running)
-  let activePiDriver: ReturnType<typeof startPiDriver> | null = null;
+  // Map of sessionId → pi driver. N concurrent pi processes are supported,
+  // one per gravity session. Each entry is owned exclusively by the lifecycle
+  // callback for that driver (which adds on start and removes on stop/error).
+  type PiDriver = ReturnType<typeof startPiDriver>;
+  const piDrivers = new Map<string, PiDriver>();
+
+  /**
+   * Maps gravity inbox item id → originating pi session id + extension_ui
+   * request id + method. Populated when pi emits an `extension_ui_request`;
+   * consumed by the `action.permission` / `action.question` handlers to
+   * format and send the `extension_ui_response` back to the *correct* pi
+   * driver (instead of writing to a hook socket like Claude Code's
+   * bidirectional flow does).
+   */
+  const pendingPiUIResponses = new Map<number, {
+    sessionId: string;
+    piRequestId: string;
+    method: string;
+  }>();
 
   /** Start a new pi session (called via terminal message). */
-  const startPiSession = (options: { cwd?: string; thinkingLevel?: string }): string | null => {
-    if (activePiDriver) {
-      logMsg(`Pi session already running — use pi.abort first`, "warn");
-      return null;
-    }
-
+  const startPiSession = (options: { cwd?: string; thinkingLevel?: string; resumeSession?: string }): string | null => {
     const sessionId = generateSessionId();
-    logMsg(`Starting pi session ${sessionId} (cwd=${options.cwd ?? process.cwd()}, thinking=${options.thinkingLevel ?? "medium"})`);
+    const cwd = options.cwd ?? process.cwd();
+    const thinking = options.thinkingLevel ?? "medium";
+    logMsg(`Starting pi session ${sessionId} (cwd=${cwd}, thinking=${thinking})`);
 
-    // Broadcast pi.session.started for Emacs
+    // Broadcast pi.session.started for Emacs (control event; sets pi-session-id)
     terminals.broadcast({
       type: "pi.session",
       sessionId,
       event: "started",
-      cwd: options.cwd ?? process.cwd(),
+      cwd,
     } as ServerMessage);
 
+    // Eagerly synthesize a SessionStart so the session appears in the overview
+    // immediately, instead of waiting for pi's own agent_start (which only
+    // fires after the user sends a prompt). Pi's later agent_start will be a
+    // no-op for an already-existing session.
+    handlePiTranslation(sessionId, {
+      hookEvent: "SessionStart",
+      hookData: {
+        session_id: sessionId,
+        cwd,
+        source: "pi",
+        effort_level: thinking,
+      } as HookData,
+    });
 
     const driver = startPiDriver({
       cwd: options.cwd ?? process.cwd(),
       thinkingLevel: (options.thinkingLevel as any) ?? "medium",
-      onTranslation: (result) => {
-        // Route translation to handlePiTranslation
-        handlePiTranslation(result);
+      sessionId,
+      resumeSession: options.resumeSession,
+      onExtensionUIRequest: (request) => {
+        handlePiExtensionUIRequest(sessionId, request);
       },
-      onLifecycle: (event, metadata) => {
+      onTranslation: (result) => {
+        // Route using the outer sessionId from startPiSession
+        handlePiTranslation(sessionId, result);
+        // After Stop (pi's agent_end), poll get_session_stats to refresh
+        // cost and contextUsage. Fire-and-forget — errors are logged but
+        // don't block other event processing.
+        if (result.hookEvent === "Stop") {
+          // Defer to next tick so the Stop patch lands first.
+          setImmediate(() => {
+            const d = piDrivers.get(sessionId);
+            if (!d) return;
+            d.getSessionStats().then(
+              (stats) => applyPiSessionStats(sessionId, stats),
+              (err) => logMsg(`pi get_session_stats failed: ${err.message}`, "warn"),
+            );
+          });
+        }
+      },
+      onLifecycle: (event, _metadata) => {
         if (event === "start") {
-          logMsg(`Pi session started: ${metadata?.sessionId}`);
-        } else if (event === "stop") {
-          logMsg(`Pi session ended: ${metadata?.sessionId}`);
-          // Broadcast pi.session.stopped for Emacs
+          logMsg(`Pi session started: ${sessionId}`);
+        } else if (event === "stop" || event === "error") {
+          if (event === "error") logMsg(`Pi session error`, "error");
+          else logMsg(`Pi session ended: ${sessionId}`);
+          // Cancel only THIS driver's pending pi UI dialogs — other pi
+          // sessions' dialogs must remain intact. Iterate by entry so we
+          // can match on sessionId. confirm/select AND input/editor are
+          // all registered the same way in pendingPiUIResponses, so this
+          // loop drops every pending dialog type on exit.
+          for (const [itemId, entry] of pendingPiUIResponses) {
+            if (entry.sessionId !== sessionId) continue;
+            inbox.remove(itemId);
+            terminals.signalChanged("inbox");
+            pendingPiUIResponses.delete(itemId);
+          }
           terminals.broadcast({
             type: "pi.session",
-            sessionId: metadata?.sessionId ?? sessionId,
+            sessionId,
             event: "stopped",
           } as ServerMessage);
-          activePiDriver = null;
-        } else if (event === "error") {
-          logMsg(`Pi session error`, "error");
-          // Broadcast pi.session.stopped on error too
-          terminals.broadcast({
-            type: "pi.session",
-            sessionId: metadata?.sessionId ?? sessionId,
-            event: "stopped",
-          } as ServerMessage);
-          activePiDriver = null;
+          piDrivers.delete(sessionId);
         }
       },
     });
 
-    activePiDriver = driver;
+    piDrivers.set(sessionId, driver);
+
+    // Capture pi's on-disk session file once pi is ready. Retry a few
+    // times because get_state may race with pi's session-init (it returns
+    // sessionFile=null until the session is loaded). Fire-and-forget.
+    const captureSessionFile = (attempt = 0): void => {
+      if (piDrivers.get(sessionId) !== driver) return;
+      driver.getState().then((state) => {
+        const f = (state as { sessionFile?: unknown }).sessionFile;
+        const name = (state as { sessionName?: unknown }).sessionName;
+        const session = store.get(sessionId);
+        if (session) {
+          // Fold both pi's session-file path and its own session name (if
+          // present) into one set_meta patch. displayName drives the overview
+          // label; piSessionFile drives resume. Either may be absent on any
+          // given poll — only emit when at least one is present.
+          const opts = {
+            ...(typeof f === "string" && f ? { piSessionFile: f } : {}),
+            ...(typeof name === "string" && name ? { displayName: name } : {}),
+          };
+          if (Object.keys(opts).length > 0) {
+            const patches = updateMeta(session, opts);
+            const stored = store.appendPatches(sessionId, patches);
+            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+            terminals.signalChanged("session", sessionId, seq);
+          }
+        }
+        if (typeof f === "string" && f.length > 0) {
+          // Also extract gitBranch from the session file and update session + accumulator.
+          captureBranch(sessionId, f, driver);
+        } else if (attempt < 3) {
+          setTimeout(() => captureSessionFile(attempt + 1), 500 * (attempt + 1));
+        }
+      }, (err) => {
+        if (attempt < 3) {
+          setTimeout(() => captureSessionFile(attempt + 1), 500 * (attempt + 1));
+        } else {
+          logMsg(`pi get_state failed after retries: ${err.message}`, "warn");
+        }
+      });
+    };
+    setImmediate(() => captureSessionFile());
+
+    // Fetch pi's command inventory (extension commands, prompt templates,
+    // skills). Used by Emacs to drive slash-command autocomplete in the
+    // compose buffer. Fire-and-forget — failures are logged but don't gate
+    // session startup.
+    setImmediate(() => refreshPiCommands(sessionId));
+
+    // Fetch pi's available-model list. Used by Emacs to back the model
+    // picker with real models instead of hand-typed strings. Fire-and-
+    // forget — failures are logged but don't gate session startup.
+    setImmediate(() => refreshPiModels(sessionId));
+
     return sessionId;
   };
 
-  /** Send a prompt to the active pi session. */
-  const piSessionPrompt = (text: string, images?: string[]): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
-    }
-    activePiDriver.prompt(text, images).catch((err) => {
-      logMsg(`pi.prompt error: ${err.message}`, "error");
-    });
+  /**
+   * Fetch `get_commands` from the pi process backing SESSION-ID and broadcast
+   * a `set_pi_commands` patch. Idempotent: safe to call repeatedly. Drops
+   * silently if the session has already been replaced (a `pi.stop` racing
+   * with `pi.refresh-commands`).
+   */
+  const refreshPiCommands = (sessionId: string): void => {
+    const driver = piDrivers.get(sessionId);
+    if (!driver) return;
+    driver.getCommands().then(
+      (commands) => {
+        // Bail if the driver was swapped/stopped while the RPC was in flight.
+        if (piDrivers.get(sessionId) !== driver) return;
+        const session = store.get(sessionId);
+        if (!session) return;
+        const patches = setPiCommands(session, commands);
+        if (patches.length === 0) return;
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
+        logMsg(`Pi[${sessionId}]: ${commands.length} commands available`);
+      },
+      (err) => logMsg(`pi get_commands failed for ${sessionId}: ${err.message}`, "warn"),
+    );
   };
 
-  /** Send steering message to active pi session. */
-  const piSessionSteer = (text: string): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
-    }
-    activePiDriver.steer(text);
+  /**
+   * Fetch `get_available_models` from the pi process backing SESSION-ID and
+   * broadcast a `set_pi_models` patch. Idempotent: safe to call repeatedly.
+   * Drops silently if the session has already been replaced (a `pi.stop`
+   * racing with `pi.refresh-models`).
+   */
+  const refreshPiModels = (sessionId: string): void => {
+    const driver = piDrivers.get(sessionId);
+    if (!driver) return;
+    driver.getAvailableModels().then(
+      (models) => {
+        // Bail if the driver was swapped/stopped while the RPC was in flight.
+        if (piDrivers.get(sessionId) !== driver) return;
+        const session = store.get(sessionId);
+        if (!session) return;
+        const patches = setPiModels(session, models);
+        if (patches.length === 0) return;
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
+        logMsg(`Pi[${sessionId}]: ${models.length} models available`);
+      },
+      (err) => logMsg(`pi get_available_models failed for ${sessionId}: ${err.message}`, "warn"),
+    );
   };
 
-  /** Abort the active pi session. */
-  const piSessionAbort = (): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session to abort`, "warn");
-      return;
+  /** Look up a pi driver by sessionId, logging a warning if not found. */
+  const getPiDriver = (sessionId: string, op: string): PiDriver | null => {
+    const d = piDrivers.get(sessionId);
+    if (!d) {
+      logMsg(`${op}: no pi driver for session ${sessionId}`, "warn");
+      return null;
     }
-    activePiDriver.abort();
+    return d;
   };
 
-  /** Set thinking level for active pi session. */
-  const piSessionSetThinking = (level: string): void => {
-    if (!activePiDriver) {
-      logMsg(`No active pi session`, "warn");
-      return;
-    }
-    activePiDriver.setEffortLevel(level);
+  /** Send a prompt to a specific pi session. */
+  const piSessionPrompt = (sessionId: string, text: string, images?: string[]): void => {
+    const d = getPiDriver(sessionId, "pi.prompt");
+    if (!d) return;
+    logMsg(`pi.prompt: forwarding to driver session=${sessionId} text_len=${text.length}`);
+    d.prompt(text, images)
+      .then(() => logMsg(`pi.prompt: sent to pi session=${sessionId}`))
+      .catch((err) => {
+        logMsg(`pi.prompt error: ${err.message}`, "error");
+      });
   };
 
-  /** Stop the active pi session. */
-  const stopPiSession = async (): Promise<void> => {
-    if (!activePiDriver) {
-      return;
-    }
-    await activePiDriver.stop();
-    activePiDriver = null;
+  /** Send steering message to a specific pi session. */
+  const piSessionSteer = (sessionId: string, text: string): void => {
+    const d = getPiDriver(sessionId, "pi.steer");
+    if (!d) return;
+    d.steer(text);
   };
 
-  // ── Terminal message handlers for pi ──────────────────────────────
+  /** Abort the current turn of a specific pi session. */
+  const piSessionAbort = (sessionId: string): void => {
+    const d = getPiDriver(sessionId, "pi.abort");
+    if (!d) return;
+    d.abort();
+  };
 
-  // Expose pi session functions to terminal message handler
-  (program as any)._startPiSession = startPiSession;
-  (program as any)._piSessionPrompt = piSessionPrompt;
-  (program as any)._piSessionSteer = piSessionSteer;
-  (program as any)._piSessionAbort = piSessionAbort;
-  (program as any)._piSessionSetThinking = piSessionSetThinking;
-  (program as any)._stopPiSession = stopPiSession;
+  /** Set thinking level for a specific pi session. */
+  const piSessionSetThinking = (sessionId: string, level: string): void => {
+    const d = getPiDriver(sessionId, "pi.set-thinking");
+    if (!d) return;
+    d.setEffortLevel(level);
+  };
+
+  /**
+   * Set pi's session name for a specific session (`set_session_name` RPC).
+   * Optimistically reflects the name in the overview via `set_meta`; pi
+   * persists it and the next `get_state` poll confirms it.
+   */
+  const piSessionSetSessionName = (sessionId: string, name: string): void => {
+    const d = getPiDriver(sessionId, "pi.set-session-name");
+    if (!d) return;
+    d.setSessionName(name);
+    const session = store.get(sessionId);
+    if (session) {
+      const patches = updateMeta(session, { displayName: name });
+      const stored = store.appendPatches(sessionId, patches);
+      const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+      terminals.signalChanged("session", sessionId, seq);
+    }
+  };
+
+  /** Switch model for a specific pi session (pi `set_model` RPC). */
+  const piSessionSetModel = (sessionId: string, provider: string, modelId: string): void => {
+    const d = getPiDriver(sessionId, "pi.set-model");
+    if (!d) return;
+    d.setModel(provider, modelId);
+  };
+
+  /** Manually compact a specific pi session's context (`compact` RPC). */
+  const piSessionCompact = (sessionId: string, customInstructions?: string): void => {
+    const d = getPiDriver(sessionId, "pi.compact");
+    if (!d) return;
+    d.compact(customInstructions).then(
+      (data) => {
+        const summary = data.summary ? ` — ${data.summary.substring(0, 80)}…` : "";
+        logMsg(`pi compact done (tokensBefore=${data.tokensBefore ?? "?"})${summary}`);
+      },
+      (err) => logMsg(`pi compact failed: ${err.message}`, "error"),
+    );
+  };
+
+  /** Start a fresh session inside a specific pi process (`new_session` RPC). */
+  const piSessionNewSession = (sessionId: string): void => {
+    const d = getPiDriver(sessionId, "pi.new-session");
+    if (!d) return;
+    d.newSession().then(
+      (ok) => {
+        if (!ok) logMsg(`pi new_session cancelled by extension`, "warn");
+      },
+      (err) => logMsg(`pi new_session failed: ${err.message}`, "error"),
+    );
+  };
+
+  /**
+   * Resume a pi session. If SESSION-ID identifies a live pi driver, swap its
+   * working session via `switch_session` to SESSION-PATH. Otherwise spawn a
+   * brand-new pi process resuming SESSION-PATH (`--session <path>`).
+   */
+  const piSessionResume = (sessionPath: string, sessionId?: string): void => {
+    if (!sessionPath) {
+      logMsg(`pi.resume called without sessionPath`, "warn");
+      return;
+    }
+    const driver = sessionId ? piDrivers.get(sessionId) : undefined;
+    if (driver) {
+      driver.switchSession(sessionPath).then(
+        (ok) => {
+          if (!ok) logMsg(`pi switch_session cancelled by extension`, "warn");
+        },
+        (err) => logMsg(`pi switch_session failed: ${err.message}`, "error"),
+      );
+    } else {
+      // No live driver for the given id (or no id given) — spawn a new pi
+      // process resuming the path.
+      const newId = startPiSession({ resumeSession: sessionPath } as { cwd?: string; thinkingLevel?: string; resumeSession?: string });
+      if (newId) {
+        logMsg(`Pi session ${newId} spawned resuming ${sessionPath}`);
+      }
+    }
+  };
+
+  /** Stop a specific pi session — terminates the pi process. */
+  const stopPiSession = async (sessionId: string): Promise<void> => {
+    const d = piDrivers.get(sessionId);
+    if (!d) return;
+    await d.stop();
+    // The driver's onLifecycle("stop") callback removes from piDrivers and
+    // cleans up that session's UI requests. No need to do it here.
+  };
+
+  // ── Pi session control ────────────────────────────────────────────
+  //
+  // The terminal message handler below references startPiSession,
+  // piSessionPrompt, etc. directly by their closure-captured names — no
+  // dispatch table needed. (An older draft stashed these on `program` via
+  // `as any` casts; that indirection was unused and has been removed.)
 
   // Generate session ID (needed for pi mode)
   const generateSessionId = (): string => {
@@ -306,111 +897,15 @@ const program = Effect.gen(function* () {
 
   // ── Hook message handler ─────────────────────────────────────────
 
-  const handleHookMessage = async (msg: Record<string, unknown>, socket: Socket): Promise<void> => {
-    const eventName = msg.event as HookEventName;
-    const sessionId = (msg.session_id as string) || "unknown";
-    const cwd = (msg.cwd as string) || "";
-    const pid = (msg.pid as number) || null;
-    const data = (msg.data as HookData) || {};
-    const needsResponse = msg.needs_response === true;
-
-    logMsg(`Hook event: ${eventName} session=${sessionId}`);
-    hookEventReceived = true;
-
-    // Reject bidirectional events if no capable terminal is connected
-    if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
-      if (!terminals.hasCapableTerminal("action.permission")) {
-        logMsg(`No capable terminal connected — waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
-        const arrived = await waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
-        if (!arrived) {
-          logMsg(`No capable terminal after ${CAPABILITY_WAIT_MS}ms — rejecting ${eventName}`, "warn");
-          try {
-            socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
-            socket.end();
-          } catch { /* socket may already be closed */ }
-          return;
-        }
-        logMsg(`Capable terminal connected during wait — proceeding with ${eventName}`);
-      }
-    }
-
-    // Clean up stale bidirectional inbox items before processing
-    if (!BIDIRECTIONAL_EVENTS.has(eventName)) {
-      const staleRemoved = inbox.removeStaleForSession(sessionId);
-      for (const item of staleRemoved) {
-        logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: superseded by ${eventName}`);
-        terminals.broadcast({ type: "inbox.removed", itemId: item.id });
-      }
-
-      if (eventName !== "Notification") {
-        const forceClosed = inbox.forceCloseStaleForSession(sessionId);
-        for (const item of forceClosed) {
-          logMsg(`Inbox item ${item.id} (${item.type}) force-closed: superseded by ${eventName}`);
-          terminals.broadcast({ type: "inbox.removed", itemId: item.id });
-        }
-      }
-    }
-
-    const patches = runEvent(eventName, sessionId, cwd, data, pid, needsResponse ? socket : undefined);
-
-    if (patches.length > 0) {
-      if (PULL_MODE) {
-        // Pull mode: store patches and signal, don't broadcast
-        const stored = store.appendPatches(sessionId, patches);
-        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-        terminals.signalChanged("session", sessionId, seq);
-      } else {
-        // Push mode (default): broadcast full patches
-        terminals.broadcast({ type: "session.update", sessionId, patches } as ServerMessage);
-      }
-    }
-
-    // Schedule purge for ended sessions, cancel if session self-heals
-    const session = store.get(sessionId);
-    if (session && session.status === "ended") {
-      schedulePurge(sessionId);
-    } else if (session && session.status === "active") {
-      store.cancelPurge(sessionId);
-    }
-
-    const hasStatusPatch = patches.some(p =>
-      p.op === "set_claude_status" || p.op === "set_status"
+  const handleHookMessage = (msg: Record<string, unknown>, socket: Socket): Promise<void> =>
+    processHookMessage(
+      {
+        store, inbox, terminals, runEvent, waitForCapableTerminal, schedulePurge,
+        markHookReceived: () => { hookEventReceived = true; },
+      },
+      msg,
+      socket,
     );
-    if (OVERVIEW_EVENTS.has(eventName) || hasStatusPatch) {
-      if (PULL_MODE) {
-        terminals.signalChanged("overview");
-      } else {
-        terminals.broadcast({
-          type: "overview.snapshot",
-          projects: store.getProjectSummaries(),
-        });
-      }
-    }
-
-    if (eventName === "SessionStart") {
-      const session = store.get(sessionId);
-      if (session) {
-        if (PULL_MODE) {
-          terminals.signalChanged("session", sessionId, store.getSessionSeq(sessionId));
-        } else {
-          terminals.broadcast({ type: "session.snapshot", sessionId, session });
-        }
-      }
-    }
-
-    if (eventName === "PermissionRequest" || eventName === "AskUserQuestionIntercept") {
-      const items = inbox.all();
-      if (items.length > 0) {
-        const item = items[0];
-        logMsg(`Inbox broadcast: type=${item.type} tool_name=${(item.data as Record<string, unknown>)?.tool_name} id=${item.id}`);
-        if (PULL_MODE) {
-          terminals.signalChanged("inbox");
-        } else {
-          terminals.broadcast({ type: "inbox.added", item });
-        }
-      }
-    }
-  };
 
   /** Send overview data to a connection (used by both push and pull modes). */
   const sendOverview = (conn: TerminalConnection): void => {
@@ -431,7 +926,13 @@ const program = Effect.gen(function* () {
         if (Array.isArray(caps)) {
           conn.capabilities = new Set(caps.filter((c): c is string => typeof c === "string"));
         }
-        logMsg(`Terminal hello: capabilities=[${[...conn.capabilities].join(",")}]`);
+        const clientVersion = helloProtocolVersion(msg);
+        logMsg(`Terminal hello: capabilities=[${[...conn.capabilities].join(",")}] protocol=v${clientVersion}`);
+        const mismatch = protocolMismatch(clientVersion);
+        if (mismatch) {
+          logMsg(`Protocol mismatch: client=v${mismatch.clientVersion} server=v${mismatch.serverVersion} caps=[${[...conn.capabilities].join(",")}] — ${mismatch.text}`, "warn");
+          terminals.sendTo(conn, { type: "protocol.mismatch", ...mismatch });
+        }
         break;
       }
 
@@ -447,9 +948,15 @@ const program = Effect.gen(function* () {
         // Pull mode: client requests current state
         sendOverview(conn);
         const items = inbox.all();
-        if (items.length > 0) {
+        // Send inbox-items while non-empty, AND once when it transitions to
+        // empty, so read-only clients (menu bar) clear their attention
+        // indicator promptly. Without the transition send, an emptied inbox
+        // is never communicated via poll and the indicator lingers until the
+        // next reconnect/resync. Avoid re-sending empty arrays every poll.
+        if (shouldSendInboxOnPoll(items.length, conn.inboxWasNonEmpty)) {
           terminals.sendTo(conn, { type: "inbox-items", items });
         }
+        conn.inboxWasNonEmpty = items.length > 0;
         for (const sessionId of conn.subscribedSessions) {
           const session = store.get(sessionId);
           if (session) {
@@ -496,18 +1003,55 @@ const program = Effect.gen(function* () {
 
       case "action.permission": {
         const { itemId, decision, message, updatedPermissions } = msg;
+        // Pi extension_ui_request items: route the decision back to pi as
+        // an extension_ui_response instead of writing to a hook socket.
+        const piUi = pendingPiUIResponses.get(itemId);
+        if (piUi) {
+          const driver = piDrivers.get(piUi.sessionId);
+          if (!driver) {
+            logMsg(`action.permission for pi UI ${piUi.piRequestId}: no driver for session ${piUi.sessionId}`, "warn");
+          } else {
+            driver.sendExtensionUIResponse({
+              id: piUi.piRequestId,
+              confirmed: decision === "allow",
+            });
+          }
+          pendingPiUIResponses.delete(itemId);
+          inbox.remove(itemId);
+          terminals.signalChanged("inbox");
+          break;
+        }
         Effect.runSync(inbox.respond(itemId, {
           hookSpecificOutput: {
             hookEventName: "PermissionRequest",
             decision: { behavior: decision, message, updatedPermissions },
           },
         }));
-        terminals.broadcast({ type: "inbox.removed", itemId });
+        terminals.signalChanged("inbox");
         break;
       }
 
       case "action.question": {
         const { itemId, answers } = msg;
+        // Pi extension_ui_request items: send the first answer as
+        // {value: <choice>} (pi's select dialog uses string values).
+        const piUi = pendingPiUIResponses.get(itemId);
+        if (piUi) {
+          const driver = piDrivers.get(piUi.sessionId);
+          if (!driver) {
+            logMsg(`action.question for pi UI ${piUi.piRequestId}: no driver for session ${piUi.sessionId}`, "warn");
+          } else {
+            const value = answers[0];
+            driver.sendExtensionUIResponse({
+              id: piUi.piRequestId,
+              ...(value !== undefined ? { value } : { cancelled: true }),
+            });
+          }
+          pendingPiUIResponses.delete(itemId);
+          inbox.remove(itemId);
+          terminals.signalChanged("inbox");
+          break;
+        }
         const pending = inbox.getPending(itemId);
         const toolInput = (pending?.inboxItem.data?.tool_input as Record<string, unknown>) || {};
         const questions = (toolInput.questions as Array<Record<string, unknown>>) || [];
@@ -525,7 +1069,7 @@ const program = Effect.gen(function* () {
             updatedInput: { ...toolInput, answers: answersMap },
           },
         }));
-        terminals.broadcast({ type: "inbox.removed", itemId });
+        terminals.signalChanged("inbox");
         break;
       }
 
@@ -581,7 +1125,7 @@ const program = Effect.gen(function* () {
             decision: { behavior: decision, message },
           },
         }));
-        terminals.broadcast({ type: "inbox.removed", itemId });
+        terminals.signalChanged("inbox");
         break;
       }
 
@@ -600,15 +1144,9 @@ const program = Effect.gen(function* () {
             break;
           }
           logMsg(`Terminal hint: session ${sessionId} is dead — marking ended`);
-          const patches = sessionEnd(session);
-          if (patches.length > 0) {
-            terminals.broadcast({ type: "session.update", sessionId, patches });
-          }
+          emitSessionPatches(store, terminals, sessionId, sessionEnd(session));
           schedulePurge(sessionId);
-          terminals.broadcast({
-            type: "overview.snapshot",
-            projects: store.getProjectSummaries(),
-          });
+          terminals.signalChanged("overview");
         }
         break;
       }
@@ -624,31 +1162,91 @@ const program = Effect.gen(function* () {
         if (sessionId) {
           logMsg(`Pi session started via terminal: ${sessionId}`);
         } else {
-          logMsg(`Pi session start failed — already running?`, "warn");
+          // startPiSession only fails for non-singleton reasons now (it no
+          // longer rejects on an existing driver). Surface a generic error.
+          logMsg(`Pi session start failed`, "warn");
+          terminals.sendTo(conn, {
+            type: "pi.session",
+            sessionId: "",
+            event: "rejected",
+            reason: "Pi session start failed (see server log).",
+          } as ServerMessage);
         }
         break;
       }
 
       case "pi.prompt": {
-        const m = msg as { text: string; images?: string[] };
-        piSessionPrompt(m.text, m.images);
+        const m = msg as { sessionId: string; text: string; images?: string[] };
+        piSessionPrompt(m.sessionId, m.text, m.images);
         break;
       }
 
       case "pi.steer": {
-        const m = msg as { text: string };
-        piSessionSteer(m.text);
+        const m = msg as { sessionId: string; text: string };
+        piSessionSteer(m.sessionId, m.text);
         break;
       }
 
       case "pi.abort": {
-        piSessionAbort();
+        const m = msg as { sessionId: string };
+        piSessionAbort(m.sessionId);
         break;
       }
 
       case "pi.set-thinking": {
-        const m = msg as { level: string };
-        piSessionSetThinking(m.level);
+        const m = msg as { sessionId: string; level: string };
+        piSessionSetThinking(m.sessionId, m.level);
+        break;
+      }
+
+      case "pi.set-session-name": {
+        const m = msg as { sessionId: string; name: string };
+        piSessionSetSessionName(m.sessionId, m.name);
+        break;
+      }
+
+      case "pi.set-model": {
+        const m = msg as { sessionId: string; provider: string; modelId: string };
+        piSessionSetModel(m.sessionId, m.provider, m.modelId);
+        break;
+      }
+
+      case "pi.resume": {
+        const m = msg as { sessionId?: string; sessionPath: string };
+        piSessionResume(m.sessionPath, m.sessionId);
+        break;
+      }
+
+      case "pi.compact": {
+        const m = msg as { sessionId: string; customInstructions?: string };
+        piSessionCompact(m.sessionId, m.customInstructions);
+        break;
+      }
+
+      case "pi.new-session": {
+        const m = msg as { sessionId: string };
+        piSessionNewSession(m.sessionId);
+        break;
+      }
+
+      case "pi.stop": {
+        // Kill the targeted pi process entirely (vs pi.abort which only
+        // interrupts the current LLM turn). The driver's onLifecycle("stop")
+        // path removes it from piDrivers and broadcasts pi.session "stopped".
+        const m = msg as { sessionId: string };
+        stopPiSession(m.sessionId).catch((err) => logMsg(`pi.stop failed: ${err.message}`, "error"));
+        break;
+      }
+
+      case "pi.refresh-commands": {
+        const m = msg as { sessionId: string };
+        refreshPiCommands(m.sessionId);
+        break;
+      }
+
+      case "pi.refresh-models": {
+        const m = msg as { sessionId: string };
+        refreshPiModels(m.sessionId);
         break;
       }
     }
@@ -688,7 +1286,7 @@ const program = Effect.gen(function* () {
       const removed = inbox.removeBySocket(socket);
       for (const item of removed) {
         logMsg(`Inbox item ${item.id} (${item.type}) auto-removed: hook socket closed`);
-        terminals.broadcast({ type: "inbox.removed", itemId: item.id });
+        terminals.signalChanged("inbox");
       }
     });
   });
@@ -697,7 +1295,15 @@ const program = Effect.gen(function* () {
     logMsg(`Hook socket listening on ${config.hookSocketPath}`);
   });
 
+  // ── Start mermaid RPC server (TCP JSON-RPC on port 9876) ────────
+
+  const mermaidServer = new MermaidRpcServer({ port: 9876, host: "127.0.0.1" });
+  mermaidServer.start().catch((e: unknown) => {
+    logMsg(`Mermaid RPC server failed to start: ${e}`, "warn");
+  });
+
   // ── Start terminal server ────────────────────────────────────────
+
 
   yield* fs.unlinkIfExists(config.terminalSocketPath);
   yield* fs.mkdirp(dirname(config.terminalSocketPath));
@@ -775,6 +1381,14 @@ const program = Effect.gen(function* () {
           isDead = true;
           logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
         }
+      } else if (session.source === "pi") {
+        // Pi sessions intentionally have no PID on the gravity Session
+        // object — they're managed entirely by gravity-server (via
+        // piDrivers map and child.on("exit") in the pi-driver spawn
+        // path). Skip the time-based staleness fallback: an idle pi
+        // session is normal (pi waits for the next prompt indefinitely),
+        // not a dead one. Pi termination is reported correctly via the
+        // SessionEnd event the spawn handler emits on child exit.
       } else if (now - session.lastEventTime > STALENESS_THRESHOLD_MS) {
         isDead = true;
         logMsg(`Health check: session ${sessionId} stale (no events for ${Math.round((now - session.lastEventTime) / 1000)}s)`);
@@ -783,23 +1397,12 @@ const program = Effect.gen(function* () {
       if (isDead) {
         const patches = sessionEnd(session);
         if (patches.length > 0) {
-          if (PULL_MODE) {
-            const stored = store.appendPatches(sessionId, patches);
-            const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-            terminals.signalChanged("session", sessionId, seq);
-          } else {
-            terminals.broadcast({ type: "session.update", sessionId, patches });
-          }
+          const stored = store.appendPatches(sessionId, patches);
+          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+          terminals.signalChanged("session", sessionId, seq);
         }
         schedulePurge(sessionId);
-        if (PULL_MODE) {
-          terminals.signalChanged("overview");
-        } else {
-          terminals.broadcast({
-            type: "overview.snapshot",
-            projects: store.getProjectSummaries(),
-          });
-        }
+        terminals.signalChanged("overview");
       }
     }
 
@@ -883,7 +1486,15 @@ const main = Effect.gen(function* () {
   yield* program;
 });
 
-Effect.runPromise(Effect.provide(main, MainLive)).catch((e) => {
-  logMsg(`Fatal error: ${e}`, "error");
-  process.exit(1);
-});
+// Only bootstrap the server when run as the entrypoint. Importing this
+// module (e.g. the socket-free test harness for processHookMessage) must
+// NOT start sockets / call process.exit.
+const isEntrypoint =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  Effect.runPromise(Effect.provide(main, MainLive)).catch((e) => {
+    logMsg(`Fatal error: ${e}`, "error");
+    process.exit(1);
+  });
+}

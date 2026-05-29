@@ -440,6 +440,49 @@ Sort order: in_progress → pending → completed
 
 ---
 
+## 6.1 Edited Files Section (within a turn)
+
+A roll-up of every file the turn edited. When a file is edited multiple times
+in the turn, it still shows a single consolidated diff — the net change from
+before the turn's first edit to after its last edit.
+
+```
+  Edited Files (2)  +131 −42
+    claude-gravity-ui.el          +88 −20   3 edits
+    packages/.../session.ts       +43 −22   created
+```
+
+File entry expanded — the consolidated diff:
+
+```
+    claude-gravity-ui.el          +88 −20   3 edits
+      Diff:
+        @@ -120,4 +120,9 @@
+           (existing context line)
+        - removed line
+        + added line
+        ...
+```
+
+### Legend
+
+```
+Edited Files (N)  +A −B   — N files; A/B summed added/removed across the turn
+per-file trailer:
+  N edits     — edited N times this turn
+  created     — file created this turn
+  deleted     — file deleted this turn
+diff unavailable          — diff could not be computed
+diff too large — open the file   — diff elided for size (truncated)
+```
+
+Each file entry is collapsible (`TAB`); `RET` visits the file. The consolidated
+diff reuses the structured-patch renderer with word-level refinement. The
+per-tool inline diff under each individual Edit tool is unaffected — this
+section is an additive turn-level roll-up.
+
+---
+
 ## 7. Agents (within a turn)
 
 Agents with live tool data render as **sub-branches** — their tools appear
