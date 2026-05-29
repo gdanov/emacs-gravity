@@ -206,14 +206,12 @@ export class MermaidRpcServer {
   }
 }
 
-// Quick start: run standalone
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const port = parseInt(process.env.MERMAID_RPC_PORT ?? `${DEFAULT_PORT}`, 10);
-  const server = new MermaidRpcServer({ port });
-  server.start().catch((e) => {
-    console.error(`Failed to start mermaid RPC server: ${e}`);
-    process.exit(1);
-  });
-}
-
+// NOTE: no standalone entrypoint guard here on purpose. gravity-server.ts
+// owns the lifecycle and starts this server itself (non-fatally). A
+// `if (import.meta.url === file://${process.argv[1]})` guard is unsafe once
+// esbuild bundles this module into gravity-server.mjs: import.meta.url and
+// process.argv[1] both resolve to the bundle, so the guard would fire and
+// spin up a SECOND server — exiting the process on the inevitable port
+// conflict. To run standalone for dev, construct and start it explicitly:
+//   new MermaidRpcServer({ port }).start()
 export default MermaidRpcServer;

@@ -106046,14 +106046,6 @@ var MermaidRpcServer = class {
     };
   }
 };
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const port = parseInt(process.env.MERMAID_RPC_PORT ?? `${DEFAULT_PORT}`, 10);
-  const server = new MermaidRpcServer({ port });
-  server.start().catch((e) => {
-    console.error(`Failed to start mermaid RPC server: ${e}`);
-    process.exit(1);
-  });
-}
 
 // src/services/config.ts
 import { homedir as homedir2 } from "os";
