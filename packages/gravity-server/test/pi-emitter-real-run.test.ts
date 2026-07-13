@@ -29,22 +29,10 @@ import {
   type CollectedLine,
 } from "./helpers/hook-socket-listener.js";
 
-/** Worktree root — derived from this test file's location rather than
- *  hardcoded so the file works for any checkout. The file lives at
- *  `<worktree>/packages/gravity-server/test/pi-emitter-real-run.test.ts`,
- *  so three levels up from its `dirname` is the worktree root. */
-const WORKTREE_ROOT = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-);
-
 /** Temp dir holding the materialized bundle; cleaned up at process
- *  exit. The bundle is materialized unconditionally at module load
- *  (top-level await) so `EMITTER_PATH` is always a real string — the
- *  resolution is cheap and harmless on hosts where the `pi` real-
- *  subprocess suite is gated off. */
+ *  exit. The bundle itself is materialized in the gated `beforeAll`
+ *  below (only when `pi` is available on this host), not at module
+ *  load — this dir is just created eagerly so its path is stable. */
 const bundleScratchDir = mkdtempSync(join(tmpdir(), "pi-emitter-bundle-"));
 
 /** Trivial-but-tool-bearing prompt used by pi-wp's own smoke test
