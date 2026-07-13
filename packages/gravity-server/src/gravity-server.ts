@@ -171,7 +171,10 @@ export const processHookMessage = async (
           socket.end();
         } catch { /* socket may already be closed */ }
         // Leave preItem in place — a read-only client can still see (but
-        // not answer) the request after the socket is rejected.
+        // not answer) the request after the socket is rejected. Signal
+        // the inbox change so any connected read-only clients know to
+        // poll and pick up the new non-actionable item.
+        deps.terminals.signalChanged("inbox");
         return;
       }
       // A capable terminal arrived within the short window: clear the
