@@ -588,6 +588,7 @@ export type TerminalMessage =
   | { type: "request.session"; sessionId: string }
   | { type: "request.overview" }
   | { type: "request.resync" }
+  | { type: "request.unsubscribe"; sessionId: string }
   | { type: "hint.session-dead"; sessionId: string }
   | { type: "poll" }
   // Pi driver messages

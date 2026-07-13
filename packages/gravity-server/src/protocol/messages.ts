@@ -12,6 +12,7 @@ const VALID_TERMINAL_MESSAGE_TYPES = new Set([
   "request.session",
   "request.overview",
   "request.resync",
+  "request.unsubscribe",
   "hint.session-dead",
   "poll",
   // Pi driver control messages (handled in handleTerminalMessage's switch).

@@ -599,6 +599,7 @@ const program = Effect.gen(function* () {
   const schedulePurge = (sessionId: string): void => {
     store.schedulePurge(sessionId, PURGE_DELAY_MS, () => {
       store.delete(sessionId);
+      store.clearPatches(sessionId);
       inbox.removeForSession(sessionId);
       terminals.broadcast({ type: "session.removed", sessionId });
       terminals.unsubscribeAll(sessionId);
@@ -1061,7 +1062,8 @@ const program = Effect.gen(function* () {
         for (const sessionId of conn.subscribedSessions) {
           const session = store.get(sessionId);
           if (session) {
-            const patches = store.getPatchesSince(sessionId, 0);
+            const since = conn.sessionSeqCursor.get(sessionId) ?? 0;
+            const patches = store.getPatchesSince(sessionId, since);
             const seq = store.getSessionSeq(sessionId);
             if (patches.length > 0) {
               terminals.sendTo(conn, {
@@ -1070,6 +1072,12 @@ const program = Effect.gen(function* () {
                 seq,
                 patches: patches.map(p => p.patch),
               });
+              // Only advance the cursor when something was actually
+              // delivered — a no-patch poll leaves the cursor alone so
+              // the next non-empty reply still carries every patch the
+              // client hasn't seen yet (the cursor is "what we have
+              // ACKed", not "what we have read").
+              conn.sessionSeqCursor.set(sessionId, seq);
             }
           }
         }
@@ -1080,6 +1088,12 @@ const program = Effect.gen(function* () {
       case "request.session": {
         const session = store.get(msg.sessionId);
         conn.subscribedSessions.add(msg.sessionId);
+        // Seed the incremental-pull cursor to the session's current
+        // seq so the very next `poll` starts at "everything after the
+        // snapshot we just sent", not at seq 0 (which would replay the
+        // entire patch history on top of the snapshot — the quadratic
+        // blow-up this cursor was added to prevent).
+        conn.sessionSeqCursor.set(msg.sessionId, store.getSessionSeq(msg.sessionId));
         if (session) {
           terminals.sendTo(conn, { type: "session.snapshot", sessionId: msg.sessionId, session });
         }
@@ -1095,10 +1109,25 @@ const program = Effect.gen(function* () {
           const session = store.get(sessionId);
           if (session) {
             terminals.sendTo(conn, { type: "session.snapshot", sessionId, session });
+            // Same incremental-pull seeding as `request.session`: each
+            // resynced session's cursor jumps to its current seq so the
+            // follow-up `poll` doesn't replay the snapshot's history.
+            conn.sessionSeqCursor.set(sessionId, store.getSessionSeq(sessionId));
           }
         }
         terminals.sendTo(conn, { type: "inbox.snapshot", items: inbox.all() });
         logMsg(`Terminal resync: ${conn.subscribedSessions.size} sessions`);
+        break;
+      }
+
+      case "request.unsubscribe": {
+        // Fire-and-forget: drop both the subscription and the
+        // incremental-pull cursor so the client stops receiving
+        // signals for this session entirely. No reply is sent —
+        // mirrors the other unidirectional `case` blocks that
+        // don't echo a confirmation (e.g. `hint.session-dead`).
+        conn.subscribedSessions.delete(msg.sessionId);
+        conn.sessionSeqCursor.delete(msg.sessionId);
         break;
       }
 

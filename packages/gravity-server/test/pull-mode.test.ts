@@ -217,4 +217,146 @@ describe("parseTerminalMessage: poll type", () => {
     expect(parseTerminalMessage(JSON.stringify({ type: "poll" }))).not.toBeNull();
     expect(parseTerminalMessage(JSON.stringify({ type: "request.resync" }))).not.toBeNull();
   });
+
+  it("accepts request.unsubscribe with a sessionId", () => {
+    const msg = parseTerminalMessage(JSON.stringify({ type: "request.unsubscribe", sessionId: "s-xyz" }));
+    expect(msg).not.toBeNull();
+    expect(msg!.type).toBe("request.unsubscribe");
+    if (msg!.type === "request.unsubscribe") {
+      expect(msg!.sessionId).toBe("s-xyz");
+    }
+  });
+});
+
+// ── SessionStore: update_tool_partial coalescing ─────────────────────
+//
+// Patch history represents state, not an event log: streaming
+// partials for a single in-flight tool are a sequence of observations
+// of the same value, so only the latest should occupy a history
+// slot. Other patch types are never coalesced.
+
+describe("SessionStore: update_tool_partial coalescing", () => {
+  let store: SessionStoreService;
+
+  beforeEach(() => {
+    store = makeSessionStore();
+  });
+
+  it("coalesces two consecutive update_tool_partial patches for the same toolUseId into one history entry", () => {
+    const id = "s1";
+    const toolUseId = "tu_a";
+    const first = store.appendPatches(id, [
+      { op: "update_tool_partial", toolUseId, partial: "v1" },
+    ]);
+    expect(first).toHaveLength(1);
+    const firstSeq = first[0].seq;
+
+    // A second partial for the same toolUseId: should mutate the tail
+    // in place, not push a fresh entry, and must NOT advance globalSeq.
+    const second = store.appendPatches(id, [
+      { op: "update_tool_partial", toolUseId, partial: "v2-latest" },
+    ]);
+    expect(second).toHaveLength(1);
+    // The returned entry is the same mutated tail (same seq), not a
+    // freshly-assigned one — so callers deriving "last seq from this
+    // call" still see a consistent picture.
+    expect(second[0].seq).toBe(firstSeq);
+    expect(second[0].patch).toEqual({ op: "update_tool_partial", toolUseId, partial: "v2-latest" });
+
+    const all = store.getPatchesSince(id, 0);
+    expect(all).toHaveLength(1);
+    expect(all[0].patch).toEqual({ op: "update_tool_partial", toolUseId, partial: "v2-latest" });
+
+    // getSessionSeq after coalescing returns the SAME seq the first
+    // partial got assigned — coalesced entries do not bump the
+    // global counter.
+    expect(store.getSessionSeq(id)).toBe(firstSeq);
+  });
+
+  it("does not coalesce update_tool_partial for a different toolUseId", () => {
+    const id = "s1";
+    // Same toolUseId twice → coalesced into one entry.
+    store.appendPatches(id, [
+      { op: "update_tool_partial", toolUseId: "tu_a", partial: "v1" },
+    ]);
+    store.appendPatches(id, [
+      { op: "update_tool_partial", toolUseId: "tu_a", partial: "v2" },
+    ]);
+    // A third partial for a DIFFERENT toolUseId must NOT coalesce with
+    // the (mutated) tu_a tail — history length grows to 2.
+    store.appendPatches(id, [
+      { op: "update_tool_partial", toolUseId: "tu_b", partial: "v1" },
+    ]);
+
+    const all = store.getPatchesSince(id, 0);
+    expect(all).toHaveLength(2);
+    expect((all[0].patch as { toolUseId: string; partial: string }).toolUseId).toBe("tu_a");
+    expect((all[0].patch as { toolUseId: string; partial: string }).partial).toBe("v2");
+    expect((all[1].patch as { toolUseId: string }).toolUseId).toBe("tu_b");
+  });
+
+  it("never coalesces non-update_tool_partial patches — two set_claude_status patches persist separately", () => {
+    const id = "s1";
+    const stored = store.appendPatches(id, [
+      { op: "set_claude_status", claudeStatus: "idle" },
+      { op: "set_claude_status", claudeStatus: "responding" },
+    ]);
+    expect(stored).toHaveLength(2);
+    expect((stored[0].patch as { claudeStatus: string }).claudeStatus).toBe("idle");
+    expect((stored[1].patch as { claudeStatus: string }).claudeStatus).toBe("responding");
+
+    const all = store.getPatchesSince(id, 0);
+    expect(all).toHaveLength(2);
+    expect((all[0].patch as { claudeStatus: string }).claudeStatus).toBe("idle");
+    expect((all[1].patch as { claudeStatus: string }).claudeStatus).toBe("responding");
+    // Each non-coalesced entry gets its own seq — the global counter
+    // advanced by 2 across this batch.
+    expect(stored[1].seq).toBe(stored[0].seq + 1);
+  });
+});
+
+// ── TerminalConnection: sessionSeqCursor ─────────────────────────────
+//
+// `handleTerminalMessage` is a closure inside `program`'s Effect.gen and
+// is not separately exported, so the cursor-seeding wiring inside
+// gravity-server.ts is verified by code reading only. The connection
+// shape itself — that `sessionSeqCursor` exists, is a Map, and behaves
+// like one — is independently testable here.
+
+describe("TerminalConnection: sessionSeqCursor", () => {
+  it("initializes sessionSeqCursor as an empty Map on every new connection", () => {
+    const terminals = makeTerminal();
+    const sock = {
+      destroyed: false,
+      writable: true,
+      write: () => true,
+      on: () => sock,
+      destroy: () => { sock.destroyed = true; },
+    } as unknown as Socket;
+    const conn = terminals.addConnection(sock);
+
+    expect(conn.sessionSeqCursor).toBeInstanceOf(Map);
+    expect(conn.sessionSeqCursor.size).toBe(0);
+  });
+
+  it("supports get/set/delete exactly like a plain Map<string, number>", () => {
+    const terminals = makeTerminal();
+    const sock = {
+      destroyed: false,
+      writable: true,
+      write: () => true,
+      on: () => sock,
+      destroy: () => { sock.destroyed = true; },
+    } as unknown as Socket;
+    const conn = terminals.addConnection(sock);
+
+    conn.sessionSeqCursor.set("s1", 42);
+    expect(conn.sessionSeqCursor.get("s1")).toBe(42);
+    conn.sessionSeqCursor.set("s2", 7);
+    expect(conn.sessionSeqCursor.size).toBe(2);
+
+    conn.sessionSeqCursor.delete("s1");
+    expect(conn.sessionSeqCursor.has("s1")).toBe(false);
+    expect(conn.sessionSeqCursor.has("s2")).toBe(true);
+  });
 });

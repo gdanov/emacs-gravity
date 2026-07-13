@@ -190,12 +190,43 @@ export function makeSessionStore(): SessionStoreService {
     appendPatches: (sessionId, patches) => {
       const history = patchHistories.get(sessionId) ?? [];
       const now = Date.now();
-      const stored: StoredPatch[] = patches.map((patch) => ({
-        seq: ++globalSeq,
-        patch,
-        timestamp: now,
-      }));
-      history.push(...stored);
+      const stored: StoredPatch[] = [];
+      for (const patch of patches) {
+        // Coalesce consecutive streaming-partial updates for the same
+        // toolUseId: the patch history represents state, not an event
+        // log, so a stream of partials for one tool should occupy one
+        // history slot whose value is always the latest observation.
+        // The tail of the history is checked against each incoming
+        // patch in order — entries appended earlier in THIS call are
+        // already part of the "growing history" the next patch in the
+        // batch sees, so adjacent same-key partials within one call
+        // coalesce against each other.
+        const tail = history[history.length - 1];
+        if (
+          tail !== undefined &&
+          patch.op === "update_tool_partial" &&
+          tail.patch.op === "update_tool_partial" &&
+          tail.patch.toolUseId === patch.toolUseId
+        ) {
+          (tail as { patch: Patch; timestamp: number }).patch = patch;
+          (tail as { patch: Patch; timestamp: number }).timestamp = now;
+          // The returned array still includes this (mutated) entry so
+          // a caller computing "last seq from this call" — e.g. the
+          // captureBranch/applyPiSessionStats sites that derive a seq
+          // from `stored[stored.length - 1].seq` — sees a consistent
+          // picture even when the tail was coalesced rather than
+          // freshly appended.
+          stored.push(tail);
+          continue;
+        }
+        const entry: StoredPatch = {
+          seq: ++globalSeq,
+          patch,
+          timestamp: now,
+        };
+        stored.push(entry);
+        history.push(entry);
+      }
       patchHistories.set(sessionId, history);
       return stored;
     },
