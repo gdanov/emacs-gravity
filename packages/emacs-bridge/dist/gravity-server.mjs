@@ -107562,6 +107562,7 @@ var processHookMessage = async (deps, msg, socket) => {
           socket.end();
         } catch {
         }
+        deps.terminals.signalChanged("inbox");
         return;
       }
       const removed = deps.inbox.remove(preItem.id);
@@ -107620,6 +107621,61 @@ var processHookMessage = async (deps, msg, socket) => {
     }
   }
 };
+function evaluateSessionHealth(session, now, opts) {
+  const killFn = opts.killFn ?? ((pid, signal) => {
+    process.kill(pid, signal);
+  });
+  if (session.pid && session.pid > 0) {
+    try {
+      killFn(session.pid, 0);
+      return { dead: false };
+    } catch {
+      return { dead: true, reason: "pid-unreachable" };
+    }
+  }
+  if (session.source === "pi") {
+    return { dead: false };
+  }
+  if (now - session.lastEventTime > opts.staleThresholdMs) {
+    return { dead: true, reason: "stale" };
+  }
+  return { dead: false };
+}
+function subscribeAndSnapshot(deps, conn, sessionId) {
+  conn.subscribedSessions.add(sessionId);
+  conn.sessionSeqCursor.set(sessionId, deps.store.getSessionSeq(sessionId));
+  const session = deps.store.get(sessionId);
+  if (session) {
+    deps.terminals.sendTo(conn, { type: "session.snapshot", sessionId, session });
+  }
+}
+function pollSubscribedSessions(deps, conn) {
+  for (const sessionId of conn.subscribedSessions) {
+    const session = deps.store.get(sessionId);
+    if (!session) continue;
+    const since = conn.sessionSeqCursor.get(sessionId) ?? 0;
+    const patches = deps.store.getPatchesSince(sessionId, since);
+    const seq = deps.store.getSessionSeq(sessionId);
+    if (patches.length > 0) {
+      deps.terminals.sendTo(conn, {
+        type: "session-patches",
+        sessionId,
+        seq,
+        patches: patches.map((p) => p.patch)
+      });
+      conn.sessionSeqCursor.set(sessionId, seq);
+    }
+  }
+}
+function purgeSession(deps, sessionId) {
+  deps.store.delete(sessionId);
+  deps.store.clearPatches(sessionId);
+  deps.inbox.removeForSession(sessionId);
+  deps.terminals.broadcast({ type: "session.removed", sessionId });
+  deps.terminals.unsubscribeAll(sessionId);
+  deps.terminals.signalChanged("overview");
+  deps.piEnvelopeAccStates.delete(sessionId);
+}
 var program = Effect_exports.gen(function* () {
   const config = yield* Effect_exports.service(ServerConfig);
   const fs = yield* Effect_exports.service(Fs);
@@ -107906,13 +107962,7 @@ var program = Effect_exports.gen(function* () {
   });
   const schedulePurge = (sessionId) => {
     store.schedulePurge(sessionId, PURGE_DELAY_MS, () => {
-      store.delete(sessionId);
-      store.clearPatches(sessionId);
-      inbox.removeForSession(sessionId);
-      terminals.broadcast({ type: "session.removed", sessionId });
-      terminals.unsubscribeAll(sessionId);
-      terminals.signalChanged("overview");
-      piEnvelopeAccStates.delete(sessionId);
+      purgeSession({ store, inbox, terminals, piEnvelopeAccStates }, sessionId);
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
@@ -108215,33 +108265,12 @@ var program = Effect_exports.gen(function* () {
           terminals.sendTo(conn, { type: "inbox-items", items });
         }
         conn.inboxWasNonEmpty = items.length > 0;
-        for (const sessionId of conn.subscribedSessions) {
-          const session = store.get(sessionId);
-          if (session) {
-            const since = conn.sessionSeqCursor.get(sessionId) ?? 0;
-            const patches = store.getPatchesSince(sessionId, since);
-            const seq = store.getSessionSeq(sessionId);
-            if (patches.length > 0) {
-              terminals.sendTo(conn, {
-                type: "session-patches",
-                sessionId,
-                seq,
-                patches: patches.map((p) => p.patch)
-              });
-              conn.sessionSeqCursor.set(sessionId, seq);
-            }
-          }
-        }
+        pollSubscribedSessions({ store, terminals }, conn);
         logMsg(`Terminal poll: overview sent, ${inbox.all().length} inbox items, ${conn.subscribedSessions.size} subscribed sessions`);
         break;
       }
       case "request.session": {
-        const session = store.get(msg.sessionId);
-        conn.subscribedSessions.add(msg.sessionId);
-        conn.sessionSeqCursor.set(msg.sessionId, store.getSessionSeq(msg.sessionId));
-        if (session) {
-          terminals.sendTo(conn, { type: "session.snapshot", sessionId: msg.sessionId, session });
-        }
+        subscribeAndSnapshot({ store, terminals }, conn, msg.sessionId);
         break;
       }
       case "request.resync": {
@@ -108250,11 +108279,7 @@ var program = Effect_exports.gen(function* () {
           projects: store.getProjectSummaries()
         });
         for (const sessionId of conn.subscribedSessions) {
-          const session = store.get(sessionId);
-          if (session) {
-            terminals.sendTo(conn, { type: "session.snapshot", sessionId, session });
-            conn.sessionSeqCursor.set(sessionId, store.getSessionSeq(sessionId));
-          }
+          subscribeAndSnapshot({ store, terminals }, conn, sessionId);
         }
         terminals.sendTo(conn, { type: "inbox.snapshot", items: inbox.all() });
         logMsg(`Terminal resync: ${conn.subscribedSessions.size} sessions`);
@@ -108577,29 +108602,23 @@ var program = Effect_exports.gen(function* () {
     for (const session of store.all()) {
       if (session.status !== "active") continue;
       const sessionId = session.sessionId;
-      let isDead = false;
-      if (session.pid && session.pid > 0) {
-        try {
-          process.kill(session.pid, 0);
-        } catch {
-          isDead = true;
-          logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
-        }
-      } else if (session.source === "pi") {
-      } else if (now - session.lastEventTime > STALENESS_THRESHOLD_MS) {
-        isDead = true;
+      const decision = evaluateSessionHealth(session, now, {
+        staleThresholdMs: STALENESS_THRESHOLD_MS
+      });
+      if (!decision.dead) continue;
+      if (decision.reason === "pid-unreachable") {
+        logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
+      } else if (decision.reason === "stale") {
         logMsg(`Health check: session ${sessionId} stale (no events for ${Math.round((now - session.lastEventTime) / 1e3)}s)`);
       }
-      if (isDead) {
-        const patches = sessionEnd(session);
-        if (patches.length > 0) {
-          const stored = store.appendPatches(sessionId, patches);
-          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-          terminals.signalChanged("session", sessionId, seq);
-        }
-        schedulePurge(sessionId);
-        terminals.signalChanged("overview");
+      const patches = sessionEnd(session);
+      if (patches.length > 0) {
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
       }
+      schedulePurge(sessionId);
+      terminals.signalChanged("overview");
     }
     if (!hookEventReceived && store.all().length === 0 && terminals.connectionCount() > 0 && now - serverStartedAt > HOOKS_SILENCE_WARN_MS && now - lastHooksSilenceWarn > HOOKS_SILENCE_REARM_MS) {
       lastHooksSilenceWarn = now;
@@ -108680,5 +108699,9 @@ if (isEntrypoint) {
   });
 }
 export {
-  processHookMessage
+  evaluateSessionHealth,
+  pollSubscribedSessions,
+  processHookMessage,
+  purgeSession,
+  subscribeAndSnapshot
 };
