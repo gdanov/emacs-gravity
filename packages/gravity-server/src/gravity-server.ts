@@ -13,11 +13,14 @@ import { dirname } from "path";
 import { pathToFileURL } from "url";
 import { Effect, Layer } from "effect";
 
-import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
+import type { HookEventName, HookData, InboxItemType, Patch, ServerMessage, PiEventEnvelope, PlanFeedback } from "@gravity/shared";
 import { parseTerminalMessage, isHookMessage, helloProtocolVersion, protocolMismatch, shouldSendInboxOnPoll } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
 import { MermaidRpcServer } from "./handlers/mermaid-rpc-server.js";
 import { sessionEnd, setCost, setContextUsage, setPiCommands, setPiModels, updateMeta } from "./state/session.js";
+import { translatePiEvent } from "./pi-driver/hook-translator.js";
+import { createAccState } from "./pi-driver/turn-accumulator.js";
+import type { AccState } from "./pi-driver/types.js";
 
 // Effect services
 import { ServerConfig, ServerConfigLive } from "./services/config.js";
@@ -36,6 +39,12 @@ import type { ExtensionUIRequestEvent } from "./pi-driver/types.js";
 // ── Constants ────────────────────────────────────────────────────────
 
 const CAPABILITY_WAIT_MS = 10_000;
+// Short capability-wait bound used only by the no-capable-terminal
+// pre-inbox path in `processHookMessage`. A read-only client can display
+// the new non-actionable inbox item within this window — there is no
+// reason to stall the full 10s of `CAPABILITY_WAIT_MS` when the item is
+// already visible.
+const NO_CAPABLE_WAIT_MS = 1000;
 const CAPABILITY_POLL_MS = 500;
 const PURGE_DELAY_MS = 2 * 60 * 1000;
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
@@ -112,18 +121,71 @@ export const processHookMessage = async (
   logMsg(`Hook event: ${eventName} session=${sessionId}`);
   deps.markHookReceived();
 
-  // Reject bidirectional events if no capable terminal is connected
+  // Reject bidirectional events if no capable terminal is connected.
+  // The capability-wait is short (NO_CAPABLE_WAIT_MS, not the long
+  // CAPABILITY_WAIT_MS) because we ALSO create a non-actionable inbox
+  // item FIRST — a read-only client can see "permission needed" within
+  // the same tick and there is no reason to stall the hook for the
+  // full 10s bound.
+  let preItem: ReturnType<InboxService["add"]> | null = null;
   if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
     if (!deps.terminals.hasCapableTerminal("action.permission")) {
-      logMsg(`No capable terminal connected — waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
-      const arrived = await deps.waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
+      // Mirror the type/summary selection already used by
+      // handlePermissionRequest / handleAskUserQuestionIntercept in
+      // event-handler.ts so the non-actionable item looks like the
+      // real item it is standing in for. The eventual real item will
+      // be created when the hook proceeds; if no terminal ever
+      // arrives, this one stays in place for read-only clients.
+      const toolName = typeof data.tool_name === "string" ? data.tool_name : "unknown";
+      const itemType: InboxItemType =
+        eventName === "AskUserQuestionIntercept"
+          ? "question"
+          : toolName === "ExitPlanMode"
+            ? "plan-review"
+            : "permission";
+      const itemSummary =
+        eventName === "AskUserQuestionIntercept"
+          ? ((data.tool_input as Record<string, unknown> | undefined)?.questions as
+              Array<Record<string, unknown>> | undefined)?.[0]?.question as string
+              ?? toolName
+          : toolName;
+      const trimmedCwd = cwd.replace(/\/+$/, "");
+      const project = trimmedCwd.split("/").pop() || trimmedCwd || cwd;
+      const label = sessionId.substring(0, 8);
+      preItem = deps.inbox.add(
+        itemType,
+        sessionId,
+        project,
+        label,
+        itemSummary.substring(0, 80),
+        data as Record<string, unknown>,
+        undefined, // no hook socket — read-only visibility, no pending response
+        false, // actionable: false
+      );
+      logMsg(`No capable terminal connected — non-actionable inbox item ${preItem.id} created; waiting up to ${NO_CAPABLE_WAIT_MS}ms for reconnect`, "warn");
+      const arrived = await deps.waitForCapableTerminal("action.permission", NO_CAPABLE_WAIT_MS);
       if (!arrived) {
-        logMsg(`No capable terminal after ${CAPABILITY_WAIT_MS}ms — rejecting ${eventName}`, "warn");
+        logMsg(`No capable terminal after ${NO_CAPABLE_WAIT_MS}ms — rejecting ${eventName} (non-actionable inbox item ${preItem.id} kept in place)`, "warn");
         try {
           socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
           socket.end();
         } catch { /* socket may already be closed */ }
+        // Leave preItem in place — a read-only client can still see (but
+        // not answer) the request after the socket is rejected. Signal
+        // the inbox change so any connected read-only clients know to
+        // poll and pick up the new non-actionable item.
+        deps.terminals.signalChanged("inbox");
         return;
+      }
+      // A capable terminal arrived within the short window: clear the
+      // non-actionable stub so the real actionable item (created by
+      // handlePermissionRequest / handleAskUserQuestionIntercept right
+      // below in the normal runEvent path) is the only item the user
+      // sees for this hook.
+      const removed = deps.inbox.remove(preItem.id);
+      if (removed) {
+        logMsg(`Capable terminal connected during wait — removed non-actionable stub ${preItem.id} before proceeding with ${eventName}`);
+        deps.terminals.signalChanged("inbox");
       }
       logMsg(`Capable terminal connected during wait — proceeding with ${eventName}`);
     }
@@ -194,6 +256,150 @@ export const processHookMessage = async (
   }
 };
 
+// ── Health-check liveness decision (extracted for direct unit testing) ─
+//
+// The health-check setInterval is an inline closure inside `program` and
+// is not callable in isolation. The PID-reaping-before-pi-source-skip
+// ordering, the staleness-vs-pid-alive priority rules, and the exact
+// log messages that distinguish each outcome are too easy to get wrong
+// by hand-rolled re-implementations. Extracted as a pure function that
+// takes only what it needs (pid, source, lastEventTime — NOT a Session)
+// and an injectable `killFn` so tests can simulate dead/live pids
+// without ever touching a real process. Caller retains all logging and
+// scheduling; this function only decides.
+
+export interface SessionHealthInput {
+  pid: number | null;
+  source: string | null;
+  lastEventTime: number;
+}
+
+export type SessionHealthResult =
+  | { dead: false }
+  | { dead: true; reason: "pid-unreachable" | "stale" };
+
+export function evaluateSessionHealth(
+  session: SessionHealthInput,
+  now: number,
+  opts: { staleThresholdMs: number; killFn?: (pid: number, signal: 0) => void },
+): SessionHealthResult {
+  const killFn: (pid: number, signal: 0) => void =
+    opts.killFn ?? ((pid, signal) => { process.kill(pid, signal); });
+  // PID branch first: a session with a real pid is alive iff the OS
+  // reports so; the staleness fallback must NOT override a live pid.
+  if (session.pid && session.pid > 0) {
+    try {
+      killFn(session.pid, 0);
+      return { dead: false };
+    } catch {
+      return { dead: true, reason: "pid-unreachable" };
+    }
+  }
+  // Pid-less pi session: RPC-driven pi processes own their own exit
+  // handler (via piDrivers map entry + child.on("exit")). Skip the
+  // staleness fallback — pi sessions idle indefinitely waiting for the
+  // next prompt, which is normal, not a dead one. Termination is
+  // reported via the SessionEnd event the spawn handler emits.
+  if (session.source === "pi") {
+    return { dead: false };
+  }
+  // Plain non-pi session with no pid: fall back to the staleness clock.
+  if (now - session.lastEventTime > opts.staleThresholdMs) {
+    return { dead: true, reason: "stale" };
+  }
+  return { dead: false };
+}
+
+// ── Pull-mode terminal helpers (extracted for direct unit testing) ───
+//
+// The `request.session` / `request.resync` / `poll` cases of
+// handleTerminalMessage each mutate conn.subscribedSessions /
+// conn.sessionSeqCursor and route through terminals.sendTo. Extracted
+// into pure functions so the incremental-pull cursor-seeding wiring
+// (snapshot sends the full session; poll sends only patches strictly
+// newer than the cursor; cursor advances only on non-empty sends) is
+// behaviorally testable through the real production code path.
+
+export interface TerminalPollDeps {
+  readonly store: SessionStoreService;
+  readonly terminals: TerminalService;
+}
+
+/**
+ * Subscribe `conn` to `sessionId` and deliver the full session snapshot
+ * when one exists. Seeds the incremental-pull cursor at the session's
+ * current seq so the next `poll` begins at "everything after the
+ * snapshot we just sent" — not at seq 0, which would replay the entire
+ * patch history on top of the snapshot.
+ */
+export function subscribeAndSnapshot(
+  deps: TerminalPollDeps,
+  conn: TerminalConnection,
+  sessionId: string,
+): void {
+  conn.subscribedSessions.add(sessionId);
+  conn.sessionSeqCursor.set(sessionId, deps.store.getSessionSeq(sessionId));
+  const session = deps.store.get(sessionId);
+  if (session) {
+    deps.terminals.sendTo(conn, { type: "session.snapshot", sessionId, session });
+  }
+}
+
+/**
+ * For every session `conn` is subscribed to, deliver any patches the
+ * cursor has not yet Acked. A no-patch poll sends nothing and leaves
+ * the cursor alone — the cursor is "what we have Acked", not "what we
+ * have read".
+ */
+export function pollSubscribedSessions(
+  deps: TerminalPollDeps,
+  conn: TerminalConnection,
+): void {
+  for (const sessionId of conn.subscribedSessions) {
+    const session = deps.store.get(sessionId);
+    if (!session) continue;
+    const since = conn.sessionSeqCursor.get(sessionId) ?? 0;
+    const patches = deps.store.getPatchesSince(sessionId, since);
+    const seq = deps.store.getSessionSeq(sessionId);
+    if (patches.length > 0) {
+      deps.terminals.sendTo(conn, {
+        type: "session-patches",
+        sessionId,
+        seq,
+        patches: patches.map(p => p.patch),
+      });
+      conn.sessionSeqCursor.set(sessionId, seq);
+    }
+  }
+}
+
+// ── Purge cleanup (extracted for direct unit testing) ────────────────
+//
+// `schedulePurge`'s body was a single closed-over callback that
+// deleted the session, cleared its patches, removed inbox items for
+// the session, broadcast `session.removed`, unsubscribed terminals,
+// signaled the overview change, and dropped the piEnvelopeAccStates
+// entry. Pulled out into a callable function so the wiring (and the
+// absence of logging inside) is independently verifiable — the caller
+// retains the `Purged ended session ...` log exactly as before.
+
+export interface SchedulePurgeDeps {
+  readonly store: SessionStoreService;
+  readonly inbox: InboxService;
+  readonly terminals: TerminalService;
+  readonly piEnvelopeAccStates: Map<string, AccState>;
+}
+
+export function purgeSession(deps: SchedulePurgeDeps, sessionId: string): void {
+  deps.store.delete(sessionId);
+  deps.store.clearPatches(sessionId);
+  deps.inbox.removeForSession(sessionId);
+  deps.terminals.broadcast({ type: "session.removed", sessionId });
+  deps.terminals.unsubscribeAll(sessionId);
+  deps.terminals.signalChanged("overview");
+  deps.piEnvelopeAccStates.delete(sessionId);
+}
+
 // ── Program ──────────────────────────────────────────────────────────
 
 const program = Effect.gen(function* () {
@@ -254,6 +460,94 @@ const program = Effect.gen(function* () {
       schedulePurge(sessionId);
     } else if (session && session.status === "active") {
       store.cancelPurge(sessionId);
+    }
+  };
+
+  /**
+   * Consume one `PiEventEnvelope` from the hook socket's pi-envelope path.
+   *
+   * The envelope carries `event` (the raw pi extension event), `pid`,
+   * `cwd`, and optional `attribution` (worktree / branch / role). This
+   * function:
+   *   1. Lazily creates the per-session `AccState` on first envelope.
+   *   2. Translates `event` through `translatePiEvent` and routes each
+   *      emitted `TranslationResult` through the existing `handlePiTranslation`
+   *      so patch-store/signal behavior is identical to the RPC path.
+   *   3. Threads `readOnly: true` (always), the envelope's `attribution`
+   *      fields (when present), and `pid` (when a positive number) into
+   *      `updateMeta` calls on the session — same patch-store/signal
+   *      shape used by `handlePiTranslation`.
+   *
+   * The path is fire-and-forget — envelopes do NOT carry a `needs_response`
+   * and do not engage the bidirectional capability-wait. `processHookMessage`
+   * is bypassed entirely; the hook socket's per-line dispatcher routes
+   * envelopes here and Claude-Code hook messages to `handleHookMessage`.
+   */
+  const processPiEnvelope = (envelope: PiEventEnvelope): void => {
+    const sessionId = envelope.session_id;
+    if (!sessionId) {
+      logMsg(`Pi envelope missing session_id — dropping`, "warn");
+      return;
+    }
+
+    // Lazy-create the AccState on first envelope.
+    let accState = piEnvelopeAccStates.get(sessionId);
+    const isFirstEnvelope = !accState;
+    if (!accState) {
+      accState = createAccState(sessionId, envelope.cwd);
+      piEnvelopeAccStates.set(sessionId, accState);
+    }
+
+    logMsg(`Pi envelope: type=${(envelope.event as { type?: string }).type ?? "?"} session=${sessionId}`);
+
+    // Translate and route emitted results through the existing RPC-path
+    // dispatcher so patch-store/signal behavior matches byte-for-byte.
+    const translated = translatePiEvent(envelope.event as unknown as Parameters<typeof translatePiEvent>[0], accState);
+    if (translated.kind === "emit") {
+      for (const result of translated.results) {
+        handlePiTranslation(sessionId, result);
+      }
+    }
+
+    // After the first translated event has run (which will have called
+    // ensureSession/createSession for us), thread attribution + pid +
+    // readOnly through `updateMeta` exactly like `captureBranch` does
+    // for late-arriving branch info.
+    const session = store.get(sessionId);
+    if (session) {
+      const attr = envelope.attribution;
+      const metaOpts: Parameters<typeof updateMeta>[1] = { readOnly: true };
+      if (attr) {
+        if (typeof attr.worktree === "string" && attr.worktree) {
+          metaOpts.worktree = attr.worktree;
+        }
+        if (typeof attr.branch === "string" && attr.branch) {
+          metaOpts.branch = attr.branch;
+        }
+        if (typeof attr.role === "string" && attr.role) {
+          metaOpts.role = attr.role as Parameters<typeof updateMeta>[1]["role"];
+        }
+      }
+      if (typeof envelope.pid === "number" && envelope.pid > 0) {
+        metaOpts.pid = envelope.pid;
+      }
+
+      const firstTouch = isFirstEnvelope || metaOpts.pid !== undefined
+        || metaOpts.worktree !== undefined
+        || metaOpts.branch !== undefined
+        || metaOpts.role !== undefined;
+      // Always emit a readOnly patch on first envelope (so terminals see
+      // the session go non-actionable ASAP) and on any later envelope
+      // that carries new attribution/pid fields.
+      if (firstTouch) {
+        const metaPatches = updateMeta(session, metaOpts);
+        if (metaPatches.length > 0) {
+          const stored = store.appendPatches(sessionId, metaPatches);
+          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+          terminals.signalChanged("session", sessionId, seq);
+          logMsg(`Pi envelope: ${metaPatches.length} meta patches for session=${sessionId}, signaled seq=${seq}`);
+        }
+      }
     }
   };
 
@@ -507,11 +801,7 @@ const program = Effect.gen(function* () {
   /** Schedule purge of an ended session. */
   const schedulePurge = (sessionId: string): void => {
     store.schedulePurge(sessionId, PURGE_DELAY_MS, () => {
-      store.delete(sessionId);
-      inbox.removeForSession(sessionId);
-      terminals.broadcast({ type: "session.removed", sessionId });
-      terminals.unsubscribeAll(sessionId);
-      terminals.signalChanged("overview");
+      purgeSession({ store, inbox, terminals, piEnvelopeAccStates }, sessionId);
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
@@ -523,6 +813,15 @@ const program = Effect.gen(function* () {
   // callback for that driver (which adds on start and removes on stop/error).
   type PiDriver = ReturnType<typeof startPiDriver>;
   const piDrivers = new Map<string, PiDriver>();
+
+  // Map of sessionId → AccState for sessions fed by pi ambient-event
+  // envelopes on the hook socket (vs. RPC-spawned drivers). One AccState
+  // per session is created lazily on the FIRST envelope seen for that
+  // session, so envelopes arriving without an upfront SessionStart (the
+  // normal emitter case — there is no eager server-side synthesis for
+  // this path) can still exercise the translator's stateful accumulation.
+  // The entry is deleted in `schedulePurge`'s `onPurge` callback.
+  const piEnvelopeAccStates = new Map<string, AccState>();
 
   /**
    * Maps gravity inbox item id → originating pi session id + extension_ui
@@ -957,31 +1256,13 @@ const program = Effect.gen(function* () {
           terminals.sendTo(conn, { type: "inbox-items", items });
         }
         conn.inboxWasNonEmpty = items.length > 0;
-        for (const sessionId of conn.subscribedSessions) {
-          const session = store.get(sessionId);
-          if (session) {
-            const patches = store.getPatchesSince(sessionId, 0);
-            const seq = store.getSessionSeq(sessionId);
-            if (patches.length > 0) {
-              terminals.sendTo(conn, {
-                type: "session-patches",
-                sessionId,
-                seq,
-                patches: patches.map(p => p.patch),
-              });
-            }
-          }
-        }
+        pollSubscribedSessions({ store, terminals }, conn);
         logMsg(`Terminal poll: overview sent, ${inbox.all().length} inbox items, ${conn.subscribedSessions.size} subscribed sessions`);
         break;
       }
 
       case "request.session": {
-        const session = store.get(msg.sessionId);
-        conn.subscribedSessions.add(msg.sessionId);
-        if (session) {
-          terminals.sendTo(conn, { type: "session.snapshot", sessionId: msg.sessionId, session });
-        }
+        subscribeAndSnapshot({ store, terminals }, conn, msg.sessionId);
         break;
       }
 
@@ -991,13 +1272,21 @@ const program = Effect.gen(function* () {
           projects: store.getProjectSummaries(),
         });
         for (const sessionId of conn.subscribedSessions) {
-          const session = store.get(sessionId);
-          if (session) {
-            terminals.sendTo(conn, { type: "session.snapshot", sessionId, session });
-          }
+          subscribeAndSnapshot({ store, terminals }, conn, sessionId);
         }
         terminals.sendTo(conn, { type: "inbox.snapshot", items: inbox.all() });
         logMsg(`Terminal resync: ${conn.subscribedSessions.size} sessions`);
+        break;
+      }
+
+      case "request.unsubscribe": {
+        // Fire-and-forget: drop both the subscription and the
+        // incremental-pull cursor so the client stops receiving
+        // signals for this session entirely. No reply is sent —
+        // mirrors the other unidirectional `case` blocks that
+        // don't echo a confirmation (e.g. `hint.session-dead`).
+        conn.subscribedSessions.delete(msg.sessionId);
+        conn.sessionSeqCursor.delete(msg.sessionId);
         break;
       }
 
@@ -1269,6 +1558,19 @@ const program = Effect.gen(function* () {
         if (line.length === 0) continue;
         try {
           const msg = JSON.parse(line);
+          // Pi envelope discriminator: lines with `src: "pi"` carry a raw
+          // pi extension-event payload + attribution and bypass the
+          // Claude-Code-hook message path entirely (no `needs_response`,
+          // no bidirectional capability-wait, no socket reply). Every
+          // other parsed line falls through to the existing hook handler.
+          if (
+            msg
+            && typeof msg === "object"
+            && (msg as Record<string, unknown>).src === "pi"
+          ) {
+            processPiEnvelope(msg as PiEventEnvelope);
+            continue;
+          }
           handleHookMessage(msg, socket).catch((e) =>
             logMsg(`Hook message handler error: ${e}`, "error"),
           );
@@ -1372,38 +1674,23 @@ const program = Effect.gen(function* () {
     for (const session of store.all()) {
       if (session.status !== "active") continue;
       const sessionId = session.sessionId;
-      let isDead = false;
-
-      if (session.pid && session.pid > 0) {
-        try {
-          process.kill(session.pid, 0);
-        } catch {
-          isDead = true;
-          logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
-        }
-      } else if (session.source === "pi") {
-        // Pi sessions intentionally have no PID on the gravity Session
-        // object — they're managed entirely by gravity-server (via
-        // piDrivers map and child.on("exit") in the pi-driver spawn
-        // path). Skip the time-based staleness fallback: an idle pi
-        // session is normal (pi waits for the next prompt indefinitely),
-        // not a dead one. Pi termination is reported correctly via the
-        // SessionEnd event the spawn handler emits on child exit.
-      } else if (now - session.lastEventTime > STALENESS_THRESHOLD_MS) {
-        isDead = true;
+      const decision = evaluateSessionHealth(session, now, {
+        staleThresholdMs: STALENESS_THRESHOLD_MS,
+      });
+      if (!decision.dead) continue;
+      if (decision.reason === "pid-unreachable") {
+        logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
+      } else if (decision.reason === "stale") {
         logMsg(`Health check: session ${sessionId} stale (no events for ${Math.round((now - session.lastEventTime) / 1000)}s)`);
       }
-
-      if (isDead) {
-        const patches = sessionEnd(session);
-        if (patches.length > 0) {
-          const stored = store.appendPatches(sessionId, patches);
-          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-          terminals.signalChanged("session", sessionId, seq);
-        }
-        schedulePurge(sessionId);
-        terminals.signalChanged("overview");
+      const patches = sessionEnd(session);
+      if (patches.length > 0) {
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
       }
+      schedulePurge(sessionId);
+      terminals.signalChanged("overview");
     }
 
     // Hooks-silence warning: if terminals are connected but no hook

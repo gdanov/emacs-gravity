@@ -2220,4 +2220,104 @@ describe("Event Handler", () => {
       expect(deps.store.get("s1")!.compactions[0].reason).toBe("unknown");
     });
   });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Role-based inbox suppression + pi-fault "attention" item
+  // (handleTurnClose / handleStop)
+  //
+  // Headless/swarm sessions (role: "worker" | "coordinator") should not
+  // generate per-turn "idle" inbox items — the orchestrator already knows
+  // the turn ended. A detected pi fault (stop_reason: "error" | "aborted")
+  // ALWAYS surfaces as a non-actionable "attention" item, regardless of
+  // role, so a read-only client can see WHY a swarm worker stopped.
+  // ────────────────────────────────────────────────────────────────────
+
+  describe("TurnClose / Stop inbox suppression + attention fault", () => {
+    it("TurnClose does NOT create an idle inbox item for role:'worker' sessions", () => {
+      startSession(deps, "s1");
+      deps.store.get("s1")!.role = "worker";
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      fire(deps, "TurnClose", "s1", { stop_text: "did the work" });
+      expect(deps.inbox.all().filter((i) => i.type === "idle")).toHaveLength(0);
+    });
+
+    it("TurnClose does NOT create an idle inbox item for role:'coordinator' sessions", () => {
+      startSession(deps, "s1");
+      deps.store.get("s1")!.role = "coordinator";
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      fire(deps, "TurnClose", "s1", { stop_text: "did the work" });
+      expect(deps.inbox.all().filter((i) => i.type === "idle")).toHaveLength(0);
+    });
+
+    it("regression: TurnClose on a default 'interactive' session STILL creates an idle inbox item", () => {
+      startSession(deps, "s1");
+      // createSession's pinned default for non-pi sources is "interactive".
+      expect(deps.store.get("s1")!.role).toBe("interactive");
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      fire(deps, "TurnClose", "s1", { stop_text: "done" });
+      const items = deps.inbox.all().filter((i) => i.type === "idle");
+      expect(items).toHaveLength(1);
+      expect(items[0].sessionId).toBe("s1");
+    });
+
+    it("TurnClose with stop_reason:'error' produces a non-actionable attention item", () => {
+      startSession(deps, "s1");
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      fire(deps, "TurnClose", "s1", {
+        stop_text: "rate limit hit",
+        stop_reason: "error",
+      });
+      const items = deps.inbox.all().filter((i) => i.type === "attention");
+      expect(items).toHaveLength(1);
+      expect(items[0].actionable).toBe(false);
+      expect(items[0].data.stopReason).toBe("error");
+      expect(items[0].data.stopText).toBe("rate limit hit");
+    });
+
+    it("TurnClose with stop_reason:'aborted' produces a non-actionable attention item", () => {
+      startSession(deps, "s1");
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      fire(deps, "TurnClose", "s1", { stop_reason: "aborted" });
+      const items = deps.inbox.all().filter((i) => i.type === "attention");
+      expect(items).toHaveLength(1);
+      expect(items[0].actionable).toBe(false);
+      expect(items[0].data.stopReason).toBe("aborted");
+    });
+
+    it("TurnClose stop_reason:'toolUse' does NOT produce an attention item (not a fault)", () => {
+      startSession(deps, "s1");
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      fire(deps, "TurnClose", "s1", { stop_text: "ok", stop_reason: "toolUse" });
+      expect(deps.inbox.all().filter((i) => i.type === "attention")).toHaveLength(0);
+    });
+
+    it("TurnClose attention item fires regardless of role (worker + error)", () => {
+      startSession(deps, "s1");
+      deps.store.get("s1")!.role = "worker";
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      fire(deps, "TurnClose", "s1", { stop_text: "boom", stop_reason: "error" });
+      // Worker → no idle
+      expect(deps.inbox.all().filter((i) => i.type === "idle")).toHaveLength(0);
+      // But the fault always surfaces
+      const items = deps.inbox.all().filter((i) => i.type === "attention");
+      expect(items).toHaveLength(1);
+      expect(items[0].actionable).toBe(false);
+    });
+
+    it("Stop mirrors the role-based idle suppression for consistency", () => {
+      startSession(deps, "s1");
+      deps.store.get("s1")!.role = "worker";
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      fire(deps, "Stop", "s1", { stop_text: "done" });
+      expect(deps.inbox.all().filter((i) => i.type === "idle")).toHaveLength(0);
+    });
+
+    it("Stop still creates an idle item for default 'interactive' sessions (regression)", () => {
+      startSession(deps, "s1");
+      expect(deps.store.get("s1")!.role).toBe("interactive");
+      fire(deps, "UserPromptSubmit", "s1", { prompt: "go" });
+      fire(deps, "Stop", "s1", { stop_text: "done" });
+      expect(deps.inbox.all().filter((i) => i.type === "idle")).toHaveLength(1);
+    });
+  });
 });

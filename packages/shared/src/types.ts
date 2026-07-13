@@ -111,6 +111,12 @@ export type HookEventName =
 // Bidirectional links (Tool↔Agent) use ID references instead of
 // object pointers.
 
+/** Attribution role for a session — where it sits in a swarm / coordination
+ * hierarchy. "coordinator" / "worker" are headless swarm roles;
+ * "interactive" / "claude-helm" are user-driven; "unknown" is the unset
+ * default that should never persist past first attribution. */
+export type SessionRole = "coordinator" | "worker" | "interactive" | "claude-helm" | "unknown";
+
 export interface Session {
   sessionId: string;
   cwd: string;
@@ -124,6 +130,30 @@ export interface Session {
   modelName: string | null;
   tmuxSession: string | null;
   source: string | null;  // "claude-code", "pi", "opencode", etc.
+  /** Repo identity that unifies a repo's main checkout with all its
+   * worktrees. Derived server-side once per session via
+   * `git -C <cwd> rev-parse --git-common-dir` (resolved to an absolute
+   * path) — null when not yet derived (e.g. legacy sessions created
+   * before this field existed). */
+  repoKey: string | null;
+  /** Display-name source for the project. Derived alongside repoKey as
+   * `basename(repoKey)` with the trailing `/.git` stripped; falls back to
+   * `cwd` on git-lookup failure. */
+  repoRoot: string | null;
+  /** Working tree path. Prefer an explicit per-event override
+   * (PI_WORKTREE) when supplied, otherwise the same git lookup as
+   * repoKey (`--show-toplevel`), falling back to cwd. */
+  worktree: string | null;
+  /** Session's role in a swarm / coordination hierarchy. Set once at
+   * session creation from the explicit attribution field on the source
+   * envelope/hookData, then only overwritten by a later event carrying a
+   * non-empty role. */
+  role: SessionRole | null;
+  /** True for sessions driven by an external ambient emitter (cannot be
+   * prompted / steered / aborted via gravity-server's own pi.*
+   * terminal messages — there is no PiDriverInstance for them). Always
+   * false for RPC-driven pi sessions and for Claude Code sessions. */
+  readOnly: boolean;
   startTime: number;
   lastEventTime: number;
   tokenUsage: TokenUsage | null;
@@ -425,7 +455,7 @@ export interface PromptEntry {
 
 // ── Inbox ────────────────────────────────────────────────────────────
 
-export type InboxItemType = "permission" | "question" | "plan-review" | "idle";
+export type InboxItemType = "permission" | "question" | "plan-review" | "idle" | "attention";
 
 export interface InboxItem {
   id: number;
@@ -436,6 +466,12 @@ export interface InboxItem {
   timestamp: number;
   summary: string;
   data: Record<string, unknown>;
+  /** False for items a read-only client can SEE but not answer — created
+   * when a bidirectional hook event fires with no action-capable terminal
+   * connected, so a menu-bar / browser client can still surface what is
+   * being requested. The real actionable item (if one eventually arrives)
+   * replaces this transparently. */
+  actionable: boolean;
 }
 
 // ── Semantic Patches ─────────────────────────────────────────────────
@@ -452,7 +488,7 @@ export type Patch =
   | { op: "set_plan"; plan: Plan | null }
   | { op: "set_streaming_text"; text: string | null }
   | { op: "set_permission_mode"; mode: string | null }
-  | { op: "set_meta"; slug?: string; displayName?: string; branch?: string; pid?: number; modelName?: string; tmuxSession?: string; piSessionFile?: string }
+  | { op: "set_meta"; slug?: string; displayName?: string; branch?: string; pid?: number; modelName?: string; tmuxSession?: string; piSessionFile?: string; repoKey?: string; repoRoot?: string; worktree?: string; role?: SessionRole; readOnly?: boolean }
   | { op: "add_turn"; turn: TurnNode }
   | { op: "freeze_turn"; turnNumber: number }
   | { op: "set_turn_stop"; turnNumber: number; stopText?: string; stopThinking?: string; stopReason?: string }
@@ -558,6 +594,7 @@ export type TerminalMessage =
   | { type: "request.session"; sessionId: string }
   | { type: "request.overview" }
   | { type: "request.resync" }
+  | { type: "request.unsubscribe"; sessionId: string }
   | { type: "hint.session-dead"; sessionId: string }
   | { type: "poll" }
   // Pi driver messages
@@ -577,6 +614,11 @@ export type TerminalMessage =
 
 export interface ProjectSummary {
   project: string;
+  /** Repo identity that groups this project's sessions. Same value as
+   * `session.repoKey` for every session in `sessions`. Kept as a top-level
+   * field so the overview does not have to walk every session to render
+   * the grouping key. */
+  repoKey: string;
   sessions: SessionSummary[];
 }
 
@@ -590,6 +632,18 @@ export interface SessionSummary {
   lastEventTime: number;
   latestMessage: string | null;
   latestUserPrompt: string | null;
+  role: SessionRole | null;
+  branch: string | null;
+  worktree: string | null;
+  /** Number of completed turns, excluding the pre-allocated turn 0
+   * pre-prompt bucket. Clamped to a minimum of 0. */
+  turnCount: number;
+  /** Name of the most recent tool that is still running across all turns,
+   * or null if no tool is currently in-flight. */
+  currentTool: string | null;
+  /** Cumulative session cost in USD (sourced from pi's
+   * `get_session_stats.cost`). Null when not reported. */
+  cost: number | null;
 }
 
 export interface PlanFeedback {
@@ -643,4 +697,31 @@ export interface HookSocketResponse {
   };
   answer?: string;
   answers?: string[];
+}
+
+/**
+ * A pi envelope arriving on the hook socket. Distinct from the Claude Code
+ * `HookSocketMessage` shape: the discriminator is `src: "pi"`, the body is
+ * the raw pi extension-event payload (which has its own `type` field), and
+ * optional `attribution` fields carry explicit worktree / branch / role
+ * metadata so the gravity-server can group and role-tag the session without
+ * relying on git heuristics or the source string alone.
+ *
+ * Envelopes are fire-and-forget: unlike `HookSocketMessage` there is no
+ * `needs_response`, no bidirectional capability-wait, no socket reply. The
+ * server silently consumes them and applies the resulting patches.
+ */
+export interface PiEventEnvelope {
+  src: "pi";
+  session_id: string;
+  cwd: string;
+  pid: number | null;
+  /** Raw pi extension-event object; passed straight into `translatePiEvent`.
+   * Carries its own `type` field (e.g. `"agent_start"`, `"session_start"`). */
+  event: Record<string, unknown>;
+  attribution?: {
+    worktree?: string;
+    branch?: string;
+    role?: SessionRole;
+  };
 }

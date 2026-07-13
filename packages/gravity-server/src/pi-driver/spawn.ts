@@ -78,6 +78,29 @@ export function normalizePiModels(models: unknown): PiModel[] {
 /** Path to the pi binary (default: "pi"). */
 const PI_BINARY = process.env.PI_BINARY_PATH ?? "pi";
 
+/**
+ * Build the environment passed to a spawned pi subprocess.
+ *
+ * Always marks the child as driver-managed (`GRAVITY_DRIVER=1`) so a
+ * future ambient emitter running inside that child can detect it is
+ * owned by gravity-server's spawn path and stay inert — without this
+ * marker, an installed ambient emitter and the RPC driver would both
+ * ingest the same events into gravity-server, producing duplicates.
+ *
+ * `PI_MODEL` and `PI_PROVIDER` are forwarded only when the caller
+ * explicitly sets them on the supplied options — they must NOT be
+ * defaulted here, since omitting them lets pi pick up its own defaults.
+ */
+export function buildSpawnEnv(
+  options: { model?: string; provider?: string },
+): Record<string, string> {
+  const env: Record<string, string> = { ...process.env } as Record<string, string>;
+  if (options.model) env["PI_MODEL"] = options.model;
+  if (options.provider) env["PI_PROVIDER"] = options.provider;
+  env["GRAVITY_DRIVER"] = "1";
+  return env;
+}
+
 /** Default thinking level if not specified. */
 const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
 
@@ -123,10 +146,9 @@ export function spawnPiSync(
     args.push("--session", options.resumeSession);
   }
 
-  // Build environment with optional overrides
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  if (options.model) env["PI_MODEL"] = options.model;
-  if (options.provider) env["PI_PROVIDER"] = options.provider;
+  // Build environment with optional overrides. Every spawned pi is
+  // driver-managed, so GRAVITY_DRIVER is always set inside buildSpawnEnv.
+  const env = buildSpawnEnv(options);
 
   const child: ChildProcess = spawn(PI_BINARY, args, {
     cwd,

@@ -15,7 +15,7 @@
 import { Effect, pipe } from "effect";
 import { homedir } from "os";
 import { join } from "path";
-import type { HookData, HookEventName, Patch, Session } from "@gravity/shared";
+import type { HookData, HookEventName, Patch, Session, SessionRole } from "@gravity/shared";
 import type { SessionStoreService } from "../services/session-store.js";
 import { SessionStore } from "../services/session-store.js";
 import type { InboxService } from "../services/inbox.js";
@@ -192,12 +192,17 @@ const handleSessionStart = (ctx: EventContext) =>
     }
     const s = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session, ctx.data.source);
     const displayName = s.displayName ? undefined : (yield* lookupDisplayName(ctx.cwd, ctx.sessionId)) ?? undefined;
+    const dataRec = ctx.data as Record<string, unknown>;
     patches.push(...updateMeta(s, {
       pid: ctx.pid ?? undefined,
       slug: ctx.data.slug ?? undefined,
       displayName,
       branch: ctx.data.branch ?? undefined,
       tmuxSession: ctx.data.tmux_session ?? undefined,
+      role: typeof dataRec.role === "string" ? (dataRec.role as SessionRole) : undefined,
+      repoKey: typeof dataRec.repo_key === "string" ? (dataRec.repo_key as string) : undefined,
+      repoRoot: typeof dataRec.repo_root === "string" ? (dataRec.repo_root as string) : undefined,
+      worktree: typeof dataRec.worktree === "string" ? (dataRec.worktree as string) : undefined,
     }));
 
     const modelId = ctx.data.model;
@@ -333,14 +338,38 @@ const handleTurnClose = (ctx: EventContext) =>
     const snippet = stopText
       ? stopText.replace(/[\n\r\t]+/g, " ").substring(0, 80)
       : "idle";
-    inbox.add(
-      "idle",
-      ctx.sessionId,
-      session.project,
-      session.slug || ctx.sessionId.substring(0, 8),
-      snippet,
-      { turn, snippet },
-    );
+    // Headless/swarm sessions don't need a per-turn idle ping — the
+    // orchestrator driving the worker already knows the turn ended.
+    // Suppressing the item keeps the inbox free of background noise.
+    if (session.role !== "worker" && session.role !== "coordinator") {
+      inbox.add(
+        "idle",
+        ctx.sessionId,
+        session.project,
+        session.slug || ctx.sessionId.substring(0, 8),
+        snippet,
+        { turn, snippet },
+      );
+    }
+    // A pi-side fault (model errored out, or the turn was aborted)
+    // surfaces as a non-actionable "attention" item so a read-only
+    // client can see WHY the swarm worker stopped, even when the
+    // orchestrator that spawned it has no resident UI to ask.
+    if (stopReason === "error" || stopReason === "aborted") {
+      const faultSummary = stopText
+        ? `pi turn ended (${stopReason}): ${stopText}`.substring(0, 80)
+        : `pi turn ended: ${stopReason}`;
+      inbox.add(
+        "attention",
+        ctx.sessionId,
+        session.project,
+        session.slug || ctx.sessionId.substring(0, 8),
+        faultSummary,
+        { turn, stopReason, stopText },
+        undefined,
+        false, // not actionable — read-only visibility
+      );
+    }
     return patches;
   });
 
@@ -372,7 +401,14 @@ const handleStop = (ctx: EventContext) =>
     const snippet = stopText
       ? stopText.replace(/[\n\r\t]+/g, " ").substring(0, 80)
       : "idle";
-    inbox.add("idle", ctx.sessionId, session.project, session.slug || ctx.sessionId.substring(0, 8), snippet, { turn, snippet });
+    // Mirror handleTurnClose's role-based idle suppression — the pinned
+    // decision is role-based, not source-based, so both handlers stay
+    // consistent. Claude Code sessions realistically never carry
+    // worker/coordinator today, so this is a no-op in practice but keeps
+    // the two handlers' idle-item logic uniform.
+    if (session.role !== "worker" && session.role !== "coordinator") {
+      inbox.add("idle", ctx.sessionId, session.project, session.slug || ctx.sessionId.substring(0, 8), snippet, { turn, snippet });
+    }
     return patches;
   });
 
@@ -794,12 +830,17 @@ export function handleEvent(
       }
       const freshDisplayName = yield* lookupDisplayName(cwd, sessionId);
       const displayName = (freshDisplayName && freshDisplayName !== existing.displayName) ? freshDisplayName : undefined;
+      const dataRec = data as Record<string, unknown>;
       preamblePatches.push(...updateMeta(existing, {
         pid: pid ?? undefined,
         slug: data.slug ?? undefined,
         displayName,
         branch: data.branch ?? undefined,
         tmuxSession: data.tmux_session ?? undefined,
+        role: typeof dataRec.role === "string" ? (dataRec.role as SessionRole) : undefined,
+        repoKey: typeof dataRec.repo_key === "string" ? (dataRec.repo_key as string) : undefined,
+        repoRoot: typeof dataRec.repo_root === "string" ? (dataRec.repo_root as string) : undefined,
+        worktree: typeof dataRec.worktree === "string" ? (dataRec.worktree as string) : undefined,
       }));
     }
 
@@ -807,7 +848,19 @@ export function handleEvent(
     const handler = dispatch[eventName];
     const eventPatches = handler
       ? yield* handler({ sessionId, cwd, data, pid, hookSocket })
-      : [];
+      : (() => {
+          // Visibility-only log for hook events we have no per-event handler
+          // for. Behavior is unchanged: an empty patch list is returned so
+          // the rest of `handleEvent` proceeds — only the unknown name is
+          // now traceable in stderr instead of silently vanishing.
+          // Uses `process.stderr.write` rather than `logMsg` from
+          // gravity-server.ts because that would create a circular import
+          // (gravity-server.ts imports `handleEvent` from this file).
+          process.stderr.write(
+            `[event-handler] unhandled hook event: ${eventName}\n`,
+          );
+          return [];
+        })();
 
     return [...preamblePatches, ...eventPatches];
   });

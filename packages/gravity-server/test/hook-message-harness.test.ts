@@ -58,7 +58,7 @@ function fakeTerminals(rec: Recorded, capable = true): TerminalService {
 
 // ── Harness ──────────────────────────────────────────────────────────
 
-function makeHarness(opts: { capable?: boolean } = {}) {
+function makeHarness(opts: { capable?: boolean; waitForCapableTerminal?: HookMessageDeps["waitForCapableTerminal"] } = {}) {
   const store = makeSessionStore();
   const inbox = makeInbox();
   const rec: Recorded = { signals: [], broadcasts: [] };
@@ -74,7 +74,7 @@ function makeHarness(opts: { capable?: boolean } = {}) {
 
   const deps: HookMessageDeps = {
     store, inbox, terminals, runEvent,
-    waitForCapableTerminal: async () => opts.capable ?? true,
+    waitForCapableTerminal: opts.waitForCapableTerminal ?? (async () => opts.capable ?? true),
     schedulePurge: () => {},
     markHookReceived: () => {},
   };
@@ -298,3 +298,144 @@ describe("pull state machine", () => {
     expect(h2.simulatePoll()[0].type).toBe("question");
   });
 });
+
+// Phase 3.5 — non-actionable inbox item on no-capable-terminal capability
+// gate. The capability-wait shrinks to a short bound; a read-only inbox item
+// is created immediately so a menu-bar / browser client can render the
+// pending request without a 10-second stall. If a capable terminal arrives
+// within the short window, the non-actionable stub is replaced by the real
+// actionable item the handler creates; if not, the item stays and the
+// socket is rejected with the existing no_capable_terminal payload.
+describe("processHookMessage — non-actionable inbox on no-capable-terminal", () => {
+  it("capable:false + PermissionRequest (Bash): leaves one non-actionable permission item; socket rejected", async () => {
+    const h = makeHarness({ capable: false });
+    const sock = await h.send(
+      "PermissionRequest",
+      "s1",
+      { tool_name: "Bash", tool_use_id: "tu_bash", tool_input: { command: "rm -rf /" } } as unknown as HookData,
+      true,
+    );
+
+    const items = h.simulatePoll();
+    expect(items).toHaveLength(1);
+    expect(items[0].actionable).toBe(false);
+    expect(items[0].type).toBe("permission");
+    // Tool identity is carried through so a read-only client can render
+    // WHAT was being asked for, even though it cannot answer.
+    expect((items[0].data as Record<string, unknown>).tool_name).toBe("Bash");
+    expect((items[0].data as Record<string, unknown>).tool_use_id).toBe("tu_bash");
+
+    // Same socket rejection semantics as the pre-change behavior.
+    expect(sock._written).toHaveLength(1);
+    expect(JSON.parse(sock._written[0])).toEqual({ reason: "no_capable_terminal" });
+    expect(sock._ended).toBe(true);
+  });
+
+  it("capable:false + PermissionRequest: signals inbox so read-only clients know to poll", async () => {
+    // A non-actionable inbox item is created for the no-capable-terminal
+    // case so a read-only client can render WHAT is pending. Without an
+    // `inbox` signal, that client has no way to learn about the new
+    // item — a state-changed signal is the only channel in pull mode.
+    const h = makeHarness({ capable: false });
+    await h.send(
+      "PermissionRequest",
+      "s1",
+      { tool_name: "Bash", tool_use_id: "tu_bash", tool_input: { command: "ls" } } as unknown as HookData,
+      true,
+    );
+
+    // The non-actionable stub must have triggered an inbox signal —
+    // otherwise a read-only client connected at this moment would not
+    // discover the new item until a later hook or resync.
+    const inboxSignals = h.rec.signals.filter(s => s.what === "inbox");
+    expect(inboxSignals.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("capable:false + PermissionRequest (ExitPlanMode): non-actionable plan-review item", async () => {
+    const h = makeHarness({ capable: false });
+    const sock = await h.send(
+      "PermissionRequest",
+      "s1",
+      { tool_name: "ExitPlanMode", tool_use_id: "tu_plan", tool_input: { plan: "do things" } } as unknown as HookData,
+      true,
+    );
+
+    const items = h.simulatePoll();
+    expect(items).toHaveLength(1);
+    expect(items[0].actionable).toBe(false);
+    expect(items[0].type).toBe("plan-review");
+    expect(sock._written).toHaveLength(1);
+    expect(JSON.parse(sock._written[0])).toEqual({ reason: "no_capable_terminal" });
+  });
+
+  it("capable:false + AskUserQuestionIntercept: non-actionable question item", async () => {
+    const h = makeHarness({ capable: false });
+    const sock = await h.send(
+      "AskUserQuestionIntercept",
+      "s1",
+      AUQ_DATA("tu_q"),
+      true,
+    );
+
+    const items = h.simulatePoll();
+    expect(items).toHaveLength(1);
+    expect(items[0].actionable).toBe(false);
+    expect(items[0].type).toBe("question");
+    expect(sock._written).toHaveLength(1);
+    expect(JSON.parse(sock._written[0])).toEqual({ reason: "no_capable_terminal" });
+  });
+
+  // The shortened capability-wait is the second half of this change. A
+  // full-timing test would need to mock Date.now/timers; with a stub
+  // wait callback we can only assert structural ordering — that the
+  // SHORTER wait bound is wired (not the long CAPABILITY_WAIT_MS).
+  it("capable:false uses a wait bound shorter than CAPABILITY_WAIT_MS (10_000)", async () => {
+    const waitCalls: Array<{ capability: string; timeoutMs: number }> = [];
+    const h = makeHarness({
+      capable: false,
+      waitForCapableTerminal: async (capability, timeoutMs) => {
+        waitCalls.push({ capability, timeoutMs });
+        return false;
+      },
+    });
+    await h.send(
+      "PermissionRequest",
+      "s1",
+      { tool_name: "Bash", tool_use_id: "tu_bash" } as unknown as HookData,
+      true,
+    );
+    expect(waitCalls).toHaveLength(1);
+    expect(waitCalls[0].capability).toBe("action.permission");
+    // Structural assertion: the wait must NOT be the long 10s bound.
+    expect(waitCalls[0].timeoutMs).toBeLessThan(10_000);
+  });
+
+  // When a capable terminal does arrive within the short window, the
+  // non-actionable stub is removed and the normal flow produces the
+  // real actionable item instead.
+  it("capable:false but a terminal arrives during the wait → stub is removed, real actionable item created, no rejection", async () => {
+    // hasCapableTerminal() stays false throughout (the fake never flips),
+    // so this genuinely enters the non-actionable-stub branch; overriding
+    // waitForCapableTerminal to resolve true simulates a terminal
+    // connecting DURING the short wait window — the exact "arrived"
+    // branch the stub-removal logic exists for.
+    const h = makeHarness({
+      capable: false,
+      waitForCapableTerminal: async () => true,
+    });
+    const sock = await h.send(
+      "PermissionRequest",
+      "s1",
+      { tool_name: "Bash", tool_use_id: "tu_bash", tool_input: { command: "ls" } } as unknown as HookData,
+      true,
+    );
+    // Real actionable item created by handlePermissionRequest; no rejection.
+    const items = h.simulatePoll();
+    expect(items).toHaveLength(1);
+    expect(items[0].actionable).toBe(true);
+    expect(items[0].type).toBe("permission");
+    expect(sock._written).toHaveLength(0);
+    expect(sock._ended).toBe(false);
+  });
+});
+

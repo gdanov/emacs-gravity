@@ -24,6 +24,14 @@ export interface TerminalConnection {
    * attention indicator — without re-sending empty arrays on every poll.
    */
   inboxWasNonEmpty: boolean;
+  /**
+   * Per-session seq cursor for incremental pull: `poll` reads
+   * patches `> cursor` for each subscribed session and advances the
+   * cursor on a non-empty send; `request.session` / `request.resync`
+   * seed the cursor to the current session seq at the moment they
+   * deliver a full snapshot. `request.unsubscribe` removes the entry.
+   */
+  sessionSeqCursor: Map<string, number>;
 }
 
 export interface TerminalService {
@@ -103,6 +111,7 @@ export function makeTerminal(logFn?: (msg: string, level?: string) => void): Ter
         writeQueue: [],
         draining: false,
         inboxWasNonEmpty: false,
+        sessionSeqCursor: new Map(),
       };
       connections.push(conn);
 

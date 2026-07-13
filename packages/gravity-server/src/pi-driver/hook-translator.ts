@@ -388,7 +388,72 @@ export function translatePiEvent(
       return { kind: "noop" };
     }
 
+    // ── Ambient-emitter (pi envelope) vocabulary ──────────────────────────
+    //
+    // These event types live on the pi extension emitter channel, not in the
+    // RPC vocabulary above. They are reached when a `PiEventEnvelope` arrives
+    // on the hook socket and is routed through `translatePiEvent` by
+    // gravity-server's envelope ingest path. There is no spawn code in that
+    // path, so each one synthesizes its own lifecycle hookEvent via the
+    // existing helper functions below — no eager server-side SessionStart
+    // injection the way `startPiSession` does for RPC-driven sessions.
+
+    case "session_start": {
+      // Ambient emitter is reporting a session is starting. Pi envelopes
+      // carry `cwd` / branch / role attribution on the envelope itself, so
+      // the AccState's per-session metadata fields are NOT authoritative
+      // here — the envelope handler threads attribution through `updateMeta`
+      // separately after the first event lands.
+      const result = createSessionStart(state);
+      return { kind: "emit", results: [result] };
+    }
+
+    case "session_shutdown": {
+      // Ambient emitter is reporting the session has ended. Mirror the
+      // RPC path's subprocess-exit behavior: emit `SessionEnd` with the
+      // minimal hookData, then let gravity-server mark the session ended.
+      const result = createSessionEnd(state);
+      return { kind: "emit", results: [result] };
+    }
+
+    case "session_compact": {
+      // Ambient emitter compaction event. Same hookData shape as
+      // `compaction_end` (above) — reads fields defensively and routes
+      // through the same `Compaction` hookEvent so terminals see one
+      // unified treatment regardless of which channel the compaction
+      // arrived on.
+      const e = event as {
+        reason?: string;
+        aborted?: boolean;
+        tokensBefore?: number;
+        summary?: string;
+      };
+      process.stderr.write(
+        `[pi-adapter] session_compact reason=${e.reason ?? "?"} aborted=${e.aborted ?? false} tokensBefore=${e.tokensBefore ?? "?"}\n`,
+      );
+      const hookData: HookData = {
+        cwd: state.cwd,
+        compaction_reason: e.reason ?? "unknown",
+        compaction_aborted: e.aborted === true,
+        compaction_tokens_before:
+          typeof e.tokensBefore === "number" ? e.tokensBefore : null,
+        compaction_summary:
+          typeof e.summary === "string" ? e.summary : null,
+      };
+      return {
+        kind: "emit",
+        results: [{ hookEvent: "Compaction", hookData, sessionId: state.sessionId }],
+      };
+    }
+
     default:
+      // Visibility-only log for events the translator does not recognize.
+      // Behavior is unchanged: `noop` returned so the rest of the ingest
+      // path proceeds — only an unmapped event type is now traceable in
+      // stderr instead of silently vanishing.
+      process.stderr.write(
+        `[pi-adapter] unmapped pi event type: ${(event as { type?: string }).type ?? "unknown"}\n`,
+      );
       return { kind: "noop" };
   }
 }

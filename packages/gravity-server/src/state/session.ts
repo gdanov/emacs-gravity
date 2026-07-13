@@ -5,6 +5,7 @@
 
 import type {
   Session,
+  SessionRole,
   TurnNode,
   StepNode,
   Tool,
@@ -21,6 +22,7 @@ import type {
   PiCommandDescriptor,
   PiModel,
 } from "@gravity/shared";
+import { deriveRepoAttribution } from "../enrichment/repo-attribution.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -49,6 +51,15 @@ export function createSession(sessionId: string, cwd: string, source?: string): 
   // return "" and then fall back to the full cwd as the project label.
   const trimmed = cwd.replace(/\/+$/, "");
   const project = trimmed.split("/").pop() || trimmed || cwd;
+  // Derive repo identity once at creation — the value never changes for a
+  // session's lifetime (cwds don't move), so the derivation is purely a
+  // one-time side-effect that populates the grouping key.
+  const { repoKey, repoRoot, worktree } = deriveRepoAttribution(cwd);
+  // Pin the role default per source. Pi sessions start as "worker" because
+  // the ambient-emitter use case is overwhelmingly the swarm-worker path;
+  // Claude Code sessions are user-driven and start as "interactive". A
+  // later event carrying an explicit `role` may overwrite via updateMeta.
+  const role: SessionRole = source === "pi" ? "worker" : "interactive";
   return {
     sessionId,
     cwd,
@@ -62,6 +73,11 @@ export function createSession(sessionId: string, cwd: string, source?: string): 
     modelName: null,
     tmuxSession: null,
     source: source ?? null,
+    repoKey,
+    repoRoot,
+    worktree,
+    role,
+    readOnly: false,
     startTime: Date.now(),
     lastEventTime: Date.now(),
     tokenUsage: null,
@@ -207,7 +223,11 @@ export function setPiModels(s: Session, models: PiModel[]): Patch[] {
 
 export function updateMeta(
   s: Session,
-  opts: { pid?: number; slug?: string; displayName?: string; branch?: string; modelName?: string; tmuxSession?: string; piSessionFile?: string },
+  opts: {
+    pid?: number; slug?: string; displayName?: string; branch?: string; modelName?: string;
+    tmuxSession?: string; piSessionFile?: string;
+    repoKey?: string; repoRoot?: string; worktree?: string; role?: SessionRole; readOnly?: boolean;
+  },
 ): Patch[] {
   s.lastEventTime = Date.now();
   if (opts.pid && opts.pid > 0) s.pid = opts.pid;
@@ -217,6 +237,11 @@ export function updateMeta(
   if (opts.modelName) s.modelName = opts.modelName;
   if (opts.tmuxSession && !s.tmuxSession) s.tmuxSession = opts.tmuxSession;
   if (opts.piSessionFile) s.piSessionFile = opts.piSessionFile;
+  if (opts.repoKey) s.repoKey = opts.repoKey;
+  if (opts.repoRoot) s.repoRoot = opts.repoRoot;
+  if (opts.worktree) s.worktree = opts.worktree;
+  if (opts.role) s.role = opts.role;
+  if (opts.readOnly) s.readOnly = opts.readOnly;
   return [{ op: "set_meta", ...opts }];
 }
 

@@ -21,6 +21,7 @@ export interface InboxService {
     summary: string,
     data: Record<string, unknown>,
     hookSocket?: Socket,
+    actionable?: boolean,
   ) => InboxItem;
   readonly remove: (id: number) => InboxItem | undefined;
   readonly removeForSession: (sessionId: string, type?: InboxItemType) => InboxItem[];
@@ -62,7 +63,7 @@ export function makeInbox(): InboxService {
   };
 
   return {
-    add: (type, sessionId, project, label, summary, data, hookSocket) => {
+    add: (type, sessionId, project, label, summary, data, hookSocket, actionable) => {
       counter++;
       const item: InboxItem = {
         id: counter,
@@ -73,6 +74,7 @@ export function makeInbox(): InboxService {
         timestamp: Date.now(),
         summary,
         data,
+        actionable: actionable ?? true,
       };
       items.unshift(item);
       if (hookSocket) {

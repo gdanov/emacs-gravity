@@ -10,8 +10,10 @@ import {
   updateToolPartial,
   completeTool,
   addCompaction,
+  updateMeta,
 } from "../src/state/session.js";
-import type { CompactionMarker, PromptEntry, Tool } from "@gravity/shared";
+import { makeSessionStore, type SessionStoreService } from "../src/services/session-store.js";
+import type { CompactionMarker, PromptEntry, Session, Tool } from "@gravity/shared";
 
 const makePrompt = (text: string): PromptEntry => ({
   type: "user",
@@ -328,5 +330,186 @@ describe("finalizeLastPrompt = closeTurn (freeze-on-Stop)", () => {
     expect(s.turns[1].frozen).toBe(true);
     expect(s.turns[1].stopText).toBe("done");
     expect(s.turns[1].stopThinking).toBe("tw");
+  });
+});
+
+describe("createSession: attribution defaults", () => {
+  it("defaults role to \"worker\" when source is \"pi\"", () => {
+    const s = createSession("s-pi", "/tmp/proj-a", "pi");
+    expect(s.role).toBe("worker");
+    expect(s.source).toBe("pi");
+    // readOnly defaults to false on creation regardless of source — the
+    // ingest path flips it to true later via updateMeta, not here.
+    expect(s.readOnly).toBe(false);
+  });
+
+  it("defaults role to \"interactive\" when no source is given (Claude Code path)", () => {
+    const s = createSession("s-cc", "/tmp/proj-a");
+    expect(s.role).toBe("interactive");
+    expect(s.source).toBeNull();
+    expect(s.readOnly).toBe(false);
+  });
+
+  it("defaults role to \"interactive\" for non-pi sources", () => {
+    const s = createSession("s-other", "/tmp/proj-a", "opencode");
+    expect(s.role).toBe("interactive");
+    expect(s.source).toBe("opencode");
+  });
+
+  it("populates repoKey/repoRoot/worktree from the cwd via deriveRepoAttribution", () => {
+    // /tmp is not a git repo on most systems; the derivation must fall
+    // back to cwd for all three fields without throwing.
+    const s = createSession("s-attr", "/tmp/some-non-git-dir", "pi");
+    expect(s.repoKey).toBe("/tmp/some-non-git-dir");
+    expect(s.repoRoot).toBe("/tmp/some-non-git-dir");
+    expect(s.worktree).toBe("/tmp/some-non-git-dir");
+  });
+});
+
+describe("updateMeta: attribution fields thread through", () => {
+  it("sets role/repoKey/repoRoot/worktree/readOnly when provided", () => {
+    const s = createSession("s-meta", "/tmp", "pi");
+    const patches = updateMeta(s, {
+      role: "coordinator",
+      repoKey: "/abs/.git",
+      repoRoot: "/abs",
+      worktree: "/abs/worktree",
+      readOnly: true,
+    });
+    expect(s.role).toBe("coordinator");
+    expect(s.repoKey).toBe("/abs/.git");
+    expect(s.repoRoot).toBe("/abs");
+    expect(s.worktree).toBe("/abs/worktree");
+    expect(s.readOnly).toBe(true);
+    // The returned patch carries every provided field so terminals can
+    // mirror the update.
+    const setMeta = patches.find((p) => p.op === "set_meta");
+    expect(setMeta).toBeDefined();
+    // @ts-expect-error narrowing through patch union
+    expect(setMeta.role).toBe("coordinator");
+    // @ts-expect-error narrowing through patch union
+    expect(setMeta.repoKey).toBe("/abs/.git");
+    // @ts-expect-error narrowing through patch union
+    expect(setMeta.readOnly).toBe(true);
+  });
+
+  it("is a no-op on attribution fields when none are provided", () => {
+    const s = createSession("s-noop", "/tmp", "pi");
+    const initialRole = s.role;
+    const initialRepoKey = s.repoKey;
+    const patches = updateMeta(s, { displayName: "hello" });
+    expect(s.role).toBe(initialRole);
+    expect(s.repoKey).toBe(initialRepoKey);
+    expect(s.displayName).toBe("hello");
+    expect(patches).toHaveLength(1);
+    // @ts-expect-error narrowing
+    expect(patches[0].displayName).toBe("hello");
+  });
+});
+
+describe("getProjectSummaries: grouping by repoKey", () => {
+  // Construct sessions directly with repoKey set — no real git call is
+  // needed for the grouping test, and createSession's git side-effect on
+  // /tmp is the no-git fallback anyway.
+  const makeSessionWithRepo = (overrides: Partial<Session> & { sessionId: string }): Session => ({
+    sessionId: overrides.sessionId,
+    cwd: overrides.cwd ?? "/tmp",
+    project: overrides.project ?? "tmp",
+    status: overrides.status ?? "active",
+    claudeStatus: overrides.claudeStatus ?? "idle",
+    slug: overrides.slug ?? null,
+    displayName: overrides.displayName ?? null,
+    branch: overrides.branch ?? null,
+    pid: overrides.pid ?? null,
+    modelName: overrides.modelName ?? null,
+    tmuxSession: overrides.tmuxSession ?? null,
+    source: overrides.source ?? "claude-code",
+    repoKey: overrides.repoKey ?? null,
+    repoRoot: overrides.repoRoot ?? null,
+    worktree: overrides.worktree ?? null,
+    role: overrides.role ?? "interactive",
+    readOnly: overrides.readOnly ?? false,
+    startTime: overrides.startTime ?? Date.now(),
+    lastEventTime: overrides.lastEventTime ?? Date.now(),
+    tokenUsage: overrides.tokenUsage ?? null,
+    cost: overrides.cost ?? null,
+    contextUsage: overrides.contextUsage ?? null,
+    piSessionFile: overrides.piSessionFile ?? null,
+    plan: overrides.plan ?? null,
+    streamingText: overrides.streamingText ?? null,
+    permissionMode: overrides.permissionMode ?? null,
+    turns: overrides.turns ?? [],
+    currentTurn: overrides.currentTurn ?? 0,
+    toolIndex: overrides.toolIndex ?? {},
+    agentIndex: overrides.agentIndex ?? {},
+    tasks: overrides.tasks ?? {},
+    files: overrides.files ?? {},
+    compactions: overrides.compactions ?? [],
+    totalToolCount: overrides.totalToolCount ?? 0,
+    piCommands: overrides.piCommands ?? null,
+    piModels: overrides.piModels ?? null,
+  });
+
+  it("groups two sessions sharing the same repoKey under one ProjectSummary", () => {
+    const store: SessionStoreService = makeSessionStore();
+    const sharedRepoKey = "/abs/path/to/.git";
+    store.set("a", makeSessionWithRepo({
+      sessionId: "a",
+      cwd: "/abs/path/to",
+      repoKey: sharedRepoKey,
+      repoRoot: "/abs/path/to",
+    }));
+    store.set("b", makeSessionWithRepo({
+      sessionId: "b",
+      cwd: "/abs/path/to/.worktrees/feature",
+      repoKey: sharedRepoKey,
+      repoRoot: "/abs/path/to",
+      worktree: "/abs/path/to/.worktrees/feature",
+    }));
+
+    const summaries = store.getProjectSummaries();
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].repoKey).toBe(sharedRepoKey);
+    expect(summaries[0].sessions.map((s) => s.sessionId).sort()).toEqual(["a", "b"]);
+    // Project display name comes from the first session's repoRoot basename.
+    expect(summaries[0].project).toBe("to");
+  });
+
+  it("keeps sessions with distinct repoKeys in separate ProjectSummary entries", () => {
+    const store: SessionStoreService = makeSessionStore();
+    store.set("a", makeSessionWithRepo({
+      sessionId: "a",
+      repoKey: "/repo-a/.git",
+      repoRoot: "/repo-a",
+    }));
+    store.set("b", makeSessionWithRepo({
+      sessionId: "b",
+      repoKey: "/repo-b/.git",
+      repoRoot: "/repo-b",
+    }));
+
+    const summaries = store.getProjectSummaries();
+    expect(summaries).toHaveLength(2);
+    const keys = summaries.map((s) => s.repoKey).sort();
+    expect(keys).toEqual(["/repo-a/.git", "/repo-b/.git"]);
+  });
+
+  it("groups a defensive-null-repoKey session by its project field", () => {
+    const store: SessionStoreService = makeSessionStore();
+    // Simulate a legacy session created before repoKey was wired in:
+    // repoKey is null but the existing `project` field is set.
+    store.set("a", makeSessionWithRepo({
+      sessionId: "a",
+      project: "legacy-name",
+      repoKey: null,
+      repoRoot: null,
+    }));
+
+    const summaries = store.getProjectSummaries();
+    expect(summaries).toHaveLength(1);
+    // The grouping key falls back to the project name; the repoKey field
+    // on the summary carries that fallback verbatim.
+    expect(summaries[0].repoKey).toBe("legacy-name");
+    expect(summaries[0].project).toBe("legacy-name");
   });
 });
