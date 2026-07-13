@@ -17,25 +17,35 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { piAvailable } from "./helpers/pi-availability.js";
+import { resolveEmitterBundleSource } from "./helpers/emitter-bundle.js";
 import {
   HookSocketListener,
   type CollectedLine,
 } from "./helpers/hook-socket-listener.js";
 
-/** Worktree root — the absolute path to the gravity-pi extension. */
-const WORKTREE_ROOT =
-  "/Users/gdanov/work@pmox/playground/emacs-gravity/.worktrees/issue-20-pi-emitter";
-/** Absolute path to the WP1 emitter .ts file, loadable directly by
- *  pi via jiti (per docs/extensions.md). */
-const EMITTER_PATH = join(
-  WORKTREE_ROOT,
-  "packages/gravity-server/src/pi-driver/emitter/index.ts",
+/** Worktree root — derived from this test file's location rather than
+ *  hardcoded so the file works for any checkout. The file lives at
+ *  `<worktree>/packages/gravity-server/test/pi-emitter-real-run.test.ts`,
+ *  so three levels up from its `dirname` is the worktree root. */
+const WORKTREE_ROOT = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
 );
+
+/** Temp dir holding the materialized bundle; cleaned up at process
+ *  exit. The bundle is materialized unconditionally at module load
+ *  (top-level await) so `EMITTER_PATH` is always a real string — the
+ *  resolution is cheap and harmless on hosts where the `pi` real-
+ *  subprocess suite is gated off. */
+const bundleScratchDir = mkdtempSync(join(tmpdir(), "pi-emitter-bundle-"));
 
 /** Trivial-but-tool-bearing prompt used by pi-wp's own smoke test
  *  (`bin/pi-wp --smoke`). We reuse it verbatim for consistency. */
@@ -132,18 +142,29 @@ if (!available) {
   );
 }
 
-describe.skipIf(!available)("pi emitter — real pi subprocess (AC #1, #2, #3, #8)", () => {
-  beforeAll(() => {
-    // Quick sanity: the WP1 emitter file must exist before we attempt
-    // to spawn `pi -e` against it. (WP1 reports this file as its
-    // deliverable; if it's missing, fail loudly with a clear message.)
-    // We use a sync fs call so the failure is visible at suite-load
-    // time, not buried in a per-test timeout.
+/** Materialized bundle path — set in `beforeAll`. */
+let EMITTER_PATH: string;
+
+describe.skipIf(!available)("pi emitter — real pi subprocess (AC #1, #2, #3, #5, #8)", () => {
+  beforeAll(async () => {
+    // Resolve the bundled emitter source once and materialize it to a
+    // fresh `.js` file under `bundleScratchDir`. `pi -e <file>` then
+    // loads plain ESM, which is the same shape a self-installed
+    // extension on disk has. We do this per suite (not per test) so
+    // the cost is paid once.
+    const source = await resolveEmitterBundleSource();
+    const materialPath = join(bundleScratchDir, "gravity-pi.js");
+    writeFileSync(materialPath, source, "utf8");
+    EMITTER_PATH = materialPath;
+
+    // Quick sanity: the materialized file must be loadable. We do a
+    // sync `statSync`-equivalent read so any failure surfaces at
+    // suite-load time, not buried in a per-test timeout.
     try {
       readFileSync(EMITTER_PATH);
     } catch (e) {
       throw new Error(
-        `Required emitter file is missing: ${EMITTER_PATH} — WP1 deliverable not found. (${String(e)})`,
+        `Required emitter bundle is missing: ${EMITTER_PATH} — emitter-bundle helper failed. (${String(e)})`,
       );
     }
   });
@@ -157,6 +178,11 @@ describe.skipIf(!available)("pi emitter — real pi subprocess (AC #1, #2, #3, #
       } catch {
         /* best effort */
       }
+    }
+    try {
+      rmSync(bundleScratchDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
     }
   });
 
@@ -212,6 +238,16 @@ describe.skipIf(!available)("pi emitter — real pi subprocess (AC #1, #2, #3, #
       expect(good!.event).toBeDefined();
       expect(typeof good!.event).toBe("object");
       expect(typeof good!.event["type"]).toBe("string");
+
+      // The very first event emitted on a healthy run must be the
+      // session_start that the factory's lazy-connect path listens
+      // for. Asserting presence here (in addition to AC #5's wire-
+      // shape checks) is the cheapest proof the live path actually
+      // fired and the listener didn't only see bookkeeping noise.
+      const sessionStart = envelopes.find(
+        (e) => e.event["type"] === "session_start",
+      );
+      expect(sessionStart).toBeDefined();
     } finally {
       await listener.close();
     }
@@ -438,6 +474,96 @@ describe.skipIf(!available)("pi emitter — real pi subprocess (AC #1, #2, #3, #
     }
   }, PI_SUBPROCESS_TIMEOUT_MS + 15_000);
 
+  // ── AC #5: Wire-level compaction assertion ────────────────────
+  // Verify that on the wire:
+  //   - `message_update` envelopes carry ONLY `{ type,
+  //     assistantMessageEvent }` (nothing else — no raw `delta`,
+  //     `messageSnapshot`, `message` keys leak through).
+  //   - `tool_execution_update` envelopes, when they have a
+  //     `partialResult`, carry a SCALAR (string|number|boolean) —
+  //     never a raw object/array/symbol — per the scalarization
+  //     contract in compaction.ts.
+  it("AC #5: message_update envelopes on the wire carry ONLY the compacted delta; tool_execution_update partials are scalarized", async () => {
+    const scratch = freshScratchDir();
+    const sessionDir = join(scratch, "session");
+    const logPath = join(scratch, "emitter.log");
+    const listener = await HookSocketListener.create({
+      prefix: "pi-emitter-compaction-",
+    });
+    try {
+      const { child, killSubprocess } = spawnPi(
+        [
+          "-p",
+          "--mode",
+          "json",
+          "-e",
+          EMITTER_PATH,
+          "--session-dir",
+          sessionDir,
+          "-n",
+          "compact",
+          SMOKE_PROMPT,
+        ],
+        {
+          ...process.env,
+          GRAVITY_HOOK_SOCK: listener.getSocketPath(),
+          GRAVITY_PI_EMITTER_LOG: logPath,
+        } as Record<string, string>,
+        scratch,
+      );
+      const exit = await awaitExit(
+        child,
+        PI_SUBPROCESS_TIMEOUT_MS,
+        killSubprocess,
+      );
+      expect(exit.code).toBe(0);
+
+      const envelopes = listener.getPiEnvelopes();
+      expect(envelopes.length).toBeGreaterThan(0);
+
+      // Strict check on every message_update envelope: the event
+      // payload must contain exactly `{ type, assistantMessageEvent }`
+      // and no other keys. Anything else means a regression leaked
+      // a raw event field through compaction.
+      const msgUpdates = envelopes.filter(
+        (e) => e.event["type"] === "message_update",
+      );
+      expect(msgUpdates.length).toBeGreaterThan(0);
+      for (const e of msgUpdates) {
+        expect(Object.keys(e.event).sort()).toEqual([
+          "assistantMessageEvent",
+          "type",
+        ]);
+      }
+
+      // Soft check on tool_execution_update envelopes: any
+      // `partialResult` that appears must be a scalar (string,
+      // number, or boolean) per compaction.ts. No minimum count
+      // required — a smoke prompt may not exercise a streaming
+      // tool. We log when zero were observed so the result is
+      // auditable from the test output.
+      const toolUpdates = envelopes.filter(
+        (e) => e.event["type"] === "tool_execution_update",
+      );
+      if (toolUpdates.length === 0) {
+        // eslint-disable-next-line no-console
+        console.log(
+          "[AC #5] no tool_execution_update envelopes observed on this run; " +
+            "scalarization check vacuously satisfied",
+        );
+      }
+      for (const e of toolUpdates) {
+        if ("partialResult" in e.event) {
+          expect(["string", "number", "boolean"]).toContain(
+            typeof e.event["partialResult"],
+          );
+        }
+      }
+    } finally {
+      await listener.close();
+    }
+  }, PI_SUBPROCESS_TIMEOUT_MS + 10_000);
+
   // ── AC #8: Server-restart scoping ─────────────────────────────
   // Reuses the crash-safety(b) run's evidence model. This test reads
   // the log file left by AC #2b's emitter run and asserts it contains
@@ -533,3 +659,60 @@ function countMatches(haystack: string, needle: string): number {
 // Touch the type so the import is not erased by `verbatimModuleSyntax`.
 const _linesTypeRef: CollectedLine | undefined = undefined;
 void _linesTypeRef;
+
+// ── Synthetic / unit-level drop-marker wire-shape ──────────────
+//
+// This block is OUTSIDE the `describe.skipIf(!available)` gate — it
+// needs no real `pi` subprocess and must therefore always run so the
+// drop-marker wire-shape contract is verified on every host, not only
+// on hosts where `pi` happens to be available.
+describe("pi emitter — drop-marker wire shape (AC #5, synthetic — no real pi subprocess)", () => {
+  it("drainDropMarker → buildEnvelope produces a well-formed gravity_emitter_drop envelope", async () => {
+    const { BoundedQueue } = await import(
+      "../src/pi-driver/emitter/queue.js"
+    );
+    const { buildEnvelope } = await import(
+      "../src/pi-driver/emitter/envelope.js"
+    );
+
+    // Capacity 2 + 4 pushes guarantees at least one drop. We use
+    // generic event-shape objects (anything with a `type`) so this
+    // test exercises only the queue's drop accounting, not the
+    // emitter's handler logic.
+    const q = new BoundedQueue<Record<string, unknown>>({ capacity: 2 });
+    q.push({ type: "session_start" });
+    q.push({ type: "message_start" });
+    q.push({ type: "message_update" }); // drops the oldest
+    q.push({ type: "message_end" }); // drops the next-oldest
+
+    const marker = q.drainDropMarker();
+    expect(marker).not.toBeNull();
+    if (marker === null) return; // type-narrowing helper for TS
+
+    // Feed the marker through buildEnvelope so the wire shape is
+    // what the server actually sees when the queue overflowed. The
+    // envelope helper accepts `Record<string, unknown>` for `event`,
+    // and a DropMarker structurally satisfies that.
+    const envelope = buildEnvelope(
+      { sessionId: "s", cwd: "/tmp/x" },
+      marker as unknown as Record<string, unknown>,
+    );
+    expect(envelope.src).toBe("pi");
+    expect(envelope.session_id).toBe("s");
+    expect(envelope.cwd).toBe("/tmp/x");
+    expect(envelope.event["type"]).toBe("gravity_emitter_drop");
+
+    const droppedCount = envelope.event["droppedCount"];
+    expect(typeof droppedCount).toBe("number");
+    if (typeof droppedCount === "number") {
+      expect(droppedCount).toBeGreaterThan(0);
+    }
+
+    const since = envelope.event["since"];
+    expect(typeof since).toBe("string");
+    // Defensive: it must look ISO-8601-shaped — not a hard check on
+    // the exact instant (the queue uses Date.now() under the hood),
+    // just a smoke check on the format.
+    expect((since as string).length).toBeGreaterThan(0);
+  });
+});

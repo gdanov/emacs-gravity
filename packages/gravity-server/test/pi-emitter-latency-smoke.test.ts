@@ -36,18 +36,30 @@ import { describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { piAvailable } from "./helpers/pi-availability.js";
+import { resolveEmitterBundleSource } from "./helpers/emitter-bundle.js";
 import { HookSocketListener } from "./helpers/hook-socket-listener.js";
 
-/** Worktree root — absolute path to the WP1 emitter .ts file. */
-const WORKTREE_ROOT =
-  "/Users/gdanov/work@pmox/playground/emacs-gravity/.worktrees/issue-20-pi-emitter";
-const EMITTER_PATH = join(
-  WORKTREE_ROOT,
-  "packages/gravity-server/src/pi-driver/emitter/index.ts",
+/** Worktree root — derived from this test file's location rather
+ *  than hardcoded so the file works for any checkout. The file
+ *  lives at `<worktree>/packages/gravity-server/test/pi-emitter-latency-smoke.test.ts`,
+ *  so three levels up from its `dirname` is the worktree root. */
+const WORKTREE_ROOT = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
 );
+
+/** Temp dir holding the materialized bundle; cleaned up in a
+ *  process-exit hook. Resolved/materailized unconditionally at module
+ *  load (top-level await) so `EMITTER_PATH` is always a string — even
+ *  on hosts where the `pi` real-subprocess suite skips, the
+ *  resolution is cheap and harmless. */
+const bundleScratchDir = mkdtempSync(join(tmpdir(), "pi-latency-bundle-"));
 
 /** Trivial-but-tool-bearing prompt — same as pi-wp's own smoke prompt. */
 const SMOKE_PROMPT =
@@ -79,6 +91,27 @@ if (!available) {
     "[pi-emitter-latency-smoke] `pi` not on PATH or unresponsive — suite is skipped on this host",
   );
 }
+
+// ── Materialize the emitter bundle once per file load. ──
+//
+// We unconditionally resolve the built bundle and write it to a
+// fresh `.js` file so `pi -e <file>` can load plain ESM, matching
+// the production self-installed path. This is paid once even on
+// hosts where the `pi` real-subprocess suite is gated off — the
+// cost is microseconds and it keeps `EMITTER_PATH` a real string
+// for both the gated and ungated branches.
+const EMITTER_SOURCE = await resolveEmitterBundleSource();
+const EMITTER_PATH = join(bundleScratchDir, "gravity-pi.js");
+writeFileSync(EMITTER_PATH, EMITTER_SOURCE, "utf8");
+
+// Best-effort cleanup of the bundle scratch dir at process exit.
+process.on("exit", () => {
+  try {
+    rmSync(bundleScratchDir, { recursive: true, force: true });
+  } catch {
+    /* best effort */
+  }
+});
 
 describe.skipIf(!available)(
   "pi emitter — latency smoke: with vs without emitter (AC #4, informational)",
@@ -279,11 +312,7 @@ describe.skipIf(!available)(
           );
         }
 
-        // Document the result for downstream readers — do not
-        // hard-fail on the budget per the spec.
-        expect(typeof deltaP95Pct === "number" ? deltaP95Pct : 0).toBe(
-          typeof deltaP95Pct === "number" ? deltaP95Pct : 0,
-        );
+        // Intentionally no hard assertion on the latency delta here — see the file header's flakiness policy. The raw numbers and delta are already reported above via console.log and the written artifact file; this test's pass/fail depends solely on the MIN_SUCCESSES_PER_CONDITION guard above.
       },
       TOTAL_BUDGET_MS + 30_000,
     );

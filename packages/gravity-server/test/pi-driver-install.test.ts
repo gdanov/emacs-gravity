@@ -10,7 +10,7 @@
 // Each test uses its own mkdtempSync so concurrent test ordering can
 // never interfere.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeAll } from "vitest";
 import {
   chmodSync,
   mkdtempSync,
@@ -21,8 +21,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { installEmitter, DEFAULT_FILENAME } from "../src/pi-driver/install.js";
+import { resolveEmitterBundleSource } from "./helpers/emitter-bundle.js";
 
 /** Track every temp dir we create so afterEach can clean them all up. */
 const tempDirs: string[] = [];
@@ -248,5 +250,88 @@ describe("installEmitter — return shape invariants", () => {
     const r = await installEmitter({ installDir: dir, source: "\n\n\n" });
     expect(r.action).toBe("installed");
     expect(readFileSync(r.path, "utf8")).toBe("\n\n\n");
+  });
+});
+
+describe("installEmitter — real built PI_EMITTER_SOURCE", () => {
+  let realSource: string;
+
+  beforeAll(async () => {
+    realSource = await resolveEmitterBundleSource();
+  });
+
+  it("resolves a non-trivial bundle source (>1000 chars)", () => {
+    expect(typeof realSource).toBe("string");
+    expect(realSource.length).toBeGreaterThan(1000);
+  });
+
+  it("writes the bundle byte-identically and it loads as a default-exported factory", async () => {
+    const dir = freshDir("gravity-install-real-bundle-");
+    const result = await installEmitter({ installDir: dir, source: realSource });
+    expect(result.action).toBe("installed");
+    expect(result.error).toBeUndefined();
+
+    const written = readFileSync(result.path, "utf8");
+    expect(written).toBe(realSource);
+
+    // Dynamic import of the installed file proves the bytes are not
+    // just a match but actually loadable, executable JS. Node's ESM
+    // loader requires a `file://` URL — `pathToFileURL` provides it
+    // portably (the result.path is an OS path that some module-
+    // resolution modes refuse as an ESM specifier).
+    const mod = (await import(pathToFileURL(result.path).href)) as {
+      default?: unknown;
+    };
+    expect(typeof mod.default).toBe("function");
+  });
+});
+
+describe("installEmitter — server's own call-path (install→installed, restart→current, stale→refreshed)", () => {
+  let serverSource: string;
+
+  beforeAll(async () => {
+    // Use the same shape the server passes: PI_EMITTER_SOURCE (the
+    // bundled JS) into the configured `piExtensionInstallDir` (which
+    // the test injects as a fresh temp dir). Mirrors the call in
+    // gravity-server.ts where installEmitter is called with exactly
+    // these two arguments.
+    serverSource = await resolveEmitterBundleSource();
+  });
+
+  it("first call → installed; restart with identical source → current; stale source → refreshed", async () => {
+    const dir = freshDir("gravity-install-server-call-");
+
+    // First call → `installed`.
+    const first = await installEmitter({
+      installDir: dir,
+      source: serverSource,
+    });
+    expect(first.action).toBe("installed");
+    expect(first.error).toBeUndefined();
+    expect(readFileSync(first.path, "utf8")).toBe(serverSource);
+
+    // Second call with IDENTICAL source → `current`, no filesystem
+    // mutation. The bundle source we resolve is canonical so the
+    // second call must short-circuit on the byte-equal check.
+    const second = await installEmitter({
+      installDir: dir,
+      source: serverSource,
+    });
+    expect(second.action).toBe("current");
+    expect(second.path).toBe(first.path);
+    expect(second.error).toBeUndefined();
+
+    // Third call with a DIFFERENT source → `refreshed`. Appending a
+    // comment line is sufficient to force the byte-equal check to
+    // fail without changing the bundle's executable semantics.
+    const staleSource = `${serverSource}\n// staleness-marker-for-test\n`;
+    const third = await installEmitter({
+      installDir: dir,
+      source: staleSource,
+    });
+    expect(third.action).toBe("refreshed");
+    expect(third.path).toBe(first.path);
+    expect(third.error).toBeUndefined();
+    expect(readFileSync(third.path, "utf8")).toBe(staleSource);
   });
 });
