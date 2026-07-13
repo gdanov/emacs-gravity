@@ -375,13 +375,13 @@ var require_elk_bundled = __commonJS({
               this.id = id + 1;
               msg.id = id;
               var self2 = this;
-              return new Promise(function(resolve, reject) {
+              return new Promise(function(resolve2, reject) {
                 self2.resolvers[id] = function(err, res) {
                   if (err) {
                     self2.convertGwtStyleError(err);
                     reject(err);
                   } else {
-                    resolve(res);
+                    resolve2(res);
                   }
                 };
                 self2.worker.postMessage(msg);
@@ -97807,7 +97807,7 @@ var init_mermaid_ascii = __esm({
 // src/gravity-server.ts
 import { createServer as createServer2 } from "net";
 import { unlinkSync as unlinkSync2 } from "fs";
-import { dirname } from "path";
+import { dirname as dirname2 } from "path";
 import { pathToFileURL } from "url";
 
 // ../../node_modules/effect/dist/Pipeable.js
@@ -98336,9 +98336,9 @@ function safeToString(input) {
   }
 }
 function formatJson(input, options) {
-  let cache = [];
-  const out = JSON.stringify(input, (_key, value) => typeof value === "object" && value !== null ? cache.includes(value) ? void 0 : cache.push(value) && redact(value) : value, options?.space);
-  cache = void 0;
+  let cache2 = [];
+  const out = JSON.stringify(input, (_key, value) => typeof value === "object" && value !== null ? cache2.includes(value) ? void 0 : cache2.push(value) && redact(value) : value, options?.space);
+  cache2 = void 0;
   return out;
 }
 
@@ -98367,9 +98367,9 @@ var toStringUnknown = (u, whitespace = 2) => {
   }
 };
 var stringifyCircular = (obj, whitespace) => {
-  let cache = [];
-  const retVal = JSON.stringify(obj, (_key, value) => typeof value === "object" && value !== null ? cache.includes(value) ? void 0 : cache.push(value) && redact(value) : value, whitespace);
-  cache = void 0;
+  let cache2 = [];
+  const retVal = JSON.stringify(obj, (_key, value) => typeof value === "object" && value !== null ? cache2.includes(value) ? void 0 : cache2.push(value) && redact(value) : value, whitespace);
+  cache2 = void 0;
   return retVal;
 };
 var BaseProto = {
@@ -99772,15 +99772,15 @@ var addSpanStackTrace = (options) => {
   };
 };
 var makeStackCleaner = (line) => (stack) => {
-  let cache;
+  let cache2;
   return () => {
-    if (cache !== void 0) return cache;
+    if (cache2 !== void 0) return cache2;
     const trace = stack();
     if (!trace) return void 0;
     const lines = trace.split("\n");
     if (lines[line] !== void 0) {
-      cache = lines[line].trim();
-      return cache;
+      cache2 = lines[line].trim();
+      return cache2;
     }
   };
 };
@@ -101360,8 +101360,8 @@ var runPromiseExitWith = (services3) => {
   const runFork3 = runForkWith(services3);
   return (effect2, options) => {
     const fiber3 = runFork3(effect2, options);
-    return new Promise((resolve) => {
-      fiber3.addObserver((exit3) => resolve(exit3));
+    return new Promise((resolve2) => {
+      fiber3.addObserver((exit3) => resolve2(exit3));
     });
   };
 };
@@ -103347,6 +103347,7 @@ var VALID_TERMINAL_MESSAGE_TYPES = /* @__PURE__ */ new Set([
   "request.session",
   "request.overview",
   "request.resync",
+  "request.unsubscribe",
   "hint.session-dead",
   "poll",
   // Pi driver control messages (handled in handleTerminalMessage's switch).
@@ -103418,6 +103419,32 @@ function extractLatestUserPrompt(s) {
   }
   return null;
 }
+function extractCurrentTool(s) {
+  for (let i = s.turns.length - 1; i >= 0; i--) {
+    const turn = s.turns[i];
+    for (let j = turn.steps.length - 1; j >= 0; j--) {
+      for (let k = turn.steps[j].tools.length - 1; k >= 0; k--) {
+        if (turn.steps[j].tools[k].status === "running") {
+          return turn.steps[j].tools[k].name;
+        }
+      }
+    }
+    for (let a = turn.agents.length - 1; a >= 0; a--) {
+      const agent = turn.agents[a];
+      for (let j = agent.steps.length - 1; j >= 0; j--) {
+        for (let k = agent.steps[j].tools.length - 1; k >= 0; k--) {
+          if (agent.steps[j].tools[k].status === "running") {
+            return agent.steps[j].tools[k].name;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+function computeTurnCount(s) {
+  return Math.max(0, s.turns.length - 1);
+}
 function makeSessionStore() {
   const sessions = /* @__PURE__ */ new Map();
   const purgeTimers = /* @__PURE__ */ new Map();
@@ -103441,27 +103468,39 @@ function makeSessionStore() {
     },
     has: (sessionId) => sessions.has(sessionId),
     getProjectSummaries: () => {
-      const byProject = /* @__PURE__ */ new Map();
+      const byRepoKey = /* @__PURE__ */ new Map();
       for (const session of sessions.values()) {
         if (session.status === "ended") continue;
-        const list = byProject.get(session.project) ?? [];
+        const key = session.repoKey ?? session.project;
+        const list = byRepoKey.get(key) ?? [];
         list.push(session);
-        byProject.set(session.project, list);
+        byRepoKey.set(key, list);
       }
-      return Array.from(byProject.entries()).map(([project, ss]) => ({
-        project,
-        sessions: ss.map((s) => ({
-          sessionId: s.sessionId,
-          slug: s.slug,
-          displayName: s.displayName,
-          status: s.status,
-          claudeStatus: s.claudeStatus,
-          toolCount: s.totalToolCount,
-          lastEventTime: s.lastEventTime,
-          latestMessage: extractLatestMessage(s),
-          latestUserPrompt: extractLatestUserPrompt(s)
-        }))
-      }));
+      return Array.from(byRepoKey.entries()).map(([repoKey, ss]) => {
+        const first = ss[0];
+        const project = first.repoRoot ? first.repoRoot.split("/").pop() ?? first.repoRoot : first.project;
+        return {
+          project,
+          repoKey,
+          sessions: ss.map((s) => ({
+            sessionId: s.sessionId,
+            slug: s.slug,
+            displayName: s.displayName,
+            status: s.status,
+            claudeStatus: s.claudeStatus,
+            toolCount: s.totalToolCount,
+            lastEventTime: s.lastEventTime,
+            latestMessage: extractLatestMessage(s),
+            latestUserPrompt: extractLatestUserPrompt(s),
+            role: s.role,
+            branch: s.branch,
+            worktree: s.worktree,
+            turnCount: computeTurnCount(s),
+            currentTool: extractCurrentTool(s),
+            cost: s.cost
+          }))
+        };
+      });
     },
     schedulePurge: (sessionId, delayMs, onPurge) => {
       cancelPurge(sessionId);
@@ -103482,12 +103521,23 @@ function makeSessionStore() {
     appendPatches: (sessionId, patches) => {
       const history = patchHistories.get(sessionId) ?? [];
       const now = Date.now();
-      const stored = patches.map((patch) => ({
-        seq: ++globalSeq,
-        patch,
-        timestamp: now
-      }));
-      history.push(...stored);
+      const stored = [];
+      for (const patch of patches) {
+        const tail = history[history.length - 1];
+        if (tail !== void 0 && patch.op === "update_tool_partial" && tail.patch.op === "update_tool_partial" && tail.patch.toolUseId === patch.toolUseId) {
+          tail.patch = patch;
+          tail.timestamp = now;
+          stored.push(tail);
+          continue;
+        }
+        const entry = {
+          seq: ++globalSeq,
+          patch,
+          timestamp: now
+        };
+        stored.push(entry);
+        history.push(entry);
+      }
       patchHistories.set(sessionId, history);
       return stored;
     },
@@ -103540,7 +103590,7 @@ function makeInbox() {
     return removed;
   };
   return {
-    add: (type, sessionId, project, label, summary, data, hookSocket) => {
+    add: (type, sessionId, project, label, summary, data, hookSocket, actionable) => {
       counter++;
       const item = {
         id: counter,
@@ -103550,7 +103600,8 @@ function makeInbox() {
         label,
         timestamp: Date.now(),
         summary,
-        data
+        data,
+        actionable: actionable ?? true
       };
       items.unshift(item);
       if (hookSocket) {
@@ -103633,6 +103684,40 @@ function makeInbox() {
 }
 var InboxLive = Layer_exports.succeed(Inbox, makeInbox());
 
+// src/enrichment/repo-attribution.ts
+import { execFileSync } from "child_process";
+import { dirname, resolve } from "path";
+var cache = /* @__PURE__ */ new Map();
+function deriveRepoAttribution(cwd) {
+  const cached3 = cache.get(cwd);
+  if (cached3) return cached3;
+  let repoKey;
+  let repoRoot;
+  let worktree;
+  try {
+    const commonRaw = execFileSync(
+      "git",
+      ["-C", cwd, "rev-parse", "--git-common-dir"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }
+    ).trim();
+    const toplevelRaw = execFileSync(
+      "git",
+      ["-C", cwd, "rev-parse", "--show-toplevel"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }
+    ).trim();
+    repoKey = resolve(cwd, commonRaw);
+    worktree = resolve(cwd, toplevelRaw);
+    repoRoot = repoKey.endsWith("/.git") ? repoKey.slice(0, -5) : dirname(repoKey);
+  } catch {
+    repoKey = cwd;
+    repoRoot = cwd;
+    worktree = cwd;
+  }
+  const result3 = { repoKey, repoRoot, worktree };
+  cache.set(cwd, result3);
+  return result3;
+}
+
 // src/state/session.ts
 var BLOATED_RESULT_FIELDS = ["structured_patch"];
 function stripBloatedFields(result3) {
@@ -103649,6 +103734,8 @@ function stripBloatedFields(result3) {
 function createSession(sessionId, cwd, source) {
   const trimmed = cwd.replace(/\/+$/, "");
   const project = trimmed.split("/").pop() || trimmed || cwd;
+  const { repoKey, repoRoot, worktree } = deriveRepoAttribution(cwd);
+  const role = source === "pi" ? "worker" : "interactive";
   return {
     sessionId,
     cwd,
@@ -103662,6 +103749,11 @@ function createSession(sessionId, cwd, source) {
     modelName: null,
     tmuxSession: null,
     source: source ?? null,
+    repoKey,
+    repoRoot,
+    worktree,
+    role,
+    readOnly: false,
     startTime: Date.now(),
     lastEventTime: Date.now(),
     tokenUsage: null,
@@ -103783,6 +103875,11 @@ function updateMeta(s, opts) {
   if (opts.modelName) s.modelName = opts.modelName;
   if (opts.tmuxSession && !s.tmuxSession) s.tmuxSession = opts.tmuxSession;
   if (opts.piSessionFile) s.piSessionFile = opts.piSessionFile;
+  if (opts.repoKey) s.repoKey = opts.repoKey;
+  if (opts.repoRoot) s.repoRoot = opts.repoRoot;
+  if (opts.worktree) s.worktree = opts.worktree;
+  if (opts.role) s.role = opts.role;
+  if (opts.readOnly) s.readOnly = opts.readOnly;
   return [{ op: "set_meta", ...opts }];
 }
 function currentTurnNode(s) {
@@ -105440,12 +105537,17 @@ var handleSessionStart = (ctx) => Effect_exports.gen(function* () {
   }
   const s = ensureSession(store, ctx.sessionId, ctx.cwd, ctx.data.tmux_session, ctx.data.source);
   const displayName = s.displayName ? void 0 : (yield* lookupDisplayName(ctx.cwd, ctx.sessionId)) ?? void 0;
+  const dataRec = ctx.data;
   patches.push(...updateMeta(s, {
     pid: ctx.pid ?? void 0,
     slug: ctx.data.slug ?? void 0,
     displayName,
     branch: ctx.data.branch ?? void 0,
-    tmuxSession: ctx.data.tmux_session ?? void 0
+    tmuxSession: ctx.data.tmux_session ?? void 0,
+    role: typeof dataRec.role === "string" ? dataRec.role : void 0,
+    repoKey: typeof dataRec.repo_key === "string" ? dataRec.repo_key : void 0,
+    repoRoot: typeof dataRec.repo_root === "string" ? dataRec.repo_root : void 0,
+    worktree: typeof dataRec.worktree === "string" ? dataRec.worktree : void 0
   }));
   const modelId = ctx.data.model;
   if (modelId && typeof modelId === "string" && modelId.length > 0) {
@@ -105529,14 +105631,30 @@ var handleTurnClose = (ctx) => Effect_exports.gen(function* () {
   patches.push(...closeTurn(session, closeOpts));
   const turn = session.currentTurn;
   const snippet = stopText ? stopText.replace(/[\n\r\t]+/g, " ").substring(0, 80) : "idle";
-  inbox.add(
-    "idle",
-    ctx.sessionId,
-    session.project,
-    session.slug || ctx.sessionId.substring(0, 8),
-    snippet,
-    { turn, snippet }
-  );
+  if (session.role !== "worker" && session.role !== "coordinator") {
+    inbox.add(
+      "idle",
+      ctx.sessionId,
+      session.project,
+      session.slug || ctx.sessionId.substring(0, 8),
+      snippet,
+      { turn, snippet }
+    );
+  }
+  if (stopReason === "error" || stopReason === "aborted") {
+    const faultSummary = stopText ? `pi turn ended (${stopReason}): ${stopText}`.substring(0, 80) : `pi turn ended: ${stopReason}`;
+    inbox.add(
+      "attention",
+      ctx.sessionId,
+      session.project,
+      session.slug || ctx.sessionId.substring(0, 8),
+      faultSummary,
+      { turn, stopReason, stopText },
+      void 0,
+      false
+      // not actionable — read-only visibility
+    );
+  }
   return patches;
 });
 var handleStop = (ctx) => Effect_exports.gen(function* () {
@@ -105561,7 +105679,9 @@ var handleStop = (ctx) => Effect_exports.gen(function* () {
   const turn = session.currentTurn;
   const stopText = ctx.data.stop_text;
   const snippet = stopText ? stopText.replace(/[\n\r\t]+/g, " ").substring(0, 80) : "idle";
-  inbox.add("idle", ctx.sessionId, session.project, session.slug || ctx.sessionId.substring(0, 8), snippet, { turn, snippet });
+  if (session.role !== "worker" && session.role !== "coordinator") {
+    inbox.add("idle", ctx.sessionId, session.project, session.slug || ctx.sessionId.substring(0, 8), snippet, { turn, snippet });
+  }
   return patches;
 });
 var handleSubagentStart = (ctx) => Effect_exports.gen(function* () {
@@ -105883,16 +106003,27 @@ function handleEvent(eventName, sessionId, cwd, data, pid, hookSocket) {
       }
       const freshDisplayName = yield* lookupDisplayName(cwd, sessionId);
       const displayName = freshDisplayName && freshDisplayName !== existing.displayName ? freshDisplayName : void 0;
+      const dataRec = data;
       preamblePatches.push(...updateMeta(existing, {
         pid: pid ?? void 0,
         slug: data.slug ?? void 0,
         displayName,
         branch: data.branch ?? void 0,
-        tmuxSession: data.tmux_session ?? void 0
+        tmuxSession: data.tmux_session ?? void 0,
+        role: typeof dataRec.role === "string" ? dataRec.role : void 0,
+        repoKey: typeof dataRec.repo_key === "string" ? dataRec.repo_key : void 0,
+        repoRoot: typeof dataRec.repo_root === "string" ? dataRec.repo_root : void 0,
+        worktree: typeof dataRec.worktree === "string" ? dataRec.worktree : void 0
       }));
     }
     const handler = dispatch[eventName];
-    const eventPatches = handler ? yield* handler({ sessionId, cwd, data, pid, hookSocket }) : [];
+    const eventPatches = handler ? yield* handler({ sessionId, cwd, data, pid, hookSocket }) : (() => {
+      process.stderr.write(
+        `[event-handler] unhandled hook event: ${eventName}
+`
+      );
+      return [];
+    })();
     return [...preamblePatches, ...eventPatches];
   });
 }
@@ -105911,13 +106042,13 @@ var MermaidRpcServer = class {
     this.server = createServer(this.handleConnection.bind(this));
   }
   start() {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve2, reject) => {
       this.server.on("error", (err) => {
         reject(err);
       });
       this.server.listen(this.port, this.host, () => {
         console.log(`[mermaid-rpc] Listening on ${this.host}:${this.port}`);
-        resolve();
+        resolve2();
       });
     });
   }
@@ -106046,630 +106177,6 @@ var MermaidRpcServer = class {
     };
   }
 };
-
-// src/services/config.ts
-import { homedir as homedir2 } from "os";
-import { join as join2 } from "path";
-var ServerConfig = ServiceMap_exports.Service("ServerConfig");
-var ServerConfigLive = Layer_exports.effect(
-  ServerConfig,
-  Effect_exports.sync(() => {
-    const home = process.env.HOME || homedir2();
-    const stateDir = join2(home, ".local", "state");
-    const args2 = process.argv.slice(2);
-    const piIndex = args2.indexOf("--pi");
-    const piEnabled = piIndex >= 0;
-    let piCwd;
-    let piThinkingLevel;
-    for (let i = 0; i < args2.length; i++) {
-      if (args2[i] === "--pi-cwd" && i + 1 < args2.length) {
-        piCwd = args2[i + 1];
-        i++;
-      } else if (args2[i] === "--pi-thinking" && i + 1 < args2.length) {
-        piThinkingLevel = args2[i + 1];
-        i++;
-      }
-    }
-    return {
-      hookSocketPath: process.env.GRAVITY_HOOK_SOCK ?? join2(stateDir, "gravity-hooks.sock"),
-      terminalSocketPath: process.env.GRAVITY_TERMINAL_SOCK ?? join2(stateDir, "gravity-terminal.sock"),
-      pidFilePath: process.env.GRAVITY_PID_FILE ?? join2(stateDir, "gravity-server.pid"),
-      logPath: process.env.GRAVITY_LOG_PATH || "/tmp/gravity-server.log",
-      logMaxSize: parseInt(process.env.GRAVITY_LOG_MAX_SIZE || "2097152", 10),
-      piEnabled,
-      piCwd,
-      piThinkingLevel
-    };
-  })
-);
-
-// src/services/terminal.ts
-var MAX_QUEUED_MESSAGES = 200;
-var Terminal = ServiceMap_exports.Service("Terminal");
-function makeTerminal(logFn) {
-  let connections = [];
-  const doLog = logFn ?? (() => {
-  });
-  const writeToConnection = (conn, json) => {
-    if (conn.socket.destroyed || !conn.socket.writable) return;
-    if (conn.draining) {
-      conn.writeQueue.push(json);
-      enforceQueueLimit(conn);
-      return;
-    }
-    try {
-      const flushed = conn.socket.write(json);
-      if (!flushed) {
-        conn.draining = true;
-      }
-    } catch (err) {
-      doLog(`Terminal write error: ${err.message}`, "error");
-    }
-  };
-  const flushQueue = (conn) => {
-    while (conn.writeQueue.length > 0) {
-      if (conn.socket.destroyed || !conn.socket.writable) {
-        conn.writeQueue.length = 0;
-        return;
-      }
-      const json = conn.writeQueue.shift();
-      try {
-        const flushed = conn.socket.write(json);
-        if (!flushed) {
-          conn.draining = true;
-          return;
-        }
-      } catch (err) {
-        doLog(`Terminal flush error: ${err.message}`, "error");
-        conn.writeQueue.length = 0;
-        return;
-      }
-    }
-  };
-  const enforceQueueLimit = (conn) => {
-    if (conn.writeQueue.length > MAX_QUEUED_MESSAGES) {
-      doLog(`Terminal write queue exceeded ${MAX_QUEUED_MESSAGES} \u2014 disconnecting stuck client`, "warn");
-      conn.writeQueue.length = 0;
-      conn.socket.destroy();
-    }
-  };
-  return {
-    addConnection: (socket) => {
-      const conn = {
-        socket,
-        subscribedSessions: /* @__PURE__ */ new Set(),
-        capabilities: /* @__PURE__ */ new Set(),
-        writeQueue: [],
-        draining: false,
-        inboxWasNonEmpty: false
-      };
-      connections.push(conn);
-      socket.on("close", () => {
-        connections = connections.filter((c) => c !== conn);
-      });
-      socket.on("error", (err) => {
-        doLog(`Terminal connection error: ${err.message}`, "error");
-        socket.destroy();
-      });
-      socket.on("drain", () => {
-        conn.draining = false;
-        flushQueue(conn);
-      });
-      return conn;
-    },
-    broadcast: (message) => {
-      const json = JSON.stringify(message) + "\n";
-      for (const conn of [...connections]) {
-        writeToConnection(conn, json);
-      }
-    },
-    sendTo: (conn, message) => {
-      writeToConnection(conn, JSON.stringify(message) + "\n");
-    },
-    sendToSubscribers: (sessionId, message) => {
-      const json = JSON.stringify(message) + "\n";
-      for (const conn of [...connections]) {
-        if (conn.subscribedSessions.has(sessionId)) {
-          writeToConnection(conn, json);
-        }
-      }
-    },
-    unsubscribeAll: (sessionId) => {
-      for (const conn of connections) {
-        conn.subscribedSessions.delete(sessionId);
-      }
-    },
-    hasCapableTerminal: (capability) => connections.some((c) => c.capabilities.has(capability)),
-    connectionCount: () => connections.length,
-    // Pull mode: send lightweight signal (no payload)
-    signalChanged: (what, sessionId, seq) => {
-      const json = JSON.stringify({
-        type: "state-changed",
-        what,
-        ...sessionId ? { sessionId } : {},
-        seq: seq ?? 0
-      }) + "\n";
-      for (const conn of [...connections]) {
-        writeToConnection(conn, json);
-      }
-    },
-    signalChangedTo: (conn, what, sessionId, seq) => {
-      const json = JSON.stringify({
-        type: "state-changed",
-        what,
-        ...sessionId ? { sessionId } : {},
-        seq: seq ?? 0
-      }) + "\n";
-      writeToConnection(conn, json);
-    }
-  };
-}
-var TerminalLive = Layer_exports.succeed(Terminal, makeTerminal());
-
-// src/pi-driver/spawn.ts
-import { spawn } from "child_process";
-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2 } from "fs";
-import { homedir as homedir3 } from "os";
-import { join as join3 } from "path";
-
-// src/pi-driver/protocol.ts
-function parseJsonLine(line) {
-  try {
-    const parsed = JSON.parse(line);
-    if (parsed && typeof parsed === "object" && "type" in parsed) {
-      if (parsed.type === "response" && typeof parsed.command === "string") {
-        return { kind: "response", response: parsed };
-      }
-      return { kind: "event", event: parsed };
-    }
-    return { kind: "event", event: { type: "unknown", ...parsed } };
-  } catch {
-    return { kind: "event", event: { type: "unknown", raw: line } };
-  }
-}
-var requestCounter = 0;
-function nextRequestId() {
-  return `gr-${process.pid}-${++requestCounter}`;
-}
-var PiProtocol = class _PiProtocol {
-  buffer = "";
-  onEvent;
-  onStderr;
-  commandWriter = null;
-  /** In-flight RPC requests awaiting a matching response (keyed by request id). */
-  pendingRequests = /* @__PURE__ */ new Map();
-  constructor(options) {
-    this.onEvent = options.onEvent;
-    this.onStderr = options.onStderr ?? ((line) => {
-      process.stderr.write(`[pi] ${line}
-`);
-    });
-  }
-  /**
-   * Feed a text chunk from pi's stdout into the parser.
-   * Dispatches events to onEvent and responses to outstanding request
-   * promises (matched by id when present).
-   */
-  feed(data) {
-    this.buffer += data;
-    let newlineIdx;
-    while ((newlineIdx = this.buffer.indexOf("\n")) !== -1) {
-      const line = this.buffer.substring(0, newlineIdx).trim();
-      this.buffer = this.buffer.substring(newlineIdx + 1);
-      if (line.length === 0) continue;
-      const parsed = parseJsonLine(line);
-      if (parsed.kind === "response") {
-        this.dispatchResponse(parsed.response);
-      } else {
-        this.onEvent({ event: parsed.event, raw: line });
-      }
-    }
-  }
-  /** Route a response to its waiter, or drop it if unmatched. */
-  dispatchResponse(response) {
-    const id = response.id;
-    if (!id) {
-      return;
-    }
-    const pending = this.pendingRequests.get(id);
-    if (!pending) return;
-    this.pendingRequests.delete(id);
-    clearTimeout(pending.timer);
-    pending.resolve(response);
-  }
-  /**
-   * Send an RPC command with request/response correlation. Returns a promise
-   * resolving to pi's response. Times out after `timeoutMs` (default 10s).
-   *
-   * Use for commands where the caller cares about the response: get_state,
-   * get_session_stats, set_model, etc. For fire-and-forget commands use
-   * `sendCommand`.
-   */
-  request(command, timeoutMs = 1e4) {
-    if (!this.commandWriter) {
-      return Promise.reject(new Error("pi command writer not connected"));
-    }
-    const id = nextRequestId();
-    const line = _PiProtocol.formatCommand(command, id);
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(id);
-        reject(new Error(`pi RPC ${command.type} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      this.pendingRequests.set(id, { resolve, reject, timer });
-      this.commandWriter(line);
-    });
-  }
-  /**
-   * Feed a text chunk from pi's stderr.
-   * Passes through onStderr callback.
-   */
-  feedStderr(data) {
-    const lines = data.split("\n");
-    for (const line of lines) {
-      if (line.trim().length > 0) {
-        this.onStderr(line);
-      }
-    }
-  }
-  /**
-   * Flush any remaining buffered content (should be called when stdin closes).
-   * Returns the remaining buffer if any.
-   */
-  flush() {
-    const remaining = this.buffer;
-    this.buffer = "";
-    return remaining;
-  }
-  /**
-   * Set the command writer (called by spawn.ts to connect to subprocess stdin).
-   */
-  setCommandWriter(writer) {
-    this.commandWriter = writer;
-  }
-  /**
-   * Send a command to pi's stdin.
-   */
-  sendCommand(command) {
-    if (this.commandWriter) {
-      this.commandWriter(_PiProtocol.formatCommand(command));
-    }
-  }
-  /**
-   * Format any PiCommand to a JSONL string. If `id` is provided, it is
-   * attached for request/response correlation (pi echoes it on the
-   * matching `{type:"response", id}` line).
-   */
-  static formatCommand(cmd, id) {
-    const withId = (obj) => id ? { ...obj, id } : obj;
-    switch (cmd.type) {
-      case "prompt": {
-        const base = { type: "prompt", message: cmd.message };
-        if (cmd.images && cmd.images.length > 0) base.images = cmd.images;
-        return JSON.stringify(withId(base)) + "\n";
-      }
-      case "steer":
-        return JSON.stringify(withId({ type: "steer", message: cmd.message })) + "\n";
-      case "abort":
-        return JSON.stringify(withId({ type: "abort" })) + "\n";
-      case "set_thinking_level":
-        return JSON.stringify(withId({ type: "set_thinking_level", level: cmd.level })) + "\n";
-      case "set_session_name":
-        return JSON.stringify(withId({ type: "set_session_name", name: cmd.name })) + "\n";
-      case "set_model":
-        return JSON.stringify(withId({ type: "set_model", provider: cmd.provider, modelId: cmd.modelId })) + "\n";
-      case "get_session_stats":
-        return JSON.stringify(withId({ type: "get_session_stats" })) + "\n";
-      case "get_state":
-        return JSON.stringify(withId({ type: "get_state" })) + "\n";
-      case "get_commands":
-        return JSON.stringify(withId({ type: "get_commands" })) + "\n";
-      case "get_available_models":
-        return JSON.stringify(withId({ type: "get_available_models" })) + "\n";
-      case "switch_session":
-        return JSON.stringify(withId({ type: "switch_session", sessionPath: cmd.sessionPath })) + "\n";
-      case "compact": {
-        const body = { type: "compact" };
-        if (cmd.customInstructions) body.customInstructions = cmd.customInstructions;
-        return JSON.stringify(withId(body)) + "\n";
-      }
-      case "new_session": {
-        const body = { type: "new_session" };
-        if (cmd.parentSession) body.parentSession = cmd.parentSession;
-        return JSON.stringify(withId(body)) + "\n";
-      }
-      case "extension_ui_response": {
-        const body = { type: "extension_ui_response", id: cmd.id };
-        if (cmd.value !== void 0) body.value = cmd.value;
-        if (cmd.confirmed !== void 0) body.confirmed = cmd.confirmed;
-        if (cmd.cancelled !== void 0) body.cancelled = cmd.cancelled;
-        return JSON.stringify(body) + "\n";
-      }
-    }
-  }
-  /**
-   * Format a prompt command for pi's stdin. Pi expects { message, images? } —
-   * field name is `message`, not `text` (verified against pi 0.74).
-   */
-  static formatPrompt(text, images) {
-    const cmd = { type: "prompt", message: text };
-    if (images && images.length > 0) {
-      cmd.images = images;
-    }
-    return JSON.stringify(cmd) + "\n";
-  }
-  /**
-   * Format a steer command for pi's stdin.
-   */
-  static formatSteer(text) {
-    return JSON.stringify({ type: "steer", message: text }) + "\n";
-  }
-  /**
-   * Format an abort command for pi's stdin.
-   */
-  static formatAbort() {
-    return JSON.stringify({ type: "abort" }) + "\n";
-  }
-  /**
-   * Format a set_thinking_level command for pi's stdin.
-   */
-  static formatThinkingLevel(level) {
-    return JSON.stringify({ type: "set_thinking_level", level }) + "\n";
-  }
-  /**
-   * Format a set_session_name command for pi's stdin.
-   */
-  static formatSessionName(name) {
-    return JSON.stringify({ type: "set_session_name", name }) + "\n";
-  }
-  /**
-   * Format a set_model command for pi's stdin.
-   * Pi expects { type: "set_model", provider, modelId } (verified against
-   * pi 0.74 RPC docs).
-   */
-  static formatSetModel(provider, modelId) {
-    return JSON.stringify({ type: "set_model", provider, modelId }) + "\n";
-  }
-};
-
-// src/pi-driver/spawn.ts
-var RAW_LOG = process.env.GRAVITY_PI_RAW_LOG;
-function normalizePiCommands(commands) {
-  const raw = Array.isArray(commands) ? commands : [];
-  const str = (v) => typeof v === "string" && v.length > 0 ? v : void 0;
-  return raw.map((c) => {
-    const r = c ?? {};
-    const si = r.sourceInfo ?? {};
-    const loc = str(r.location) ?? str(si.scope);
-    const path = str(r.path) ?? str(si.path);
-    const description = str(r.description);
-    return {
-      name: String(r.name ?? ""),
-      source: str(r.source) ?? "extension",
-      ...description ? { description } : {},
-      ...loc ? { location: loc } : {},
-      ...path ? { path } : {}
-    };
-  });
-}
-function normalizePiModels(models) {
-  const raw = Array.isArray(models) ? models : [];
-  const str = (v) => typeof v === "string" && v.length > 0 ? v : void 0;
-  return raw.map((m) => {
-    const r = m ?? {};
-    const name = str(r.name);
-    const contextWindow = typeof r.contextWindow === "number" ? r.contextWindow : void 0;
-    return {
-      id: String(r.id ?? ""),
-      provider: str(r.provider) ?? "",
-      ...name ? { name } : {},
-      ...contextWindow !== void 0 ? { contextWindow } : {}
-    };
-  });
-}
-var PI_BINARY = process.env.PI_BINARY_PATH ?? "pi";
-var DEFAULT_THINKING_LEVEL = "medium";
-var DEFAULT_PI_SESSION_DIR = join3(homedir3(), ".local", "state", "gravity-pi-sessions");
-function spawnPiSync(options = {}) {
-  const cwd = options.cwd ?? process.cwd();
-  const thinkingLevel = options.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
-  const sessionDir = options.sessionDir ?? DEFAULT_PI_SESSION_DIR;
-  try {
-    mkdirSync2(sessionDir, { recursive: true });
-  } catch (err) {
-    process.stderr.write(`[pi-adapter] could not create session dir ${sessionDir}: ${err.message}
-`);
-  }
-  const args2 = [
-    "--mode",
-    "rpc",
-    "--session-dir",
-    sessionDir,
-    "--thinking",
-    thinkingLevel
-  ];
-  if (options.resumeSession) {
-    args2.push("--session", options.resumeSession);
-  }
-  const env = { ...process.env };
-  if (options.model) env["PI_MODEL"] = options.model;
-  if (options.provider) env["PI_PROVIDER"] = options.provider;
-  const child = spawn(PI_BINARY, args2, {
-    cwd,
-    env,
-    stdio: ["pipe", "pipe", "pipe"]
-  });
-  let stopped = false;
-  let onPiEvent = null;
-  const proto = new PiProtocol({
-    onEvent: (evt) => {
-      if (onPiEvent) {
-        onPiEvent(evt);
-      }
-    },
-    onStderr: (line) => {
-      process.stderr.write(`[pi] ${line}
-`);
-    }
-  });
-  child.stdout?.on("data", (chunk) => {
-    const s = chunk.toString();
-    if (RAW_LOG) {
-      try {
-        appendFileSync2(RAW_LOG, s);
-      } catch {
-      }
-    }
-    proto.feed(s);
-  });
-  child.stderr?.on("data", (chunk) => {
-    proto.feedStderr(chunk.toString());
-  });
-  child.on("exit", (code, signal) => {
-    if (!stopped) {
-      stopped = true;
-      const msg = code !== null ? `pi subprocess exited with code ${code}` : signal ? `pi subprocess killed by signal ${signal}` : "pi subprocess exited";
-      process.stderr.write(`[pi] ${msg}
-`);
-    }
-  });
-  child.on("error", (err) => {
-    if (!stopped) {
-      stopped = true;
-      process.stderr.write(`[pi] subprocess error: ${err.message}
-`);
-    }
-  });
-  proto.setCommandWriter((line) => {
-    if (child.stdin && !child.stdin.destroyed) {
-      child.stdin.write(line);
-    }
-  });
-  const driver = {
-    prompt: (text, images) => {
-      return new Promise((resolve, reject) => {
-        if (stopped) {
-          reject(new Error("pi subprocess already stopped"));
-          return;
-        }
-        if (child.stdin && !child.stdin.destroyed) {
-          const line = PiProtocol.formatPrompt(text, images);
-          child.stdin.write(line, (err) => {
-            if (err) reject(err);
-            else resolve();
-          });
-        } else {
-          reject(new Error("pi stdin unavailable"));
-        }
-      });
-    },
-    steer: (text) => {
-      if (stopped || !child.stdin || child.stdin.destroyed) return;
-      child.stdin.write(PiProtocol.formatSteer(text));
-    },
-    abort: () => {
-      if (stopped || !child.stdin || child.stdin.destroyed) return;
-      child.stdin.write(PiProtocol.formatAbort());
-    },
-    setThinkingLevel: (level) => {
-      if (stopped || !child.stdin || child.stdin.destroyed) return;
-      child.stdin.write(PiProtocol.formatThinkingLevel(level));
-    },
-    setSessionName: (name) => {
-      if (stopped || !child.stdin || child.stdin.destroyed) return;
-      child.stdin.write(PiProtocol.formatSessionName(name));
-    },
-    setModel: (provider, modelId) => {
-      if (stopped || !child.stdin || child.stdin.destroyed) return;
-      child.stdin.write(PiProtocol.formatSetModel(provider, modelId));
-    },
-    getSessionStats: async () => {
-      if (stopped) throw new Error("pi subprocess already stopped");
-      const response = await proto.request({ type: "get_session_stats" });
-      if (!response.success) {
-        throw new Error(`pi get_session_stats failed: ${response.error ?? "unknown error"}`);
-      }
-      return response.data ?? {};
-    },
-    getState: async () => {
-      if (stopped) throw new Error("pi subprocess already stopped");
-      const response = await proto.request({ type: "get_state" });
-      if (!response.success) {
-        throw new Error(`pi get_state failed: ${response.error ?? "unknown error"}`);
-      }
-      return response.data ?? {};
-    },
-    getCommands: async () => {
-      if (stopped) throw new Error("pi subprocess already stopped");
-      const response = await proto.request({ type: "get_commands" });
-      if (!response.success) {
-        throw new Error(`pi get_commands failed: ${response.error ?? "unknown error"}`);
-      }
-      const data = response.data ?? {};
-      return normalizePiCommands(data.commands);
-    },
-    getAvailableModels: async () => {
-      if (stopped) throw new Error("pi subprocess already stopped");
-      const response = await proto.request({ type: "get_available_models" });
-      if (!response.success) {
-        throw new Error(`pi get_available_models failed: ${response.error ?? "unknown error"}`);
-      }
-      const data = response.data ?? {};
-      return normalizePiModels(data.models);
-    },
-    switchSession: async (sessionPath) => {
-      if (stopped) throw new Error("pi subprocess already stopped");
-      const response = await proto.request({ type: "switch_session", sessionPath });
-      if (!response.success) {
-        throw new Error(`pi switch_session failed: ${response.error ?? "unknown error"}`);
-      }
-      const data = response.data ?? {};
-      return data.cancelled !== true;
-    },
-    sendExtensionUIResponse: (payload) => {
-      if (stopped || !child.stdin || child.stdin.destroyed) return;
-      proto.sendCommand({ type: "extension_ui_response", ...payload });
-    },
-    compact: async (customInstructions) => {
-      if (stopped) throw new Error("pi subprocess already stopped");
-      const response = await proto.request(
-        customInstructions ? { type: "compact", customInstructions } : { type: "compact" },
-        6e4
-        // compaction can take a while (extra LLM call)
-      );
-      if (!response.success) {
-        throw new Error(`pi compact failed: ${response.error ?? "unknown error"}`);
-      }
-      const data = response.data ?? {};
-      return data;
-    },
-    newSession: async (parentSession) => {
-      if (stopped) throw new Error("pi subprocess already stopped");
-      const response = await proto.request(
-        parentSession ? { type: "new_session", parentSession } : { type: "new_session" }
-      );
-      if (!response.success) {
-        throw new Error(`pi new_session failed: ${response.error ?? "unknown error"}`);
-      }
-      const data = response.data ?? {};
-      return data.cancelled !== true;
-    },
-    stop: async () => {
-      if (stopped) return;
-      stopped = true;
-      if (!child.killed) {
-        child.kill("SIGTERM");
-      }
-      if (child.stdin && !child.stdin.destroyed) {
-        child.stdin.end();
-      }
-    },
-    setEventHandler: (h) => {
-      onPiEvent = h;
-    }
-  };
-  return { driver, process: child };
-}
 
 // src/pi-driver/turn-accumulator.ts
 function createAccState(sessionId, cwd, effortLevel = "medium") {
@@ -107146,7 +106653,46 @@ function translatePiEvent(event, state) {
       );
       return { kind: "noop" };
     }
+    // ── Ambient-emitter (pi envelope) vocabulary ──────────────────────────
+    //
+    // These event types live on the pi extension emitter channel, not in the
+    // RPC vocabulary above. They are reached when a `PiEventEnvelope` arrives
+    // on the hook socket and is routed through `translatePiEvent` by
+    // gravity-server's envelope ingest path. There is no spawn code in that
+    // path, so each one synthesizes its own lifecycle hookEvent via the
+    // existing helper functions below — no eager server-side SessionStart
+    // injection the way `startPiSession` does for RPC-driven sessions.
+    case "session_start": {
+      const result3 = createSessionStart(state);
+      return { kind: "emit", results: [result3] };
+    }
+    case "session_shutdown": {
+      const result3 = createSessionEnd(state);
+      return { kind: "emit", results: [result3] };
+    }
+    case "session_compact": {
+      const e = event;
+      process.stderr.write(
+        `[pi-adapter] session_compact reason=${e.reason ?? "?"} aborted=${e.aborted ?? false} tokensBefore=${e.tokensBefore ?? "?"}
+`
+      );
+      const hookData = {
+        cwd: state.cwd,
+        compaction_reason: e.reason ?? "unknown",
+        compaction_aborted: e.aborted === true,
+        compaction_tokens_before: typeof e.tokensBefore === "number" ? e.tokensBefore : null,
+        compaction_summary: typeof e.summary === "string" ? e.summary : null
+      };
+      return {
+        kind: "emit",
+        results: [{ hookEvent: "Compaction", hookData, sessionId: state.sessionId }]
+      };
+    }
     default:
+      process.stderr.write(
+        `[pi-adapter] unmapped pi event type: ${event.type ?? "unknown"}
+`
+      );
       return { kind: "noop" };
   }
 }
@@ -107159,6 +106705,649 @@ function createSessionEnd(state) {
     },
     sessionId: state.sessionId
   };
+}
+function createSessionStart(state) {
+  return {
+    hookEvent: "SessionStart",
+    hookData: {
+      session_id: state.sessionId,
+      cwd: state.cwd,
+      branch: state.branch ?? void 0,
+      model: state.modelName ?? void 0,
+      effort_level: state.effortLevel
+    },
+    sessionId: state.sessionId
+  };
+}
+
+// src/services/config.ts
+import { homedir as homedir2 } from "os";
+import { join as join2 } from "path";
+var ServerConfig = ServiceMap_exports.Service("ServerConfig");
+var ServerConfigLive = Layer_exports.effect(
+  ServerConfig,
+  Effect_exports.sync(() => {
+    const home = process.env.HOME || homedir2();
+    const stateDir = join2(home, ".local", "state");
+    const args2 = process.argv.slice(2);
+    const piIndex = args2.indexOf("--pi");
+    const piEnabled = piIndex >= 0;
+    let piCwd;
+    let piThinkingLevel;
+    for (let i = 0; i < args2.length; i++) {
+      if (args2[i] === "--pi-cwd" && i + 1 < args2.length) {
+        piCwd = args2[i + 1];
+        i++;
+      } else if (args2[i] === "--pi-thinking" && i + 1 < args2.length) {
+        piThinkingLevel = args2[i + 1];
+        i++;
+      }
+    }
+    return {
+      hookSocketPath: process.env.GRAVITY_HOOK_SOCK ?? join2(stateDir, "gravity-hooks.sock"),
+      terminalSocketPath: process.env.GRAVITY_TERMINAL_SOCK ?? join2(stateDir, "gravity-terminal.sock"),
+      pidFilePath: process.env.GRAVITY_PID_FILE ?? join2(stateDir, "gravity-server.pid"),
+      logPath: process.env.GRAVITY_LOG_PATH || "/tmp/gravity-server.log",
+      logMaxSize: parseInt(process.env.GRAVITY_LOG_MAX_SIZE || "2097152", 10),
+      piEnabled,
+      piCwd,
+      piThinkingLevel
+    };
+  })
+);
+
+// src/services/terminal.ts
+var MAX_QUEUED_MESSAGES = 200;
+var Terminal = ServiceMap_exports.Service("Terminal");
+function makeTerminal(logFn) {
+  let connections = [];
+  const doLog = logFn ?? (() => {
+  });
+  const writeToConnection = (conn, json) => {
+    if (conn.socket.destroyed || !conn.socket.writable) return;
+    if (conn.draining) {
+      conn.writeQueue.push(json);
+      enforceQueueLimit(conn);
+      return;
+    }
+    try {
+      const flushed = conn.socket.write(json);
+      if (!flushed) {
+        conn.draining = true;
+      }
+    } catch (err) {
+      doLog(`Terminal write error: ${err.message}`, "error");
+    }
+  };
+  const flushQueue = (conn) => {
+    while (conn.writeQueue.length > 0) {
+      if (conn.socket.destroyed || !conn.socket.writable) {
+        conn.writeQueue.length = 0;
+        return;
+      }
+      const json = conn.writeQueue.shift();
+      try {
+        const flushed = conn.socket.write(json);
+        if (!flushed) {
+          conn.draining = true;
+          return;
+        }
+      } catch (err) {
+        doLog(`Terminal flush error: ${err.message}`, "error");
+        conn.writeQueue.length = 0;
+        return;
+      }
+    }
+  };
+  const enforceQueueLimit = (conn) => {
+    if (conn.writeQueue.length > MAX_QUEUED_MESSAGES) {
+      doLog(`Terminal write queue exceeded ${MAX_QUEUED_MESSAGES} \u2014 disconnecting stuck client`, "warn");
+      conn.writeQueue.length = 0;
+      conn.socket.destroy();
+    }
+  };
+  return {
+    addConnection: (socket) => {
+      const conn = {
+        socket,
+        subscribedSessions: /* @__PURE__ */ new Set(),
+        capabilities: /* @__PURE__ */ new Set(),
+        writeQueue: [],
+        draining: false,
+        inboxWasNonEmpty: false,
+        sessionSeqCursor: /* @__PURE__ */ new Map()
+      };
+      connections.push(conn);
+      socket.on("close", () => {
+        connections = connections.filter((c) => c !== conn);
+      });
+      socket.on("error", (err) => {
+        doLog(`Terminal connection error: ${err.message}`, "error");
+        socket.destroy();
+      });
+      socket.on("drain", () => {
+        conn.draining = false;
+        flushQueue(conn);
+      });
+      return conn;
+    },
+    broadcast: (message) => {
+      const json = JSON.stringify(message) + "\n";
+      for (const conn of [...connections]) {
+        writeToConnection(conn, json);
+      }
+    },
+    sendTo: (conn, message) => {
+      writeToConnection(conn, JSON.stringify(message) + "\n");
+    },
+    sendToSubscribers: (sessionId, message) => {
+      const json = JSON.stringify(message) + "\n";
+      for (const conn of [...connections]) {
+        if (conn.subscribedSessions.has(sessionId)) {
+          writeToConnection(conn, json);
+        }
+      }
+    },
+    unsubscribeAll: (sessionId) => {
+      for (const conn of connections) {
+        conn.subscribedSessions.delete(sessionId);
+      }
+    },
+    hasCapableTerminal: (capability) => connections.some((c) => c.capabilities.has(capability)),
+    connectionCount: () => connections.length,
+    // Pull mode: send lightweight signal (no payload)
+    signalChanged: (what, sessionId, seq) => {
+      const json = JSON.stringify({
+        type: "state-changed",
+        what,
+        ...sessionId ? { sessionId } : {},
+        seq: seq ?? 0
+      }) + "\n";
+      for (const conn of [...connections]) {
+        writeToConnection(conn, json);
+      }
+    },
+    signalChangedTo: (conn, what, sessionId, seq) => {
+      const json = JSON.stringify({
+        type: "state-changed",
+        what,
+        ...sessionId ? { sessionId } : {},
+        seq: seq ?? 0
+      }) + "\n";
+      writeToConnection(conn, json);
+    }
+  };
+}
+var TerminalLive = Layer_exports.succeed(Terminal, makeTerminal());
+
+// src/pi-driver/spawn.ts
+import { spawn } from "child_process";
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2 } from "fs";
+import { homedir as homedir3 } from "os";
+import { join as join3 } from "path";
+
+// src/pi-driver/protocol.ts
+function parseJsonLine(line) {
+  try {
+    const parsed = JSON.parse(line);
+    if (parsed && typeof parsed === "object" && "type" in parsed) {
+      if (parsed.type === "response" && typeof parsed.command === "string") {
+        return { kind: "response", response: parsed };
+      }
+      return { kind: "event", event: parsed };
+    }
+    return { kind: "event", event: { type: "unknown", ...parsed } };
+  } catch {
+    return { kind: "event", event: { type: "unknown", raw: line } };
+  }
+}
+var requestCounter = 0;
+function nextRequestId() {
+  return `gr-${process.pid}-${++requestCounter}`;
+}
+var PiProtocol = class _PiProtocol {
+  buffer = "";
+  onEvent;
+  onStderr;
+  commandWriter = null;
+  /** In-flight RPC requests awaiting a matching response (keyed by request id). */
+  pendingRequests = /* @__PURE__ */ new Map();
+  constructor(options) {
+    this.onEvent = options.onEvent;
+    this.onStderr = options.onStderr ?? ((line) => {
+      process.stderr.write(`[pi] ${line}
+`);
+    });
+  }
+  /**
+   * Feed a text chunk from pi's stdout into the parser.
+   * Dispatches events to onEvent and responses to outstanding request
+   * promises (matched by id when present).
+   */
+  feed(data) {
+    this.buffer += data;
+    let newlineIdx;
+    while ((newlineIdx = this.buffer.indexOf("\n")) !== -1) {
+      const line = this.buffer.substring(0, newlineIdx).trim();
+      this.buffer = this.buffer.substring(newlineIdx + 1);
+      if (line.length === 0) continue;
+      const parsed = parseJsonLine(line);
+      if (parsed.kind === "response") {
+        this.dispatchResponse(parsed.response);
+      } else {
+        this.onEvent({ event: parsed.event, raw: line });
+      }
+    }
+  }
+  /** Route a response to its waiter, or drop it if unmatched. */
+  dispatchResponse(response) {
+    const id = response.id;
+    if (!id) {
+      return;
+    }
+    const pending = this.pendingRequests.get(id);
+    if (!pending) return;
+    this.pendingRequests.delete(id);
+    clearTimeout(pending.timer);
+    pending.resolve(response);
+  }
+  /**
+   * Send an RPC command with request/response correlation. Returns a promise
+   * resolving to pi's response. Times out after `timeoutMs` (default 10s).
+   *
+   * Use for commands where the caller cares about the response: get_state,
+   * get_session_stats, set_model, etc. For fire-and-forget commands use
+   * `sendCommand`.
+   */
+  request(command, timeoutMs = 1e4) {
+    if (!this.commandWriter) {
+      return Promise.reject(new Error("pi command writer not connected"));
+    }
+    const id = nextRequestId();
+    const line = _PiProtocol.formatCommand(command, id);
+    return new Promise((resolve2, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(new Error(`pi RPC ${command.type} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pendingRequests.set(id, { resolve: resolve2, reject, timer });
+      this.commandWriter(line);
+    });
+  }
+  /**
+   * Feed a text chunk from pi's stderr.
+   * Passes through onStderr callback.
+   */
+  feedStderr(data) {
+    const lines = data.split("\n");
+    for (const line of lines) {
+      if (line.trim().length > 0) {
+        this.onStderr(line);
+      }
+    }
+  }
+  /**
+   * Flush any remaining buffered content (should be called when stdin closes).
+   * Returns the remaining buffer if any.
+   */
+  flush() {
+    const remaining = this.buffer;
+    this.buffer = "";
+    return remaining;
+  }
+  /**
+   * Set the command writer (called by spawn.ts to connect to subprocess stdin).
+   */
+  setCommandWriter(writer) {
+    this.commandWriter = writer;
+  }
+  /**
+   * Send a command to pi's stdin.
+   */
+  sendCommand(command) {
+    if (this.commandWriter) {
+      this.commandWriter(_PiProtocol.formatCommand(command));
+    }
+  }
+  /**
+   * Format any PiCommand to a JSONL string. If `id` is provided, it is
+   * attached for request/response correlation (pi echoes it on the
+   * matching `{type:"response", id}` line).
+   */
+  static formatCommand(cmd, id) {
+    const withId = (obj) => id ? { ...obj, id } : obj;
+    switch (cmd.type) {
+      case "prompt": {
+        const base = { type: "prompt", message: cmd.message };
+        if (cmd.images && cmd.images.length > 0) base.images = cmd.images;
+        return JSON.stringify(withId(base)) + "\n";
+      }
+      case "steer":
+        return JSON.stringify(withId({ type: "steer", message: cmd.message })) + "\n";
+      case "abort":
+        return JSON.stringify(withId({ type: "abort" })) + "\n";
+      case "set_thinking_level":
+        return JSON.stringify(withId({ type: "set_thinking_level", level: cmd.level })) + "\n";
+      case "set_session_name":
+        return JSON.stringify(withId({ type: "set_session_name", name: cmd.name })) + "\n";
+      case "set_model":
+        return JSON.stringify(withId({ type: "set_model", provider: cmd.provider, modelId: cmd.modelId })) + "\n";
+      case "get_session_stats":
+        return JSON.stringify(withId({ type: "get_session_stats" })) + "\n";
+      case "get_state":
+        return JSON.stringify(withId({ type: "get_state" })) + "\n";
+      case "get_commands":
+        return JSON.stringify(withId({ type: "get_commands" })) + "\n";
+      case "get_available_models":
+        return JSON.stringify(withId({ type: "get_available_models" })) + "\n";
+      case "switch_session":
+        return JSON.stringify(withId({ type: "switch_session", sessionPath: cmd.sessionPath })) + "\n";
+      case "compact": {
+        const body = { type: "compact" };
+        if (cmd.customInstructions) body.customInstructions = cmd.customInstructions;
+        return JSON.stringify(withId(body)) + "\n";
+      }
+      case "new_session": {
+        const body = { type: "new_session" };
+        if (cmd.parentSession) body.parentSession = cmd.parentSession;
+        return JSON.stringify(withId(body)) + "\n";
+      }
+      case "extension_ui_response": {
+        const body = { type: "extension_ui_response", id: cmd.id };
+        if (cmd.value !== void 0) body.value = cmd.value;
+        if (cmd.confirmed !== void 0) body.confirmed = cmd.confirmed;
+        if (cmd.cancelled !== void 0) body.cancelled = cmd.cancelled;
+        return JSON.stringify(body) + "\n";
+      }
+    }
+  }
+  /**
+   * Format a prompt command for pi's stdin. Pi expects { message, images? } —
+   * field name is `message`, not `text` (verified against pi 0.74).
+   */
+  static formatPrompt(text, images) {
+    const cmd = { type: "prompt", message: text };
+    if (images && images.length > 0) {
+      cmd.images = images;
+    }
+    return JSON.stringify(cmd) + "\n";
+  }
+  /**
+   * Format a steer command for pi's stdin.
+   */
+  static formatSteer(text) {
+    return JSON.stringify({ type: "steer", message: text }) + "\n";
+  }
+  /**
+   * Format an abort command for pi's stdin.
+   */
+  static formatAbort() {
+    return JSON.stringify({ type: "abort" }) + "\n";
+  }
+  /**
+   * Format a set_thinking_level command for pi's stdin.
+   */
+  static formatThinkingLevel(level) {
+    return JSON.stringify({ type: "set_thinking_level", level }) + "\n";
+  }
+  /**
+   * Format a set_session_name command for pi's stdin.
+   */
+  static formatSessionName(name) {
+    return JSON.stringify({ type: "set_session_name", name }) + "\n";
+  }
+  /**
+   * Format a set_model command for pi's stdin.
+   * Pi expects { type: "set_model", provider, modelId } (verified against
+   * pi 0.74 RPC docs).
+   */
+  static formatSetModel(provider, modelId) {
+    return JSON.stringify({ type: "set_model", provider, modelId }) + "\n";
+  }
+};
+
+// src/pi-driver/spawn.ts
+var RAW_LOG = process.env.GRAVITY_PI_RAW_LOG;
+function normalizePiCommands(commands) {
+  const raw = Array.isArray(commands) ? commands : [];
+  const str = (v) => typeof v === "string" && v.length > 0 ? v : void 0;
+  return raw.map((c) => {
+    const r = c ?? {};
+    const si = r.sourceInfo ?? {};
+    const loc = str(r.location) ?? str(si.scope);
+    const path = str(r.path) ?? str(si.path);
+    const description = str(r.description);
+    return {
+      name: String(r.name ?? ""),
+      source: str(r.source) ?? "extension",
+      ...description ? { description } : {},
+      ...loc ? { location: loc } : {},
+      ...path ? { path } : {}
+    };
+  });
+}
+function normalizePiModels(models) {
+  const raw = Array.isArray(models) ? models : [];
+  const str = (v) => typeof v === "string" && v.length > 0 ? v : void 0;
+  return raw.map((m) => {
+    const r = m ?? {};
+    const name = str(r.name);
+    const contextWindow = typeof r.contextWindow === "number" ? r.contextWindow : void 0;
+    return {
+      id: String(r.id ?? ""),
+      provider: str(r.provider) ?? "",
+      ...name ? { name } : {},
+      ...contextWindow !== void 0 ? { contextWindow } : {}
+    };
+  });
+}
+var PI_BINARY = process.env.PI_BINARY_PATH ?? "pi";
+function buildSpawnEnv(options) {
+  const env = { ...process.env };
+  if (options.model) env["PI_MODEL"] = options.model;
+  if (options.provider) env["PI_PROVIDER"] = options.provider;
+  env["GRAVITY_DRIVER"] = "1";
+  return env;
+}
+var DEFAULT_THINKING_LEVEL = "medium";
+var DEFAULT_PI_SESSION_DIR = join3(homedir3(), ".local", "state", "gravity-pi-sessions");
+function spawnPiSync(options = {}) {
+  const cwd = options.cwd ?? process.cwd();
+  const thinkingLevel = options.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
+  const sessionDir = options.sessionDir ?? DEFAULT_PI_SESSION_DIR;
+  try {
+    mkdirSync2(sessionDir, { recursive: true });
+  } catch (err) {
+    process.stderr.write(`[pi-adapter] could not create session dir ${sessionDir}: ${err.message}
+`);
+  }
+  const args2 = [
+    "--mode",
+    "rpc",
+    "--session-dir",
+    sessionDir,
+    "--thinking",
+    thinkingLevel
+  ];
+  if (options.resumeSession) {
+    args2.push("--session", options.resumeSession);
+  }
+  const env = buildSpawnEnv(options);
+  const child = spawn(PI_BINARY, args2, {
+    cwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  let stopped = false;
+  let onPiEvent = null;
+  const proto = new PiProtocol({
+    onEvent: (evt) => {
+      if (onPiEvent) {
+        onPiEvent(evt);
+      }
+    },
+    onStderr: (line) => {
+      process.stderr.write(`[pi] ${line}
+`);
+    }
+  });
+  child.stdout?.on("data", (chunk) => {
+    const s = chunk.toString();
+    if (RAW_LOG) {
+      try {
+        appendFileSync2(RAW_LOG, s);
+      } catch {
+      }
+    }
+    proto.feed(s);
+  });
+  child.stderr?.on("data", (chunk) => {
+    proto.feedStderr(chunk.toString());
+  });
+  child.on("exit", (code, signal) => {
+    if (!stopped) {
+      stopped = true;
+      const msg = code !== null ? `pi subprocess exited with code ${code}` : signal ? `pi subprocess killed by signal ${signal}` : "pi subprocess exited";
+      process.stderr.write(`[pi] ${msg}
+`);
+    }
+  });
+  child.on("error", (err) => {
+    if (!stopped) {
+      stopped = true;
+      process.stderr.write(`[pi] subprocess error: ${err.message}
+`);
+    }
+  });
+  proto.setCommandWriter((line) => {
+    if (child.stdin && !child.stdin.destroyed) {
+      child.stdin.write(line);
+    }
+  });
+  const driver = {
+    prompt: (text, images) => {
+      return new Promise((resolve2, reject) => {
+        if (stopped) {
+          reject(new Error("pi subprocess already stopped"));
+          return;
+        }
+        if (child.stdin && !child.stdin.destroyed) {
+          const line = PiProtocol.formatPrompt(text, images);
+          child.stdin.write(line, (err) => {
+            if (err) reject(err);
+            else resolve2();
+          });
+        } else {
+          reject(new Error("pi stdin unavailable"));
+        }
+      });
+    },
+    steer: (text) => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      child.stdin.write(PiProtocol.formatSteer(text));
+    },
+    abort: () => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      child.stdin.write(PiProtocol.formatAbort());
+    },
+    setThinkingLevel: (level) => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      child.stdin.write(PiProtocol.formatThinkingLevel(level));
+    },
+    setSessionName: (name) => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      child.stdin.write(PiProtocol.formatSessionName(name));
+    },
+    setModel: (provider, modelId) => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      child.stdin.write(PiProtocol.formatSetModel(provider, modelId));
+    },
+    getSessionStats: async () => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_session_stats" });
+      if (!response.success) {
+        throw new Error(`pi get_session_stats failed: ${response.error ?? "unknown error"}`);
+      }
+      return response.data ?? {};
+    },
+    getState: async () => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_state" });
+      if (!response.success) {
+        throw new Error(`pi get_state failed: ${response.error ?? "unknown error"}`);
+      }
+      return response.data ?? {};
+    },
+    getCommands: async () => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_commands" });
+      if (!response.success) {
+        throw new Error(`pi get_commands failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return normalizePiCommands(data.commands);
+    },
+    getAvailableModels: async () => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "get_available_models" });
+      if (!response.success) {
+        throw new Error(`pi get_available_models failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return normalizePiModels(data.models);
+    },
+    switchSession: async (sessionPath) => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request({ type: "switch_session", sessionPath });
+      if (!response.success) {
+        throw new Error(`pi switch_session failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return data.cancelled !== true;
+    },
+    sendExtensionUIResponse: (payload) => {
+      if (stopped || !child.stdin || child.stdin.destroyed) return;
+      proto.sendCommand({ type: "extension_ui_response", ...payload });
+    },
+    compact: async (customInstructions) => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request(
+        customInstructions ? { type: "compact", customInstructions } : { type: "compact" },
+        6e4
+        // compaction can take a while (extra LLM call)
+      );
+      if (!response.success) {
+        throw new Error(`pi compact failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return data;
+    },
+    newSession: async (parentSession) => {
+      if (stopped) throw new Error("pi subprocess already stopped");
+      const response = await proto.request(
+        parentSession ? { type: "new_session", parentSession } : { type: "new_session" }
+      );
+      if (!response.success) {
+        throw new Error(`pi new_session failed: ${response.error ?? "unknown error"}`);
+      }
+      const data = response.data ?? {};
+      return data.cancelled !== true;
+    },
+    stop: async () => {
+      if (stopped) return;
+      stopped = true;
+      if (!child.killed) {
+        child.kill("SIGTERM");
+      }
+      if (child.stdin && !child.stdin.destroyed) {
+        child.stdin.end();
+      }
+    },
+    setEventHandler: (h) => {
+      onPiEvent = h;
+    }
+  };
+  return { driver, process: child };
 }
 
 // src/pi-driver/types.ts
@@ -107310,7 +107499,7 @@ function startPiDriver(options) {
 }
 
 // src/gravity-server.ts
-var CAPABILITY_WAIT_MS = 1e4;
+var NO_CAPABLE_WAIT_MS = 1e3;
 var CAPABILITY_POLL_MS = 500;
 var PURGE_DELAY_MS = 2 * 60 * 1e3;
 var HEALTH_CHECK_INTERVAL_MS = 3e4;
@@ -107343,18 +107532,42 @@ var processHookMessage = async (deps, msg, socket) => {
   const needsResponse = msg.needs_response === true;
   logMsg(`Hook event: ${eventName} session=${sessionId}`);
   deps.markHookReceived();
+  let preItem = null;
   if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
     if (!deps.terminals.hasCapableTerminal("action.permission")) {
-      logMsg(`No capable terminal connected \u2014 waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
-      const arrived = await deps.waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
+      const toolName = typeof data.tool_name === "string" ? data.tool_name : "unknown";
+      const itemType = eventName === "AskUserQuestionIntercept" ? "question" : toolName === "ExitPlanMode" ? "plan-review" : "permission";
+      const itemSummary = eventName === "AskUserQuestionIntercept" ? data.tool_input?.questions?.[0]?.question ?? toolName : toolName;
+      const trimmedCwd = cwd.replace(/\/+$/, "");
+      const project = trimmedCwd.split("/").pop() || trimmedCwd || cwd;
+      const label = sessionId.substring(0, 8);
+      preItem = deps.inbox.add(
+        itemType,
+        sessionId,
+        project,
+        label,
+        itemSummary.substring(0, 80),
+        data,
+        void 0,
+        // no hook socket — read-only visibility, no pending response
+        false
+        // actionable: false
+      );
+      logMsg(`No capable terminal connected \u2014 non-actionable inbox item ${preItem.id} created; waiting up to ${NO_CAPABLE_WAIT_MS}ms for reconnect`, "warn");
+      const arrived = await deps.waitForCapableTerminal("action.permission", NO_CAPABLE_WAIT_MS);
       if (!arrived) {
-        logMsg(`No capable terminal after ${CAPABILITY_WAIT_MS}ms \u2014 rejecting ${eventName}`, "warn");
+        logMsg(`No capable terminal after ${NO_CAPABLE_WAIT_MS}ms \u2014 rejecting ${eventName} (non-actionable inbox item ${preItem.id} kept in place)`, "warn");
         try {
           socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
           socket.end();
         } catch {
         }
         return;
+      }
+      const removed = deps.inbox.remove(preItem.id);
+      if (removed) {
+        logMsg(`Capable terminal connected during wait \u2014 removed non-actionable stub ${preItem.id} before proceeding with ${eventName}`);
+        deps.terminals.signalChanged("inbox");
       }
       logMsg(`Capable terminal connected during wait \u2014 proceeding with ${eventName}`);
     }
@@ -107444,6 +107657,55 @@ var program = Effect_exports.gen(function* () {
       schedulePurge(sessionId);
     } else if (session && session.status === "active") {
       store.cancelPurge(sessionId);
+    }
+  };
+  const processPiEnvelope = (envelope) => {
+    const sessionId = envelope.session_id;
+    if (!sessionId) {
+      logMsg(`Pi envelope missing session_id \u2014 dropping`, "warn");
+      return;
+    }
+    let accState = piEnvelopeAccStates.get(sessionId);
+    const isFirstEnvelope = !accState;
+    if (!accState) {
+      accState = createAccState(sessionId, envelope.cwd);
+      piEnvelopeAccStates.set(sessionId, accState);
+    }
+    logMsg(`Pi envelope: type=${envelope.event.type ?? "?"} session=${sessionId}`);
+    const translated = translatePiEvent(envelope.event, accState);
+    if (translated.kind === "emit") {
+      for (const result3 of translated.results) {
+        handlePiTranslation(sessionId, result3);
+      }
+    }
+    const session = store.get(sessionId);
+    if (session) {
+      const attr = envelope.attribution;
+      const metaOpts = { readOnly: true };
+      if (attr) {
+        if (typeof attr.worktree === "string" && attr.worktree) {
+          metaOpts.worktree = attr.worktree;
+        }
+        if (typeof attr.branch === "string" && attr.branch) {
+          metaOpts.branch = attr.branch;
+        }
+        if (typeof attr.role === "string" && attr.role) {
+          metaOpts.role = attr.role;
+        }
+      }
+      if (typeof envelope.pid === "number" && envelope.pid > 0) {
+        metaOpts.pid = envelope.pid;
+      }
+      const firstTouch = isFirstEnvelope || metaOpts.pid !== void 0 || metaOpts.worktree !== void 0 || metaOpts.branch !== void 0 || metaOpts.role !== void 0;
+      if (firstTouch) {
+        const metaPatches = updateMeta(session, metaOpts);
+        if (metaPatches.length > 0) {
+          const stored = store.appendPatches(sessionId, metaPatches);
+          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+          terminals.signalChanged("session", sessionId, seq);
+          logMsg(`Pi envelope: ${metaPatches.length} meta patches for session=${sessionId}, signaled seq=${seq}`);
+        }
+      }
     }
   };
   const handlePiExtensionUIRequest = (sessionId, request3) => {
@@ -107626,33 +107888,36 @@ var program = Effect_exports.gen(function* () {
     const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
     terminals.signalChanged("session", sessionId, seq);
   };
-  const waitForCapableTerminal = (capability, timeoutMs) => new Promise((resolve) => {
+  const waitForCapableTerminal = (capability, timeoutMs) => new Promise((resolve2) => {
     if (terminals.hasCapableTerminal(capability)) {
-      resolve(true);
+      resolve2(true);
       return;
     }
     const start = Date.now();
     const interval = setInterval(() => {
       if (terminals.hasCapableTerminal(capability)) {
         clearInterval(interval);
-        resolve(true);
+        resolve2(true);
       } else if (Date.now() - start >= timeoutMs) {
         clearInterval(interval);
-        resolve(false);
+        resolve2(false);
       }
     }, CAPABILITY_POLL_MS);
   });
   const schedulePurge = (sessionId) => {
     store.schedulePurge(sessionId, PURGE_DELAY_MS, () => {
       store.delete(sessionId);
+      store.clearPatches(sessionId);
       inbox.removeForSession(sessionId);
       terminals.broadcast({ type: "session.removed", sessionId });
       terminals.unsubscribeAll(sessionId);
       terminals.signalChanged("overview");
+      piEnvelopeAccStates.delete(sessionId);
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
   const piDrivers = /* @__PURE__ */ new Map();
+  const piEnvelopeAccStates = /* @__PURE__ */ new Map();
   const pendingPiUIResponses = /* @__PURE__ */ new Map();
   const startPiSession = (options) => {
     const sessionId = generateSessionId2();
@@ -107953,7 +108218,8 @@ var program = Effect_exports.gen(function* () {
         for (const sessionId of conn.subscribedSessions) {
           const session = store.get(sessionId);
           if (session) {
-            const patches = store.getPatchesSince(sessionId, 0);
+            const since = conn.sessionSeqCursor.get(sessionId) ?? 0;
+            const patches = store.getPatchesSince(sessionId, since);
             const seq = store.getSessionSeq(sessionId);
             if (patches.length > 0) {
               terminals.sendTo(conn, {
@@ -107962,6 +108228,7 @@ var program = Effect_exports.gen(function* () {
                 seq,
                 patches: patches.map((p) => p.patch)
               });
+              conn.sessionSeqCursor.set(sessionId, seq);
             }
           }
         }
@@ -107971,6 +108238,7 @@ var program = Effect_exports.gen(function* () {
       case "request.session": {
         const session = store.get(msg.sessionId);
         conn.subscribedSessions.add(msg.sessionId);
+        conn.sessionSeqCursor.set(msg.sessionId, store.getSessionSeq(msg.sessionId));
         if (session) {
           terminals.sendTo(conn, { type: "session.snapshot", sessionId: msg.sessionId, session });
         }
@@ -107985,10 +108253,16 @@ var program = Effect_exports.gen(function* () {
           const session = store.get(sessionId);
           if (session) {
             terminals.sendTo(conn, { type: "session.snapshot", sessionId, session });
+            conn.sessionSeqCursor.set(sessionId, store.getSessionSeq(sessionId));
           }
         }
         terminals.sendTo(conn, { type: "inbox.snapshot", items: inbox.all() });
         logMsg(`Terminal resync: ${conn.subscribedSessions.size} sessions`);
+        break;
+      }
+      case "request.unsubscribe": {
+        conn.subscribedSessions.delete(msg.sessionId);
+        conn.sessionSeqCursor.delete(msg.sessionId);
         break;
       }
       case "action.permission": {
@@ -108209,7 +108483,7 @@ var program = Effect_exports.gen(function* () {
     }
   };
   yield* fs.unlinkIfExists(config.hookSocketPath);
-  yield* fs.mkdirp(dirname(config.hookSocketPath));
+  yield* fs.mkdirp(dirname2(config.hookSocketPath));
   const hookServer = createServer2((socket) => {
     let buffer = "";
     socket.on("data", (chunk) => {
@@ -108221,6 +108495,10 @@ var program = Effect_exports.gen(function* () {
         if (line.length === 0) continue;
         try {
           const msg = JSON.parse(line);
+          if (msg && typeof msg === "object" && msg.src === "pi") {
+            processPiEnvelope(msg);
+            continue;
+          }
           handleHookMessage(msg, socket).catch(
             (e) => logMsg(`Hook message handler error: ${e}`, "error")
           );
@@ -108248,7 +108526,7 @@ var program = Effect_exports.gen(function* () {
     logMsg(`Mermaid RPC server failed to start: ${e}`, "warn");
   });
   yield* fs.unlinkIfExists(config.terminalSocketPath);
-  yield* fs.mkdirp(dirname(config.terminalSocketPath));
+  yield* fs.mkdirp(dirname2(config.terminalSocketPath));
   const terminalServer = createServer2((socket) => {
     const conn = terminals.addConnection(socket);
     logMsg(`Terminal connected (total: ${terminals.connectionCount()})`);
@@ -108331,7 +108609,7 @@ var program = Effect_exports.gen(function* () {
       terminals.broadcast({ type: "notice", level: "warn", text });
     }
   }, HEALTH_CHECK_INTERVAL_MS);
-  yield* fs.mkdirp(dirname(config.pidFilePath));
+  yield* fs.mkdirp(dirname2(config.pidFilePath));
   yield* fs.writeFile(config.pidFilePath, process.pid.toString());
   logMsg(`gravity-server ready (pid=${process.pid}, pidfile=${config.pidFilePath})`);
   const shutdown = () => {
