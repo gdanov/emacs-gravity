@@ -8,6 +8,7 @@ export type {
 
   // View model
   Session,
+  SessionRole,
   TurnNode,
   StepNode,
   Tool,

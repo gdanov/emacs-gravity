@@ -57,6 +57,40 @@ function extractLatestUserPrompt(s: Session): string | null {
   return null;
 }
 
+/** Walk turns from the end and return the name of the most recent tool
+ * still in flight, or null when none are running. Tools live in both
+ * turn-level steps and agent-level steps; agent tools are flattened into
+ * the same scan for the overview's purpose. */
+function extractCurrentTool(s: Session): string | null {
+  for (let i = s.turns.length - 1; i >= 0; i--) {
+    const turn = s.turns[i];
+    for (let j = turn.steps.length - 1; j >= 0; j--) {
+      for (let k = turn.steps[j].tools.length - 1; k >= 0; k--) {
+        if (turn.steps[j].tools[k].status === "running") {
+          return turn.steps[j].tools[k].name;
+        }
+      }
+    }
+    for (let a = turn.agents.length - 1; a >= 0; a--) {
+      const agent = turn.agents[a];
+      for (let j = agent.steps.length - 1; j >= 0; j--) {
+        for (let k = agent.steps[j].tools.length - 1; k >= 0; k--) {
+          if (agent.steps[j].tools[k].status === "running") {
+            return agent.steps[j].tools[k].name;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Number of completed turns, excluding the pre-allocated turn 0
+ * pre-prompt bucket. Clamped to a minimum of 0. */
+function computeTurnCount(s: Session): number {
+  return Math.max(0, s.turns.length - 1);
+}
+
 export function makeSessionStore(): SessionStoreService {
   const sessions = new Map<string, Session>();
   const purgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -86,27 +120,51 @@ export function makeSessionStore(): SessionStoreService {
     has: (sessionId) => sessions.has(sessionId),
 
     getProjectSummaries: () => {
-      const byProject = new Map<string, Session[]>();
+      // Group by repoKey (the stable repo identity that unifies a repo's
+      // main checkout with all its worktrees). For a session whose
+      // repoKey is still null — defensively, for a session created
+      // before this ticket landed — fall back to its existing `project`
+      // field so it still appears in the overview instead of being
+      // silently dropped.
+      const byRepoKey = new Map<string, Session[]>();
       for (const session of sessions.values()) {
         if (session.status === "ended") continue;
-        const list = byProject.get(session.project) ?? [];
+        const key = session.repoKey ?? session.project;
+        const list = byRepoKey.get(key) ?? [];
         list.push(session);
-        byProject.set(session.project, list);
+        byRepoKey.set(key, list);
       }
-      return Array.from(byProject.entries()).map(([project, ss]) => ({
-        project,
-        sessions: ss.map((s) => ({
-          sessionId: s.sessionId,
-          slug: s.slug,
-          displayName: s.displayName,
-          status: s.status,
-          claudeStatus: s.claudeStatus,
-          toolCount: s.totalToolCount,
-          lastEventTime: s.lastEventTime,
-          latestMessage: extractLatestMessage(s),
-          latestUserPrompt: extractLatestUserPrompt(s),
-        })),
-      }));
+      return Array.from(byRepoKey.entries()).map(([repoKey, ss]) => {
+        const first = ss[0];
+        // Display name: prefer basename(repoRoot) of the group's first
+        // session (matches what the user thinks of as "the repo").
+        // Fall back to the first session's existing project label so a
+        // defensive-null-repoKey session still has a display name.
+        const project = first.repoRoot
+          ? first.repoRoot.split("/").pop() ?? first.repoRoot
+          : first.project;
+        return {
+          project,
+          repoKey,
+          sessions: ss.map((s) => ({
+            sessionId: s.sessionId,
+            slug: s.slug,
+            displayName: s.displayName,
+            status: s.status,
+            claudeStatus: s.claudeStatus,
+            toolCount: s.totalToolCount,
+            lastEventTime: s.lastEventTime,
+            latestMessage: extractLatestMessage(s),
+            latestUserPrompt: extractLatestUserPrompt(s),
+            role: s.role,
+            branch: s.branch,
+            worktree: s.worktree,
+            turnCount: computeTurnCount(s),
+            currentTool: extractCurrentTool(s),
+            cost: s.cost,
+          })),
+        };
+      });
     },
 
     schedulePurge: (sessionId, delayMs, onPurge) => {
