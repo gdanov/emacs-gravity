@@ -310,6 +310,69 @@ export function evaluateSessionHealth(
   return { dead: false };
 }
 
+// ── Pull-mode terminal helpers (extracted for direct unit testing) ───
+//
+// The `request.session` / `request.resync` / `poll` cases of
+// handleTerminalMessage each mutate conn.subscribedSessions /
+// conn.sessionSeqCursor and route through terminals.sendTo. Extracted
+// into pure functions so the incremental-pull cursor-seeding wiring
+// (snapshot sends the full session; poll sends only patches strictly
+// newer than the cursor; cursor advances only on non-empty sends) is
+// behaviorally testable through the real production code path.
+
+export interface TerminalPollDeps {
+  readonly store: SessionStoreService;
+  readonly terminals: TerminalService;
+}
+
+/**
+ * Subscribe `conn` to `sessionId` and deliver the full session snapshot
+ * when one exists. Seeds the incremental-pull cursor at the session's
+ * current seq so the next `poll` begins at "everything after the
+ * snapshot we just sent" — not at seq 0, which would replay the entire
+ * patch history on top of the snapshot.
+ */
+export function subscribeAndSnapshot(
+  deps: TerminalPollDeps,
+  conn: TerminalConnection,
+  sessionId: string,
+): void {
+  conn.subscribedSessions.add(sessionId);
+  conn.sessionSeqCursor.set(sessionId, deps.store.getSessionSeq(sessionId));
+  const session = deps.store.get(sessionId);
+  if (session) {
+    deps.terminals.sendTo(conn, { type: "session.snapshot", sessionId, session });
+  }
+}
+
+/**
+ * For every session `conn` is subscribed to, deliver any patches the
+ * cursor has not yet Acked. A no-patch poll sends nothing and leaves
+ * the cursor alone — the cursor is "what we have Acked", not "what we
+ * have read".
+ */
+export function pollSubscribedSessions(
+  deps: TerminalPollDeps,
+  conn: TerminalConnection,
+): void {
+  for (const sessionId of conn.subscribedSessions) {
+    const session = deps.store.get(sessionId);
+    if (!session) continue;
+    const since = conn.sessionSeqCursor.get(sessionId) ?? 0;
+    const patches = deps.store.getPatchesSince(sessionId, since);
+    const seq = deps.store.getSessionSeq(sessionId);
+    if (patches.length > 0) {
+      deps.terminals.sendTo(conn, {
+        type: "session-patches",
+        sessionId,
+        seq,
+        patches: patches.map(p => p.patch),
+      });
+      conn.sessionSeqCursor.set(sessionId, seq);
+    }
+  }
+}
+
 // ── Program ──────────────────────────────────────────────────────────
 
 const program = Effect.gen(function* () {
@@ -1172,44 +1235,13 @@ const program = Effect.gen(function* () {
           terminals.sendTo(conn, { type: "inbox-items", items });
         }
         conn.inboxWasNonEmpty = items.length > 0;
-        for (const sessionId of conn.subscribedSessions) {
-          const session = store.get(sessionId);
-          if (session) {
-            const since = conn.sessionSeqCursor.get(sessionId) ?? 0;
-            const patches = store.getPatchesSince(sessionId, since);
-            const seq = store.getSessionSeq(sessionId);
-            if (patches.length > 0) {
-              terminals.sendTo(conn, {
-                type: "session-patches",
-                sessionId,
-                seq,
-                patches: patches.map(p => p.patch),
-              });
-              // Only advance the cursor when something was actually
-              // delivered — a no-patch poll leaves the cursor alone so
-              // the next non-empty reply still carries every patch the
-              // client hasn't seen yet (the cursor is "what we have
-              // ACKed", not "what we have read").
-              conn.sessionSeqCursor.set(sessionId, seq);
-            }
-          }
-        }
+        pollSubscribedSessions({ store, terminals }, conn);
         logMsg(`Terminal poll: overview sent, ${inbox.all().length} inbox items, ${conn.subscribedSessions.size} subscribed sessions`);
         break;
       }
 
       case "request.session": {
-        const session = store.get(msg.sessionId);
-        conn.subscribedSessions.add(msg.sessionId);
-        // Seed the incremental-pull cursor to the session's current
-        // seq so the very next `poll` starts at "everything after the
-        // snapshot we just sent", not at seq 0 (which would replay the
-        // entire patch history on top of the snapshot — the quadratic
-        // blow-up this cursor was added to prevent).
-        conn.sessionSeqCursor.set(msg.sessionId, store.getSessionSeq(msg.sessionId));
-        if (session) {
-          terminals.sendTo(conn, { type: "session.snapshot", sessionId: msg.sessionId, session });
-        }
+        subscribeAndSnapshot({ store, terminals }, conn, msg.sessionId);
         break;
       }
 
@@ -1219,14 +1251,7 @@ const program = Effect.gen(function* () {
           projects: store.getProjectSummaries(),
         });
         for (const sessionId of conn.subscribedSessions) {
-          const session = store.get(sessionId);
-          if (session) {
-            terminals.sendTo(conn, { type: "session.snapshot", sessionId, session });
-            // Same incremental-pull seeding as `request.session`: each
-            // resynced session's cursor jumps to its current seq so the
-            // follow-up `poll` doesn't replay the snapshot's history.
-            conn.sessionSeqCursor.set(sessionId, store.getSessionSeq(sessionId));
-          }
+          subscribeAndSnapshot({ store, terminals }, conn, sessionId);
         }
         terminals.sendTo(conn, { type: "inbox.snapshot", items: inbox.all() });
         logMsg(`Terminal resync: ${conn.subscribedSessions.size} sessions`);
