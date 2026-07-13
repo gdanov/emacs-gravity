@@ -331,6 +331,26 @@ describe("processHookMessage — non-actionable inbox on no-capable-terminal", (
     expect(sock._ended).toBe(true);
   });
 
+  it("capable:false + PermissionRequest: signals inbox so read-only clients know to poll", async () => {
+    // A non-actionable inbox item is created for the no-capable-terminal
+    // case so a read-only client can render WHAT is pending. Without an
+    // `inbox` signal, that client has no way to learn about the new
+    // item — a state-changed signal is the only channel in pull mode.
+    const h = makeHarness({ capable: false });
+    await h.send(
+      "PermissionRequest",
+      "s1",
+      { tool_name: "Bash", tool_use_id: "tu_bash", tool_input: { command: "ls" } } as unknown as HookData,
+      true,
+    );
+
+    // The non-actionable stub must have triggered an inbox signal —
+    // otherwise a read-only client connected at this moment would not
+    // discover the new item until a later hook or resync.
+    const inboxSignals = h.rec.signals.filter(s => s.what === "inbox");
+    expect(inboxSignals.length).toBeGreaterThanOrEqual(1);
+  });
+
   it("capable:false + PermissionRequest (ExitPlanMode): non-actionable plan-review item", async () => {
     const h = makeHarness({ capable: false });
     const sock = await h.send(
