@@ -256,6 +256,60 @@ export const processHookMessage = async (
   }
 };
 
+// ── Health-check liveness decision (extracted for direct unit testing) ─
+//
+// The health-check setInterval is an inline closure inside `program` and
+// is not callable in isolation. The PID-reaping-before-pi-source-skip
+// ordering, the staleness-vs-pid-alive priority rules, and the exact
+// log messages that distinguish each outcome are too easy to get wrong
+// by hand-rolled re-implementations. Extracted as a pure function that
+// takes only what it needs (pid, source, lastEventTime — NOT a Session)
+// and an injectable `killFn` so tests can simulate dead/live pids
+// without ever touching a real process. Caller retains all logging and
+// scheduling; this function only decides.
+
+export interface SessionHealthInput {
+  pid: number | null;
+  source: string | null;
+  lastEventTime: number;
+}
+
+export type SessionHealthResult =
+  | { dead: false }
+  | { dead: true; reason: "pid-unreachable" | "stale" };
+
+export function evaluateSessionHealth(
+  session: SessionHealthInput,
+  now: number,
+  opts: { staleThresholdMs: number; killFn?: (pid: number, signal: 0) => void },
+): SessionHealthResult {
+  const killFn: (pid: number, signal: 0) => void =
+    opts.killFn ?? ((pid, signal) => { process.kill(pid, signal); });
+  // PID branch first: a session with a real pid is alive iff the OS
+  // reports so; the staleness fallback must NOT override a live pid.
+  if (session.pid && session.pid > 0) {
+    try {
+      killFn(session.pid, 0);
+      return { dead: false };
+    } catch {
+      return { dead: true, reason: "pid-unreachable" };
+    }
+  }
+  // Pid-less pi session: RPC-driven pi processes own their own exit
+  // handler (via piDrivers map entry + child.on("exit")). Skip the
+  // staleness fallback — pi sessions idle indefinitely waiting for the
+  // next prompt, which is normal, not a dead one. Termination is
+  // reported via the SessionEnd event the spawn handler emits.
+  if (session.source === "pi") {
+    return { dead: false };
+  }
+  // Plain non-pi session with no pid: fall back to the staleness clock.
+  if (now - session.lastEventTime > opts.staleThresholdMs) {
+    return { dead: true, reason: "stale" };
+  }
+  return { dead: false };
+}
+
 // ── Program ──────────────────────────────────────────────────────────
 
 const program = Effect.gen(function* () {
@@ -1574,44 +1628,23 @@ const program = Effect.gen(function* () {
     for (const session of store.all()) {
       if (session.status !== "active") continue;
       const sessionId = session.sessionId;
-      let isDead = false;
-
-      if (session.pid && session.pid > 0) {
-        try {
-          process.kill(session.pid, 0);
-        } catch {
-          isDead = true;
-          logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
-        }
-      } else if (session.source === "pi") {
-        // This branch is reached only for pid-less pi sessions. The
-        // PID-reaping branch above (process.kill(pid, 0)) handles any
-        // session that carries a live pid regardless of its source —
-        // including ambient-emitter-fed pi sessions, which always
-        // carry a real pid threaded in from their envelope at ingest
-        // time. Reaching this branch therefore means the session has
-        // no pid, which is true exclusively for RPC-driven pi sessions
-        // managed by startPiDriver's own child.on("exit") handler (the
-        // piDrivers map entry). Skip the time-based staleness fallback:
-        // an idle pi session is normal (pi waits for the next prompt
-        // indefinitely), not a dead one. Pi termination is reported
-        // correctly via the SessionEnd event the spawn handler emits
-        // on child exit.
-      } else if (now - session.lastEventTime > STALENESS_THRESHOLD_MS) {
-        isDead = true;
+      const decision = evaluateSessionHealth(session, now, {
+        staleThresholdMs: STALENESS_THRESHOLD_MS,
+      });
+      if (!decision.dead) continue;
+      if (decision.reason === "pid-unreachable") {
+        logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
+      } else if (decision.reason === "stale") {
         logMsg(`Health check: session ${sessionId} stale (no events for ${Math.round((now - session.lastEventTime) / 1000)}s)`);
       }
-
-      if (isDead) {
-        const patches = sessionEnd(session);
-        if (patches.length > 0) {
-          const stored = store.appendPatches(sessionId, patches);
-          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
-          terminals.signalChanged("session", sessionId, seq);
-        }
-        schedulePurge(sessionId);
-        terminals.signalChanged("overview");
+      const patches = sessionEnd(session);
+      if (patches.length > 0) {
+        const stored = store.appendPatches(sessionId, patches);
+        const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+        terminals.signalChanged("session", sessionId, seq);
       }
+      schedulePurge(sessionId);
+      terminals.signalChanged("overview");
     }
 
     // Hooks-silence warning: if terminals are connected but no hook
