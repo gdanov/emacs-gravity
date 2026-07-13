@@ -1,78 +1,105 @@
-// health-check-liveness.test.ts — Regression test for the PID-based
-// liveness branch of gravity-server's health-check setInterval.
+// health-check-liveness.test.ts — Drives the REAL exported
+// `evaluateSessionHealth` for each branch of gravity-server's
+// health-check decision ladder.
 //
-// The actual health-check loop is an inline closure inside program()'s
-// Effect.gen and is not exported/callable in isolation. This test
-// therefore asserts the structural pre-condition that the loop's
-// PID-reaping `if` uses — `Boolean(session.pid && session.pid > 0)` —
-// is true for an emitter-fed pi session (source: "pi" with a non-null
-// pid threaded in from an envelope). Proving that boolean is true is
-// enough to prove the PID-reaping branch would be reached for that
-// session, NOT the source === "pi" skip branch.
+// The health-check setInterval body in `program` used to inline the
+// PID-reaping / source-pi-skip / staleness-fallback branches as a single
+// imperative block, which made the ordering easy to get wrong by
+// hand-rolled re-implementations. `evaluateSessionHealth` extracted
+// that decision into a pure function; these tests cover the four cases
+// the research surfaced, calling the real exported function (with an
+// injected `killFn` where the pid branch is exercised) so any future
+// reordering of the priority rules trips these tests loudly.
 
 import { describe, it, expect } from "vitest";
-import { createSession, updateMeta } from "../src/state/session.js";
+import {
+  evaluateSessionHealth,
+  type SessionHealthInput,
+} from "../src/gravity-server.js";
 
-describe("health-check PID-reaping condition for emitter-fed pi sessions", () => {
-  // The exact condition gravity-server.ts's health check uses to decide
-  // whether to attempt process.kill(pid, 0). Extracted into a local
-  // helper so the test asserts a single source of truth — if the
-  // production expression ever changes, this helper must change too
-  // and the test will fail loudly.
-  const wouldReapByPid = (session: { pid: number | null }): boolean =>
-    Boolean(session.pid && session.pid > 0);
+// Mirrors gravity-server.ts's STALENESS_THRESHOLD_MS (5 minutes). Inlined
+// here rather than exported from production — keeps the test self-
+// contained and forces a deliberate trip if the production constant
+// moves.
+const STALE_MS = 5 * 60 * 1000;
 
-  it("reaches the PID-reaping branch for an emitter-fed pi session with a real pid", () => {
-    // Construct a pi session the way the envelope ingest path would,
-    // then stamp a definitely-not-running pid via updateMeta. 999999 is
-    // far above the maximum plausible live-pid range in a test runner
-    // and process.kill(999999, 0) reliably throws ESRCH on every
-    // supported platform.
-    const session = createSession("s-pi-emit", "/tmp/proj", "pi");
-    updateMeta(session, { pid: 999999 });
+describe("evaluateSessionHealth — real-exported liveness decision", () => {
+  // The pid branch uses process.kill(pid, 0) which throws ESRCH for a
+  // dead pid. The function accepts an injectable `killFn` so we can
+  // simulate both outcomes without touching real processes.
+  const neverThrows: NonNullable<Parameters<typeof evaluateSessionHealth>[2]["killFn"]> =
+    () => { /* simulate a live pid: no throw */ };
+  const alwaysThrows: NonNullable<Parameters<typeof evaluateSessionHealth>[2]["killFn"]> =
+    () => { throw new Error("ESRCH"); };
 
-    expect(session.source).toBe("pi");
-    expect(session.pid).toBe(999999);
-    // The condition the health check actually uses:
-    expect(wouldReapByPid(session)).toBe(true);
+  it("pid-bearing pi session with a DEAD pid is reaped — NOT skipped by source==='pi'", () => {
+    // Emitter-fed pi sessions carry a real pid threaded in from their
+    // envelope. The PID-reaping branch must intercept them BEFORE the
+    // source==='pi' exemption can elide the liveness check —
+    // otherwise ambient-emitter-fed pi sessions whose child processes
+    // died would never be cleaned up.
+    const input: SessionHealthInput = {
+      pid: 999999, // unallocated; process.kill(999999, 0) reliably throws ESRCH
+      source: "pi",
+      lastEventTime: 0,
+    };
+    const result = evaluateSessionHealth(input, Date.now(), {
+      staleThresholdMs: STALE_MS,
+      killFn: alwaysThrows,
+    });
+    expect(result).toEqual({ dead: true, reason: "pid-unreachable" });
   });
 
-  it("does NOT reach the source === \"pi\" skip branch for an emitter-fed pi session with a pid", () => {
-    // The two top branches of the health-check ladder are mutually
-    // exclusive: if the pid branch's condition is true, the source
-    // branch is never evaluated. The above test proves the pid branch
-    // is reached. This test adds a structural assertion that the same
-    // session also satisfies the source === "pi" branch's guard —
-    // confirming the two branches would have BOTH been eligible
-    // without the pid-first ordering, so the ordering is what actually
-    // saves the emitter-fed session.
-    const session = createSession("s-pi-emit-2", "/tmp/proj", "pi");
-    updateMeta(session, { pid: 999999 });
-
-    // Without a pid, the same source === "pi" session WOULD be skipped.
-    // Removing the pid here proves the inverse (the skip branch IS
-    // reachable for pid-less pi sessions — which is correct, since
-    // those are RPC-driven sessions with their own exit handler).
-    const sessionWithoutPid = createSession("s-pi-rpc", "/tmp/proj", "pi");
-    expect(sessionWithoutPid.pid).toBeNull();
-    expect(wouldReapByPid(sessionWithoutPid)).toBe(false);
-    expect(sessionWithoutPid.source).toBe("pi");
-
-    // And the emitter-fed (pid-bearing) session is correctly NOT
-    // skipped because the pid branch intercepts it first.
-    expect(session.source).toBe("pi");
-    expect(wouldReapByPid(session)).toBe(true);
+  it("pid-less pi session (RPC-driven) is NEVER reaped by the staleness fallback", () => {
+    // The complement: an RPC-driven pi session (created by startPiDriver)
+    // has no pid — its lifecycle is owned by child.on("exit") in the
+    // piDrivers map, so the health-check must NOT mark it dead purely
+    // because it has been idle for a long time. Even with a very long
+    // elapsed time and a tiny threshold, the source==='pi' exemption
+    // takes precedence over the staleness fallback.
+    const input: SessionHealthInput = {
+      pid: null,
+      source: "pi",
+      lastEventTime: 0, // very stale
+    };
+    const result = evaluateSessionHealth(input, Date.now() + 10 * STALE_MS, {
+      staleThresholdMs: STALE_MS,
+    });
+    expect(result).toEqual({ dead: false });
   });
 
-  it("does not reach the PID-reaping branch for an RPC-driven pi session with no pid", () => {
-    // The complement: an RPC-driven session (created without an
-    // envelope threading a pid) keeps session.pid === null. The
-    // pid-reaping branch is false → control falls through to the
-    // source === "pi" skip branch, which is the desired exemption for
-    // RPC-driven sessions (their own child.on("exit") handler owns
-    // the lifecycle).
-    const session = createSession("s-pi-rpc-only", "/tmp/proj", "pi");
-    expect(session.pid).toBeNull();
-    expect(wouldReapByPid(session)).toBe(false);
+  it("pid-less non-pi session IS reaped once elapsed > staleThresholdMs", () => {
+    // A pid-less non-pi session: no pid to reap, source === 'pi' check
+    // is false, so the staleness fallback applies. After the threshold
+    // has elapsed the session must be reported dead with reason "stale".
+    const now = 1_700_000_000_000;
+    const input: SessionHealthInput = {
+      pid: null,
+      source: "claude-code",
+      lastEventTime: now - (STALE_MS + 1),
+    };
+    const result = evaluateSessionHealth(input, now, {
+      staleThresholdMs: STALE_MS,
+    });
+    expect(result).toEqual({ dead: true, reason: "stale" });
+  });
+
+  it("live pid-bearing session is NEVER reaped regardless of staleness", () => {
+    // A session with a real (live) pid, regardless of how long it has
+    // been idle: the pid branch's killFn returns without throwing,
+    // which means "alive", which must short-circuit the staleness
+    // fallback so an idle-but-alive session does not get false-
+    // positive reaped.
+    const now = 1_700_000_000_000;
+    const input: SessionHealthInput = {
+      pid: 999999,
+      source: "claude-code",
+      lastEventTime: 0, // infinitely stale
+    };
+    const result = evaluateSessionHealth(input, now, {
+      staleThresholdMs: STALE_MS,
+      killFn: neverThrows,
+    });
+    expect(result).toEqual({ dead: false });
   });
 });
