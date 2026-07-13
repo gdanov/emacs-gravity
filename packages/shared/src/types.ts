@@ -691,3 +691,30 @@ export interface HookSocketResponse {
   answer?: string;
   answers?: string[];
 }
+
+/**
+ * A pi envelope arriving on the hook socket. Distinct from the Claude Code
+ * `HookSocketMessage` shape: the discriminator is `src: "pi"`, the body is
+ * the raw pi extension-event payload (which has its own `type` field), and
+ * optional `attribution` fields carry explicit worktree / branch / role
+ * metadata so the gravity-server can group and role-tag the session without
+ * relying on git heuristics or the source string alone.
+ *
+ * Envelopes are fire-and-forget: unlike `HookSocketMessage` there is no
+ * `needs_response`, no bidirectional capability-wait, no socket reply. The
+ * server silently consumes them and applies the resulting patches.
+ */
+export interface PiEventEnvelope {
+  src: "pi";
+  session_id: string;
+  cwd: string;
+  pid: number | null;
+  /** Raw pi extension-event object; passed straight into `translatePiEvent`.
+   * Carries its own `type` field (e.g. `"agent_start"`, `"session_start"`). */
+  event: Record<string, unknown>;
+  attribution?: {
+    worktree?: string;
+    branch?: string;
+    role?: SessionRole;
+  };
+}

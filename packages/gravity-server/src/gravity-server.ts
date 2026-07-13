@@ -13,11 +13,14 @@ import { dirname } from "path";
 import { pathToFileURL } from "url";
 import { Effect, Layer } from "effect";
 
-import type { HookEventName, HookData, Patch, ServerMessage, PlanFeedback } from "@gravity/shared";
+import type { HookEventName, HookData, Patch, ServerMessage, PiEventEnvelope, PlanFeedback } from "@gravity/shared";
 import { parseTerminalMessage, isHookMessage, helloProtocolVersion, protocolMismatch, shouldSendInboxOnPoll } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
 import { MermaidRpcServer } from "./handlers/mermaid-rpc-server.js";
 import { sessionEnd, setCost, setContextUsage, setPiCommands, setPiModels, updateMeta } from "./state/session.js";
+import { translatePiEvent } from "./pi-driver/hook-translator.js";
+import { createAccState } from "./pi-driver/turn-accumulator.js";
+import type { AccState } from "./pi-driver/types.js";
 
 // Effect services
 import { ServerConfig, ServerConfigLive } from "./services/config.js";
@@ -254,6 +257,94 @@ const program = Effect.gen(function* () {
       schedulePurge(sessionId);
     } else if (session && session.status === "active") {
       store.cancelPurge(sessionId);
+    }
+  };
+
+  /**
+   * Consume one `PiEventEnvelope` from the hook socket's pi-envelope path.
+   *
+   * The envelope carries `event` (the raw pi extension event), `pid`,
+   * `cwd`, and optional `attribution` (worktree / branch / role). This
+   * function:
+   *   1. Lazily creates the per-session `AccState` on first envelope.
+   *   2. Translates `event` through `translatePiEvent` and routes each
+   *      emitted `TranslationResult` through the existing `handlePiTranslation`
+   *      so patch-store/signal behavior is identical to the RPC path.
+   *   3. Threads `readOnly: true` (always), the envelope's `attribution`
+   *      fields (when present), and `pid` (when a positive number) into
+   *      `updateMeta` calls on the session — same patch-store/signal
+   *      shape used by `handlePiTranslation`.
+   *
+   * The path is fire-and-forget — envelopes do NOT carry a `needs_response`
+   * and do not engage the bidirectional capability-wait. `processHookMessage`
+   * is bypassed entirely; the hook socket's per-line dispatcher routes
+   * envelopes here and Claude-Code hook messages to `handleHookMessage`.
+   */
+  const processPiEnvelope = (envelope: PiEventEnvelope): void => {
+    const sessionId = envelope.session_id;
+    if (!sessionId) {
+      logMsg(`Pi envelope missing session_id — dropping`, "warn");
+      return;
+    }
+
+    // Lazy-create the AccState on first envelope.
+    let accState = piEnvelopeAccStates.get(sessionId);
+    const isFirstEnvelope = !accState;
+    if (!accState) {
+      accState = createAccState(sessionId, envelope.cwd);
+      piEnvelopeAccStates.set(sessionId, accState);
+    }
+
+    logMsg(`Pi envelope: type=${(envelope.event as { type?: string }).type ?? "?"} session=${sessionId}`);
+
+    // Translate and route emitted results through the existing RPC-path
+    // dispatcher so patch-store/signal behavior matches byte-for-byte.
+    const translated = translatePiEvent(envelope.event as unknown as Parameters<typeof translatePiEvent>[0], accState);
+    if (translated.kind === "emit") {
+      for (const result of translated.results) {
+        handlePiTranslation(sessionId, result);
+      }
+    }
+
+    // After the first translated event has run (which will have called
+    // ensureSession/createSession for us), thread attribution + pid +
+    // readOnly through `updateMeta` exactly like `captureBranch` does
+    // for late-arriving branch info.
+    const session = store.get(sessionId);
+    if (session) {
+      const attr = envelope.attribution;
+      const metaOpts: Parameters<typeof updateMeta>[1] = { readOnly: true };
+      if (attr) {
+        if (typeof attr.worktree === "string" && attr.worktree) {
+          metaOpts.worktree = attr.worktree;
+        }
+        if (typeof attr.branch === "string" && attr.branch) {
+          metaOpts.branch = attr.branch;
+        }
+        if (typeof attr.role === "string" && attr.role) {
+          metaOpts.role = attr.role as Parameters<typeof updateMeta>[1]["role"];
+        }
+      }
+      if (typeof envelope.pid === "number" && envelope.pid > 0) {
+        metaOpts.pid = envelope.pid;
+      }
+
+      const firstTouch = isFirstEnvelope || metaOpts.pid !== undefined
+        || metaOpts.worktree !== undefined
+        || metaOpts.branch !== undefined
+        || metaOpts.role !== undefined;
+      // Always emit a readOnly patch on first envelope (so terminals see
+      // the session go non-actionable ASAP) and on any later envelope
+      // that carries new attribution/pid fields.
+      if (firstTouch) {
+        const metaPatches = updateMeta(session, metaOpts);
+        if (metaPatches.length > 0) {
+          const stored = store.appendPatches(sessionId, metaPatches);
+          const seq = stored.length > 0 ? stored[stored.length - 1].seq : store.getSessionSeq(sessionId);
+          terminals.signalChanged("session", sessionId, seq);
+          logMsg(`Pi envelope: ${metaPatches.length} meta patches for session=${sessionId}, signaled seq=${seq}`);
+        }
+      }
     }
   };
 
@@ -512,6 +603,7 @@ const program = Effect.gen(function* () {
       terminals.broadcast({ type: "session.removed", sessionId });
       terminals.unsubscribeAll(sessionId);
       terminals.signalChanged("overview");
+      piEnvelopeAccStates.delete(sessionId);
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
@@ -523,6 +615,15 @@ const program = Effect.gen(function* () {
   // callback for that driver (which adds on start and removes on stop/error).
   type PiDriver = ReturnType<typeof startPiDriver>;
   const piDrivers = new Map<string, PiDriver>();
+
+  // Map of sessionId → AccState for sessions fed by pi ambient-event
+  // envelopes on the hook socket (vs. RPC-spawned drivers). One AccState
+  // per session is created lazily on the FIRST envelope seen for that
+  // session, so envelopes arriving without an upfront SessionStart (the
+  // normal emitter case — there is no eager server-side synthesis for
+  // this path) can still exercise the translator's stateful accumulation.
+  // The entry is deleted in `schedulePurge`'s `onPurge` callback.
+  const piEnvelopeAccStates = new Map<string, AccState>();
 
   /**
    * Maps gravity inbox item id → originating pi session id + extension_ui
@@ -1269,6 +1370,19 @@ const program = Effect.gen(function* () {
         if (line.length === 0) continue;
         try {
           const msg = JSON.parse(line);
+          // Pi envelope discriminator: lines with `src: "pi"` carry a raw
+          // pi extension-event payload + attribution and bypass the
+          // Claude-Code-hook message path entirely (no `needs_response`,
+          // no bidirectional capability-wait, no socket reply). Every
+          // other parsed line falls through to the existing hook handler.
+          if (
+            msg
+            && typeof msg === "object"
+            && (msg as Record<string, unknown>).src === "pi"
+          ) {
+            processPiEnvelope(msg as PiEventEnvelope);
+            continue;
+          }
           handleHookMessage(msg, socket).catch((e) =>
             logMsg(`Hook message handler error: ${e}`, "error"),
           );

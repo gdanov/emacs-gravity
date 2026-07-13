@@ -817,7 +817,19 @@ export function handleEvent(
     const handler = dispatch[eventName];
     const eventPatches = handler
       ? yield* handler({ sessionId, cwd, data, pid, hookSocket })
-      : [];
+      : (() => {
+          // Visibility-only log for hook events we have no per-event handler
+          // for. Behavior is unchanged: an empty patch list is returned so
+          // the rest of `handleEvent` proceeds — only the unknown name is
+          // now traceable in stderr instead of silently vanishing.
+          // Uses `process.stderr.write` rather than `logMsg` from
+          // gravity-server.ts because that would create a circular import
+          // (gravity-server.ts imports `handleEvent` from this file).
+          process.stderr.write(
+            `[event-handler] unhandled hook event: ${eventName}\n`,
+          );
+          return [];
+        })();
 
     return [...preamblePatches, ...eventPatches];
   });

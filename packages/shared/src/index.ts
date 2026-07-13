@@ -47,6 +47,7 @@ export type {
   // Hook socket
   HookSocketMessage,
   HookSocketResponse,
+  PiEventEnvelope,
 } from "./types.js";
 
 // Protocol version (runtime value — must be a value export, not `export type`)
