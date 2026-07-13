@@ -9,9 +9,10 @@
 //      cwd for all three fields, never throws.
 
 import { describe, it, expect } from "vitest";
-import { mkdtempSync } from "fs";
+import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import { execFileSync } from "child_process";
 import { deriveRepoAttribution } from "../src/enrichment/repo-attribution.js";
 
 describe("deriveRepoAttribution", () => {
@@ -99,5 +100,60 @@ describe("deriveRepoAttribution", () => {
     const cwd = process.cwd();
     const attr = deriveRepoAttribution(cwd);
     expect(resolve(attr.repoKey)).toBe(attr.repoKey);
+  });
+
+  it("unifies a real repo + a real git worktree on the same repoKey (end-to-end)", () => {
+    // Build a FRESH repo + worktree fixture inside tmpdir so the test does
+    // not interact with this worktree's own `.git`. The whole point of
+    // this test is that `deriveRepoAttribution` -- working ONLY off
+    // `git -C cwd rev-parse {--git-common-dir,--show-toplevel}` --
+    // produces the SAME `repoKey` for both the main checkout cwd and
+    // the worktree cwd, because `--git-common-dir` resolves to the
+    // main checkout's `.git` directory for both.
+    const mainDir = mkdtempSync(join(tmpdir(), "repo-attr-main-"));
+    const worktreeParent = mkdtempSync(join(tmpdir(), "repo-attr-wt-parent-"));
+    const worktreeDir = join(worktreeParent, "wt-branch");
+    const branch = "wt-test-branch";
+    try {
+      execFileSync("git", ["init", "--initial-branch=main", mainDir], { stdio: "ignore" });
+      // git worktree add requires at least one commit on the repo so a
+      // branch can be created from HEAD; an empty repo refuses the
+      // command. Single empty commit is enough.
+      execFileSync("git", ["-C", mainDir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "initial"], { stdio: "ignore" });
+
+      // Add the worktree on a new branch rooted at the main checkout's
+      // HEAD. `worktreeDir` lives OUTSIDE `mainDir` so it is a true
+      // independent checkout with its own `git` pointer file.
+      execFileSync("git", ["-C", mainDir, "worktree", "add", "-b", branch, worktreeDir], { stdio: "ignore" });
+
+      // Sanity: the worktree really is a worktree (its own toplevel).
+      expect(execFileSync("git", ["-C", worktreeDir, "rev-parse", "--show-toplevel"], { encoding: "utf-8" }).trim()).toBe(worktreeDir);
+      // And it points back at mainDir as its git-common-dir.
+      const wtCommon = execFileSync("git", ["-C", worktreeDir, "rev-parse", "--git-common-dir"], { encoding: "utf-8" }).trim();
+      expect(resolve(worktreeDir, wtCommon)).toBe(join(mainDir, ".git"));
+
+      const mainAttr = deriveRepoAttribution(mainDir);
+      const wtAttr = deriveRepoAttribution(worktreeDir);
+
+      // The unifying invariant this whole function exists for: both cwds
+      // resolve to the SAME repoKey (the main checkout's .git dir).
+      expect(wtAttr.repoKey).toBe(mainAttr.repoKey);
+      expect(wtAttr.repoKey).toBe(join(mainDir, ".git"));
+      // The two worktrees still report their own working tree as worktree.
+      expect(mainAttr.worktree).toBe(mainDir);
+      expect(wtAttr.worktree).toBe(worktreeDir);
+    } finally {
+      // Try the polite teardown first (git worktree remove). If that
+      // fails (the test bailed mid-setup, etc.) the final rmSync with
+      // force still guarantees no dangling state.
+      try {
+        execFileSync("git", ["-C", mainDir, "worktree", "remove", "--force", worktreeDir], { stdio: "ignore" });
+      } catch { /* best effort */ }
+      try {
+        execFileSync("git", ["-C", mainDir, "worktree", "prune"], { stdio: "ignore" });
+      } catch { /* best effort */ }
+      rmSync(mainDir, { recursive: true, force: true });
+      rmSync(worktreeParent, { recursive: true, force: true });
+    }
   });
 });
