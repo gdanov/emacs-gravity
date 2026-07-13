@@ -455,7 +455,7 @@ export interface PromptEntry {
 
 // ── Inbox ────────────────────────────────────────────────────────────
 
-export type InboxItemType = "permission" | "question" | "plan-review" | "idle";
+export type InboxItemType = "permission" | "question" | "plan-review" | "idle" | "attention";
 
 export interface InboxItem {
   id: number;
@@ -466,6 +466,12 @@ export interface InboxItem {
   timestamp: number;
   summary: string;
   data: Record<string, unknown>;
+  /** False for items a read-only client can SEE but not answer — created
+   * when a bidirectional hook event fires with no action-capable terminal
+   * connected, so a menu-bar / browser client can still surface what is
+   * being requested. The real actionable item (if one eventually arrives)
+   * replaces this transparently. */
+  actionable: boolean;
 }
 
 // ── Semantic Patches ─────────────────────────────────────────────────

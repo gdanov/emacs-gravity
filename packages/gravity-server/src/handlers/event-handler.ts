@@ -338,14 +338,38 @@ const handleTurnClose = (ctx: EventContext) =>
     const snippet = stopText
       ? stopText.replace(/[\n\r\t]+/g, " ").substring(0, 80)
       : "idle";
-    inbox.add(
-      "idle",
-      ctx.sessionId,
-      session.project,
-      session.slug || ctx.sessionId.substring(0, 8),
-      snippet,
-      { turn, snippet },
-    );
+    // Headless/swarm sessions don't need a per-turn idle ping — the
+    // orchestrator driving the worker already knows the turn ended.
+    // Suppressing the item keeps the inbox free of background noise.
+    if (session.role !== "worker" && session.role !== "coordinator") {
+      inbox.add(
+        "idle",
+        ctx.sessionId,
+        session.project,
+        session.slug || ctx.sessionId.substring(0, 8),
+        snippet,
+        { turn, snippet },
+      );
+    }
+    // A pi-side fault (model errored out, or the turn was aborted)
+    // surfaces as a non-actionable "attention" item so a read-only
+    // client can see WHY the swarm worker stopped, even when the
+    // orchestrator that spawned it has no resident UI to ask.
+    if (stopReason === "error" || stopReason === "aborted") {
+      const faultSummary = stopText
+        ? `pi turn ended (${stopReason}): ${stopText}`.substring(0, 80)
+        : `pi turn ended: ${stopReason}`;
+      inbox.add(
+        "attention",
+        ctx.sessionId,
+        session.project,
+        session.slug || ctx.sessionId.substring(0, 8),
+        faultSummary,
+        { turn, stopReason, stopText },
+        undefined,
+        false, // not actionable — read-only visibility
+      );
+    }
     return patches;
   });
 
@@ -377,7 +401,14 @@ const handleStop = (ctx: EventContext) =>
     const snippet = stopText
       ? stopText.replace(/[\n\r\t]+/g, " ").substring(0, 80)
       : "idle";
-    inbox.add("idle", ctx.sessionId, session.project, session.slug || ctx.sessionId.substring(0, 8), snippet, { turn, snippet });
+    // Mirror handleTurnClose's role-based idle suppression — the pinned
+    // decision is role-based, not source-based, so both handlers stay
+    // consistent. Claude Code sessions realistically never carry
+    // worker/coordinator today, so this is a no-op in practice but keeps
+    // the two handlers' idle-item logic uniform.
+    if (session.role !== "worker" && session.role !== "coordinator") {
+      inbox.add("idle", ctx.sessionId, session.project, session.slug || ctx.sessionId.substring(0, 8), snippet, { turn, snippet });
+    }
     return patches;
   });
 

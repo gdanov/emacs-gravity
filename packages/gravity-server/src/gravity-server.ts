@@ -13,7 +13,7 @@ import { dirname } from "path";
 import { pathToFileURL } from "url";
 import { Effect, Layer } from "effect";
 
-import type { HookEventName, HookData, Patch, ServerMessage, PiEventEnvelope, PlanFeedback } from "@gravity/shared";
+import type { HookEventName, HookData, InboxItemType, Patch, ServerMessage, PiEventEnvelope, PlanFeedback } from "@gravity/shared";
 import { parseTerminalMessage, isHookMessage, helloProtocolVersion, protocolMismatch, shouldSendInboxOnPoll } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
 import { MermaidRpcServer } from "./handlers/mermaid-rpc-server.js";
@@ -39,6 +39,12 @@ import type { ExtensionUIRequestEvent } from "./pi-driver/types.js";
 // ── Constants ────────────────────────────────────────────────────────
 
 const CAPABILITY_WAIT_MS = 10_000;
+// Short capability-wait bound used only by the no-capable-terminal
+// pre-inbox path in `processHookMessage`. A read-only client can display
+// the new non-actionable inbox item within this window — there is no
+// reason to stall the full 10s of `CAPABILITY_WAIT_MS` when the item is
+// already visible.
+const NO_CAPABLE_WAIT_MS = 1000;
 const CAPABILITY_POLL_MS = 500;
 const PURGE_DELAY_MS = 2 * 60 * 1000;
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
@@ -115,18 +121,68 @@ export const processHookMessage = async (
   logMsg(`Hook event: ${eventName} session=${sessionId}`);
   deps.markHookReceived();
 
-  // Reject bidirectional events if no capable terminal is connected
+  // Reject bidirectional events if no capable terminal is connected.
+  // The capability-wait is short (NO_CAPABLE_WAIT_MS, not the long
+  // CAPABILITY_WAIT_MS) because we ALSO create a non-actionable inbox
+  // item FIRST — a read-only client can see "permission needed" within
+  // the same tick and there is no reason to stall the hook for the
+  // full 10s bound.
+  let preItem: ReturnType<InboxService["add"]> | null = null;
   if (needsResponse && BIDIRECTIONAL_EVENTS.has(eventName)) {
     if (!deps.terminals.hasCapableTerminal("action.permission")) {
-      logMsg(`No capable terminal connected — waiting up to ${CAPABILITY_WAIT_MS}ms for reconnect`, "warn");
-      const arrived = await deps.waitForCapableTerminal("action.permission", CAPABILITY_WAIT_MS);
+      // Mirror the type/summary selection already used by
+      // handlePermissionRequest / handleAskUserQuestionIntercept in
+      // event-handler.ts so the non-actionable item looks like the
+      // real item it is standing in for. The eventual real item will
+      // be created when the hook proceeds; if no terminal ever
+      // arrives, this one stays in place for read-only clients.
+      const toolName = typeof data.tool_name === "string" ? data.tool_name : "unknown";
+      const itemType: InboxItemType =
+        eventName === "AskUserQuestionIntercept"
+          ? "question"
+          : toolName === "ExitPlanMode"
+            ? "plan-review"
+            : "permission";
+      const itemSummary =
+        eventName === "AskUserQuestionIntercept"
+          ? ((data.tool_input as Record<string, unknown> | undefined)?.questions as
+              Array<Record<string, unknown>> | undefined)?.[0]?.question as string
+              ?? toolName
+          : toolName;
+      const trimmedCwd = cwd.replace(/\/+$/, "");
+      const project = trimmedCwd.split("/").pop() || trimmedCwd || cwd;
+      const label = sessionId.substring(0, 8);
+      preItem = deps.inbox.add(
+        itemType,
+        sessionId,
+        project,
+        label,
+        itemSummary.substring(0, 80),
+        data as Record<string, unknown>,
+        undefined, // no hook socket — read-only visibility, no pending response
+        false, // actionable: false
+      );
+      logMsg(`No capable terminal connected — non-actionable inbox item ${preItem.id} created; waiting up to ${NO_CAPABLE_WAIT_MS}ms for reconnect`, "warn");
+      const arrived = await deps.waitForCapableTerminal("action.permission", NO_CAPABLE_WAIT_MS);
       if (!arrived) {
-        logMsg(`No capable terminal after ${CAPABILITY_WAIT_MS}ms — rejecting ${eventName}`, "warn");
+        logMsg(`No capable terminal after ${NO_CAPABLE_WAIT_MS}ms — rejecting ${eventName} (non-actionable inbox item ${preItem.id} kept in place)`, "warn");
         try {
           socket.write(JSON.stringify({ reason: "no_capable_terminal" }) + "\n");
           socket.end();
         } catch { /* socket may already be closed */ }
+        // Leave preItem in place — a read-only client can still see (but
+        // not answer) the request after the socket is rejected.
         return;
+      }
+      // A capable terminal arrived within the short window: clear the
+      // non-actionable stub so the real actionable item (created by
+      // handlePermissionRequest / handleAskUserQuestionIntercept right
+      // below in the normal runEvent path) is the only item the user
+      // sees for this hook.
+      const removed = deps.inbox.remove(preItem.id);
+      if (removed) {
+        logMsg(`Capable terminal connected during wait — removed non-actionable stub ${preItem.id} before proceeding with ${eventName}`);
+        deps.terminals.signalChanged("inbox");
       }
       logMsg(`Capable terminal connected during wait — proceeding with ${eventName}`);
     }
