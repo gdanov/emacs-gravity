@@ -373,6 +373,33 @@ export function pollSubscribedSessions(
   }
 }
 
+// ── Purge cleanup (extracted for direct unit testing) ────────────────
+//
+// `schedulePurge`'s body was a single closed-over callback that
+// deleted the session, cleared its patches, removed inbox items for
+// the session, broadcast `session.removed`, unsubscribed terminals,
+// signaled the overview change, and dropped the piEnvelopeAccStates
+// entry. Pulled out into a callable function so the wiring (and the
+// absence of logging inside) is independently verifiable — the caller
+// retains the `Purged ended session ...` log exactly as before.
+
+export interface SchedulePurgeDeps {
+  readonly store: SessionStoreService;
+  readonly inbox: InboxService;
+  readonly terminals: TerminalService;
+  readonly piEnvelopeAccStates: Map<string, AccState>;
+}
+
+export function purgeSession(deps: SchedulePurgeDeps, sessionId: string): void {
+  deps.store.delete(sessionId);
+  deps.store.clearPatches(sessionId);
+  deps.inbox.removeForSession(sessionId);
+  deps.terminals.broadcast({ type: "session.removed", sessionId });
+  deps.terminals.unsubscribeAll(sessionId);
+  deps.terminals.signalChanged("overview");
+  deps.piEnvelopeAccStates.delete(sessionId);
+}
+
 // ── Program ──────────────────────────────────────────────────────────
 
 const program = Effect.gen(function* () {
@@ -774,13 +801,7 @@ const program = Effect.gen(function* () {
   /** Schedule purge of an ended session. */
   const schedulePurge = (sessionId: string): void => {
     store.schedulePurge(sessionId, PURGE_DELAY_MS, () => {
-      store.delete(sessionId);
-      store.clearPatches(sessionId);
-      inbox.removeForSession(sessionId);
-      terminals.broadcast({ type: "session.removed", sessionId });
-      terminals.unsubscribeAll(sessionId);
-      terminals.signalChanged("overview");
-      piEnvelopeAccStates.delete(sessionId);
+      purgeSession({ store, inbox, terminals, piEnvelopeAccStates }, sessionId);
       logMsg(`Purged ended session ${sessionId}`);
     });
   };
