@@ -1525,13 +1525,19 @@ const program = Effect.gen(function* () {
           logMsg(`Health check: session ${sessionId} PID ${session.pid} is dead`);
         }
       } else if (session.source === "pi") {
-        // Pi sessions intentionally have no PID on the gravity Session
-        // object — they're managed entirely by gravity-server (via
-        // piDrivers map and child.on("exit") in the pi-driver spawn
-        // path). Skip the time-based staleness fallback: an idle pi
-        // session is normal (pi waits for the next prompt indefinitely),
-        // not a dead one. Pi termination is reported correctly via the
-        // SessionEnd event the spawn handler emits on child exit.
+        // This branch is reached only for pid-less pi sessions. The
+        // PID-reaping branch above (process.kill(pid, 0)) handles any
+        // session that carries a live pid regardless of its source —
+        // including ambient-emitter-fed pi sessions, which always
+        // carry a real pid threaded in from their envelope at ingest
+        // time. Reaching this branch therefore means the session has
+        // no pid, which is true exclusively for RPC-driven pi sessions
+        // managed by startPiDriver's own child.on("exit") handler (the
+        // piDrivers map entry). Skip the time-based staleness fallback:
+        // an idle pi session is normal (pi waits for the next prompt
+        // indefinitely), not a dead one. Pi termination is reported
+        // correctly via the SessionEnd event the spawn handler emits
+        // on child exit.
       } else if (now - session.lastEventTime > STALENESS_THRESHOLD_MS) {
         isDead = true;
         logMsg(`Health check: session ${sessionId} stale (no events for ${Math.round((now - session.lastEventTime) / 1000)}s)`);
