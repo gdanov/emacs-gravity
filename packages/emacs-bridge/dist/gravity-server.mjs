@@ -97809,6 +97809,7 @@ import { createServer as createServer2 } from "net";
 import { unlinkSync as unlinkSync2 } from "fs";
 import { dirname as dirname2 } from "path";
 import { pathToFileURL } from "url";
+import { randomBytes as randomBytes2 } from "crypto";
 
 // ../../node_modules/effect/dist/Pipeable.js
 var pipeArguments = (self2, args2) => {
@@ -106178,6 +106179,245 @@ var MermaidRpcServer = class {
   }
 };
 
+// src/gateway/ws-gateway.ts
+import { createServer as createHttpServer } from "http";
+import { createConnection } from "net";
+import { WebSocketServer } from "ws";
+var KEEPALIVE_INTERVAL_MS = 3e4;
+var WS_PATH = "/ws";
+var MAX_LINE_BYTES = 1024 * 1024;
+var WsGateway = class {
+  opts;
+  logFn;
+  httpServer;
+  wss;
+  live = /* @__PURE__ */ new Set();
+  keepalive = null;
+  boundPort = 0;
+  started = false;
+  stopped = false;
+  constructor(options) {
+    this.opts = options;
+    this.logFn = options.logFn ?? (() => {
+    });
+    this.wss = new WebSocketServer({ noServer: true });
+    this.wss.on("connection", (ws) => {
+      this.handleConnection(ws);
+    });
+    this.httpServer = createHttpServer((req, res) => {
+      this.handleHttpRequest(req, res);
+    });
+    this.httpServer.on("upgrade", (req, socket, head) => {
+      this.handleUpgrade(req, socket, head);
+    });
+    this.httpServer.on("error", (err) => {
+      this.logFn(`Browser gateway HTTP error: ${err.message}`, "error");
+    });
+  }
+  start() {
+    return new Promise((resolve2, reject) => {
+      if (this.started) {
+        resolve2();
+        return;
+      }
+      this.httpServer.once("error", (err) => {
+        reject(err);
+      });
+      this.httpServer.listen(this.opts.port, this.opts.host, () => {
+        const addr = this.httpServer.address();
+        if (addr && typeof addr === "object") {
+          this.boundPort = addr.port;
+        }
+        this.keepalive = setInterval(() => {
+          this.tickKeepalive();
+        }, KEEPALIVE_INTERVAL_MS);
+        this.started = true;
+        resolve2();
+      });
+    });
+  }
+  stop() {
+    if (this.stopped) return;
+    this.stopped = true;
+    for (const ws of [...this.live]) {
+      try {
+        ws.terminate();
+      } catch {
+      }
+    }
+    this.live.clear();
+    if (this.keepalive) {
+      clearInterval(this.keepalive);
+      this.keepalive = null;
+    }
+    this.wss.close();
+    this.httpServer.close();
+  }
+  get port() {
+    return this.boundPort;
+  }
+  tickKeepalive() {
+    for (const ws of [...this.live]) {
+      if (ws.isAlive === false) {
+        try {
+          ws.terminate();
+        } catch {
+        }
+        this.live.delete(ws);
+        continue;
+      }
+      ws.isAlive = false;
+      try {
+        ws.ping();
+      } catch {
+        try {
+          ws.terminate();
+        } catch {
+        }
+        this.live.delete(ws);
+      }
+    }
+  }
+  handleHttpRequest(req, res) {
+    if (req.method !== "GET") {
+      res.writeHead(405, { "content-type": "text/plain" });
+      res.end("Method Not Allowed");
+      return;
+    }
+    if (req.url === "/" || req.url === "/index.html") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(this.opts.clientHtml);
+      return;
+    }
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("Not Found");
+  }
+  handleUpgrade(req, socket, head) {
+    if (this.boundPort === 0) {
+      this.rejectUpgrade(socket);
+      return;
+    }
+    let url;
+    try {
+      url = new URL(req.url ?? "/", "http://placeholder");
+    } catch {
+      this.rejectUpgrade(socket);
+      return;
+    }
+    if (url.pathname !== WS_PATH) {
+      this.rejectUpgrade(socket);
+      return;
+    }
+    if (!this.originAllowed(req.headers.origin, this.boundPort)) {
+      this.rejectUpgrade(socket);
+      return;
+    }
+    const token = url.searchParams.get("token");
+    if (token !== this.opts.token) {
+      this.rejectUpgrade(socket);
+      return;
+    }
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.wss.emit("connection", ws, req);
+    });
+  }
+  originAllowed(origin, port) {
+    if (typeof origin !== "string" || origin.length === 0) {
+      return false;
+    }
+    let parsed;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      return false;
+    }
+    if (parsed.protocol !== "http:") return false;
+    if (parsed.port !== String(port)) return false;
+    if (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") {
+      return false;
+    }
+    return true;
+  }
+  rejectUpgrade(socket) {
+    try {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+    } catch {
+    }
+    socket.destroy();
+  }
+  handleConnection(ws) {
+    ws.isAlive = true;
+    this.live.add(ws);
+    ws.on("pong", () => {
+      ws.isAlive = true;
+    });
+    const terminalSocket = createConnection(this.opts.terminalSocketPath);
+    let inboundBuffer = "";
+    terminalSocket.on("data", (chunk) => {
+      inboundBuffer += chunk.toString("utf8");
+      if (inboundBuffer.length > MAX_LINE_BYTES) {
+        this.logFn("Browser gateway: inbound line buffer exceeded limit, closing", "warn");
+        try {
+          ws.terminate();
+        } catch {
+        }
+        terminalSocket.destroy();
+        return;
+      }
+      let newlineIdx;
+      while ((newlineIdx = inboundBuffer.indexOf("\n")) !== -1) {
+        const line = inboundBuffer.substring(0, newlineIdx);
+        inboundBuffer = inboundBuffer.substring(newlineIdx + 1);
+        if (line.length === 0) continue;
+        try {
+          ws.send(line);
+        } catch (err) {
+          this.logFn(`Browser gateway WS send failed: ${err.message}`, "warn");
+        }
+      }
+    });
+    ws.on("message", (data, isBinary) => {
+      if (isBinary) {
+        this.logFn("Browser gateway: binary WS frame rejected", "warn");
+        return;
+      }
+      const text = typeof data === "string" ? data : Buffer.isBuffer(data) ? data.toString("utf8") : "";
+      if (text.length === 0) return;
+      try {
+        terminalSocket.write(text + "\n");
+      } catch (err) {
+        this.logFn(`Browser gateway terminal write failed: ${err.message}`, "warn");
+      }
+    });
+    terminalSocket.on("error", (err) => {
+      this.logFn(`Browser gateway terminal socket error: ${err.message}`, "warn");
+    });
+    terminalSocket.on("close", () => {
+      try {
+        ws.close(1011, "terminal socket closed");
+      } catch {
+      }
+    });
+    ws.on("close", () => {
+      this.live.delete(ws);
+      try {
+        terminalSocket.destroy();
+      } catch {
+      }
+    });
+    ws.on("error", (err) => {
+      this.logFn(`Browser gateway WS error: ${err.message}`, "warn");
+      try {
+        terminalSocket.destroy();
+      } catch {
+      }
+    });
+  }
+};
+
+// src/gateway/client-bundle.generated.ts
+var CLIENT_HTML_TEMPLATE = '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="utf-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1" />\n    <title>gravity</title>\n    <style>\n      body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 1.5rem; }\n      h1 { font-size: 1rem; margin: 0 0 1rem; }\n      section { margin-bottom: 1.5rem; }\n      h2 { font-size: 0.9rem; margin: 0 0 0.5rem; }\n      ul { list-style: none; padding: 0; margin: 0; }\n      li { padding: 0.15rem 0; }\n      .status { color: #666; font-size: 0.85rem; }\n    </style>\n  </head>\n  <body>\n    <h1>gravity</h1>\n    <p class="status" id="status">connecting\u2026</p>\n    <section>\n      <h2>overview</h2>\n      <ul id="overview"></ul>\n    </section>\n    <section>\n      <h2>inbox</h2>\n      <ul id="inbox"></ul>\n    </section>\n    <script>window.__GRAVITY_TOKEN__ = "%%GRAVITY_TOKEN%%";</script>\n    <script>\n"use strict";\n(() => {\n  // src/gateway/client/logic.ts\n  function shouldSyncPoll(msg) {\n    return msg.type === "state-changed";\n  }\n  function classifyInboxItem(item) {\n    if (item.type === "attention") return "attention";\n    if (item.actionable) return "actionable";\n    return "view-only";\n  }\n  function groupedFleet(projects) {\n    return projects;\n  }\n  function applyPatch(session, patch) {\n    switch (patch.op) {\n      case "add_turn": {\n        if (session.turns.some((t) => t.turnNumber === patch.turn.turnNumber)) {\n          return session;\n        }\n        const next = cloneSession(session);\n        next.turns.push(cloneTurn(patch.turn));\n        next.currentTurn = patch.turn.turnNumber;\n        return next;\n      }\n      case "freeze_turn": {\n        const target = session.turns.find((t) => t.turnNumber === patch.turnNumber);\n        if (!target) return session;\n        const next = cloneSession(session);\n        const nt = next.turns.find((t) => t.turnNumber === patch.turnNumber);\n        if (nt) nt.frozen = true;\n        return next;\n      }\n      case "add_step": {\n        const target = findTurn(session, patch.turnNumber);\n        if (!target) return session;\n        const next = cloneSession(session);\n        const nt = next.turns.find((t) => t.turnNumber === patch.turnNumber);\n        if (nt) nt.steps.push(cloneStep(patch.step));\n        return next;\n      }\n      case "add_tool": {\n        const target = findTurn(session, patch.turnNumber);\n        if (!target) return session;\n        if (patch.tool.toolUseId && session.toolIndex[patch.tool.toolUseId]) {\n          return session;\n        }\n        const next = cloneSession(session);\n        const nt = next.turns.find((t) => t.turnNumber === patch.turnNumber);\n        if (!nt) return session;\n        const step = nt.steps[patch.stepIndex] ?? nt.steps[nt.steps.length - 1];\n        if (!step) return session;\n        const tool = cloneTool(patch.tool);\n        step.tools.push(tool);\n        nt.toolCount += 1;\n        next.totalToolCount += 1;\n        if (tool.toolUseId) {\n          next.toolIndex[tool.toolUseId] = {\n            turnNumber: nt.turnNumber,\n            stepIndex: nt.steps.indexOf(step),\n            toolIndex: step.tools.length - 1,\n            agentId: null\n          };\n        }\n        return next;\n      }\n      case "complete_tool": {\n        const loc = session.toolIndex[patch.toolUseId];\n        if (!loc) return session;\n        const next = cloneSession(session);\n        const nloc = next.toolIndex[patch.toolUseId];\n        if (!nloc) return session;\n        const turn = next.turns.find((t) => t.turnNumber === nloc.turnNumber);\n        if (!turn) return session;\n        const step = turn.steps[nloc.stepIndex];\n        if (!step) return session;\n        const tool = step.tools[nloc.toolIndex];\n        if (!tool) return session;\n        tool.status = patch.status;\n        tool.result = patch.result;\n        if (typeof patch.duration === "number") tool.duration = patch.duration;\n        if (typeof patch.postText === "string") tool.postText = patch.postText;\n        if (typeof patch.postThinking === "string") tool.postThinking = patch.postThinking;\n        return next;\n      }\n      case "add_agent": {\n        if (session.agentIndex[patch.agent.agentId]) return session;\n        const turn = session.turns[session.turns.length - 1];\n        if (!turn) return session;\n        const next = cloneSession(session);\n        const lastTurn = next.turns[next.turns.length - 1];\n        if (!lastTurn) return session;\n        const agent = cloneAgent(patch.agent);\n        const agentIndex = lastTurn.agents.length;\n        lastTurn.agents.push(agent);\n        lastTurn.agentCount += 1;\n        next.agentIndex[patch.agent.agentId] = {\n          turnNumber: lastTurn.turnNumber,\n          agentIndex\n        };\n        return next;\n      }\n      case "complete_agent": {\n        const loc = session.agentIndex[patch.agentId];\n        if (!loc) return session;\n        const next = cloneSession(session);\n        const turn = next.turns.find((t) => t.turnNumber === loc.turnNumber);\n        if (!turn) return session;\n        const agent = turn.agents[loc.agentIndex];\n        if (!agent) return session;\n        agent.status = "done";\n        if (typeof patch.stopText === "string") agent.stopText = patch.stopText;\n        if (typeof patch.stopThinking === "string") agent.stopThinking = patch.stopThinking;\n        if (typeof patch.duration === "number") agent.duration = patch.duration;\n        if (typeof patch.transcriptPath === "string") agent.transcriptPath = patch.transcriptPath;\n        return next;\n      }\n      case "set_turn_stop": {\n        const target = findTurn(session, patch.turnNumber);\n        if (!target) return session;\n        const next = cloneSession(session);\n        const nt = next.turns.find((t) => t.turnNumber === patch.turnNumber);\n        if (!nt) return session;\n        if (typeof patch.stopText === "string") nt.stopText = patch.stopText;\n        if (typeof patch.stopThinking === "string") nt.stopThinking = patch.stopThinking;\n        if (typeof patch.stopReason === "string") nt.stopReason = patch.stopReason;\n        return next;\n      }\n      case "set_claude_status": {\n        if (session.claudeStatus === patch.claudeStatus) return session;\n        const next = cloneSession(session);\n        next.claudeStatus = patch.claudeStatus;\n        return next;\n      }\n      default:\n        return session;\n    }\n  }\n  function findTurn(session, turnNumber) {\n    return session.turns.find((t) => t.turnNumber === turnNumber);\n  }\n  function cloneSession(session) {\n    return structuredClone(session);\n  }\n  function cloneStep(step) {\n    return structuredClone(step);\n  }\n  function cloneTurn(turn) {\n    return structuredClone(turn);\n  }\n  function cloneTool(tool) {\n    return structuredClone(tool);\n  }\n  function cloneAgent(agent) {\n    return structuredClone(agent);\n  }\n\n  // src/gateway/client/index.ts\n  var RECONNECT_DELAY_MS = 1e3;\n  var TOKEN = globalThis.__GRAVITY_TOKEN__ ?? "";\n  var state = {\n    projects: [],\n    inbox: [],\n    status: "connecting\\u2026",\n    notice: null,\n    currentSessionId: null,\n    currentSession: null\n  };\n  var ws = null;\n  var reconnectTimer = null;\n  var closedByUs = false;\n  function el(id) {\n    return document.getElementById(id);\n  }\n  function textNode(text) {\n    return document.createTextNode(text);\n  }\n  function textSpan(prefix, text, className) {\n    const span = document.createElement("span");\n    span.className = className;\n    span.textContent = prefix === "turn" ? `${prefix} ${text}` : prefix;\n    return span;\n  }\n  function elFromHtml(html) {\n    const tpl = document.createElement("template");\n    tpl.innerHTML = html.trim();\n    return tpl.content.firstElementChild;\n  }\n  function renderFleet(parent) {\n    const projects = groupedFleet(state.projects);\n    const container = elFromHtml(`<div class="fleet"></div>`);\n    if (projects.length === 0) {\n      container.appendChild(textNode("(no projects)"));\n    } else {\n      for (const project of projects) {\n        const groupKey = project.repoKey || project.project;\n        const group = elFromHtml(\n          `<section class="fleet-group"><h3 class="fleet-group__key"></h3></section>`\n        );\n        const keyEl = group.querySelector(".fleet-group__key");\n        if (keyEl) keyEl.textContent = groupKey;\n        const summaryText = ` \\u2014 ${project.sessions.length} session(s)`;\n        const meta = elFromHtml(`<span class="fleet-group__meta"></span>`);\n        meta.textContent = summaryText;\n        group.appendChild(meta);\n        if (project.sessions.length === 0) {\n          const empty = document.createElement("p");\n          empty.className = "fleet-empty";\n          empty.textContent = "(no sessions)";\n          group.appendChild(empty);\n        } else {\n          const table = elFromHtml(\n            `<table class="fleet-table">\n            <thead>\n              <tr>\n                <th>session</th>\n                <th>role</th>\n                <th>branch</th>\n                <th>worktree</th>\n                <th>turns</th>\n                <th>current tool</th>\n                <th>cost</th>\n              </tr>\n            </thead>\n            <tbody></tbody>\n          </table>`\n          );\n          const tbody = table.querySelector("tbody");\n          if (!tbody) {\n            group.appendChild(table);\n          } else {\n            for (const session of project.sessions) {\n              tbody.appendChild(renderFleetRow(project.project, session));\n            }\n            group.appendChild(table);\n          }\n        }\n        container.appendChild(group);\n      }\n    }\n    replaceChildById(parent, "fleet-root", container);\n  }\n  function renderFleetRow(project, session) {\n    const tr = document.createElement("tr");\n    tr.className = "fleet-row";\n    tr.dataset.sessionId = session.sessionId;\n    tr.dataset.project = project;\n    tr.setAttribute("tabindex", "0");\n    tr.setAttribute("role", "button");\n    tr.setAttribute("aria-label", `Drill into session ${session.sessionId}`);\n    const idCell = elFromHtml(`<td class="fleet-row__id"></td>`);\n    idCell.textContent = session.displayName ?? session.slug ?? session.sessionId;\n    if (!session.displayName && !session.slug) {\n      idCell.title = session.sessionId;\n    }\n    tr.appendChild(idCell);\n    tr.appendChild(td(session.role ?? "\\u2014"));\n    tr.appendChild(td(session.branch ?? "\\u2014"));\n    tr.appendChild(td(session.worktree ?? "\\u2014"));\n    tr.appendChild(td(String(session.turnCount)));\n    tr.appendChild(td(session.currentTool ?? "\\u2014"));\n    tr.appendChild(td(formatCost(session.cost)));\n    tr.addEventListener("click", () => onSessionRowClick(session.sessionId));\n    tr.addEventListener("keydown", (ev) => {\n      if (ev.key === "Enter" || ev.key === " ") {\n        ev.preventDefault();\n        onSessionRowClick(session.sessionId);\n      }\n    });\n    return tr;\n  }\n  function td(text) {\n    const cell = document.createElement("td");\n    cell.textContent = text;\n    return cell;\n  }\n  function formatCost(cost) {\n    if (cost == null) return "\\u2014";\n    if (cost < 0.01) return `${cost.toFixed(4)}`;\n    return `${cost.toFixed(2)}`;\n  }\n  function onSessionRowClick(sessionId) {\n    if (state.currentSessionId === sessionId) return;\n    if (state.currentSessionId && state.currentSessionId !== sessionId) {\n      send({ type: "request.unsubscribe", sessionId: state.currentSessionId });\n    }\n    state.currentSessionId = sessionId;\n    state.currentSession = null;\n    render();\n    send({ type: "request.session", sessionId });\n  }\n  function closeDrillDown() {\n    if (!state.currentSessionId) return;\n    send({ type: "request.unsubscribe", sessionId: state.currentSessionId });\n    state.currentSessionId = null;\n    state.currentSession = null;\n    render();\n  }\n  function renderInbox(parent) {\n    const container = elFromHtml(`<ul class="inbox" id="inbox-list"></ul>`);\n    if (state.inbox.length === 0) {\n      const li = document.createElement("li");\n      li.className = "inbox-empty";\n      li.textContent = "(empty)";\n      container.appendChild(li);\n    } else {\n      for (const item of state.inbox) {\n        container.appendChild(renderInboxItem(item));\n      }\n    }\n    replaceChildById(parent, "inbox-root", container);\n  }\n  function renderInboxItem(item) {\n    const cls = classifyInboxItem(item);\n    const li = document.createElement("li");\n    li.className = `inbox-item inbox-item--${cls}`;\n    const badge = document.createElement("span");\n    badge.className = `inbox-item__badge inbox-item__badge--${cls}`;\n    badge.textContent = cls === "attention" ? "!" : cls === "actionable" ? "\\u2192" : "view";\n    li.appendChild(badge);\n    const type = document.createElement("span");\n    type.className = "inbox-item__type";\n    type.textContent = item.type;\n    li.appendChild(type);\n    const label = document.createElement("span");\n    label.className = "inbox-item__label";\n    label.textContent = item.label;\n    li.appendChild(label);\n    if (item.type === "attention") {\n      li.title = item.summary || item.label;\n    }\n    return li;\n  }\n  function renderDrillDown(parent) {\n    const container = elFromHtml(`<section class="drill" id="drill-root"></section>`);\n    if (!state.currentSessionId) {\n      const empty = document.createElement("p");\n      empty.className = "drill-empty";\n      empty.textContent = "(click a session row to drill in)";\n      container.appendChild(empty);\n      replaceChildById(parent, "drill-root", container);\n      return;\n    }\n    const header = elFromHtml(\n      `<header class="drill__header">\n       <button type="button" class="drill__back" aria-label="Back to fleet">\\u2190 fleet</button>\n       <h3 class="drill__title"></h3>\n     </header>`\n    );\n    header.querySelector(".drill__back")?.addEventListener("click", closeDrillDown);\n    const titleEl = header.querySelector(".drill__title");\n    if (titleEl) {\n      titleEl.textContent = state.currentSession ? `session ${state.currentSession.sessionId}` : `session ${state.currentSessionId} \\u2014 loading\\u2026`;\n    }\n    container.appendChild(header);\n    if (!state.currentSession) {\n      const loading = document.createElement("p");\n      loading.className = "drill-loading";\n      loading.textContent = "loading\\u2026";\n      container.appendChild(loading);\n    } else {\n      container.appendChild(renderSessionTree(state.currentSession));\n    }\n    replaceChildById(parent, "drill-root", container);\n  }\n  function renderSessionTree(session) {\n    const root = elFromHtml(`<div class="session-tree"></div>`);\n    const meta = elFromHtml(\n      `<dl class="session-meta">\n       <dt>status</dt><dd class="m-status"></dd>\n       <dt>claude</dt><dd class="m-claude"></dd>\n       <dt>branch</dt><dd class="m-branch"></dd>\n       <dt>worktree</dt><dd class="m-worktree"></dd>\n       <dt>role</dt><dd class="m-role"></dd>\n       <dt>cost</dt><dd class="m-cost"></dd>\n     </dl>`\n    );\n    meta.querySelector(".m-status").textContent = session.status;\n    meta.querySelector(".m-claude").textContent = session.claudeStatus;\n    meta.querySelector(".m-branch").textContent = session.branch ?? "\\u2014";\n    meta.querySelector(".m-worktree").textContent = session.worktree ?? "\\u2014";\n    meta.querySelector(".m-role").textContent = session.role ?? "\\u2014";\n    meta.querySelector(".m-cost").textContent = formatCost(session.cost);\n    root.appendChild(meta);\n    const turns = elFromHtml(`<ol class="turns"></ol>`);\n    for (const turn of session.turns) {\n      turns.appendChild(renderTurn(turn));\n    }\n    root.appendChild(turns);\n    if (session.compactions.length > 0) {\n      const compactions = elFromHtml(\n        `<section class="compactions"><h4>compactions</h4><ol></ol></section>`\n      );\n      const list = compactions.querySelector("ol");\n      if (list) {\n        for (const marker of session.compactions) {\n          const li = document.createElement("li");\n          li.textContent = `turn ${marker.turnNumber}: ${marker.reason}` + (marker.summary ? ` \\u2014 ${marker.summary}` : "");\n          list.appendChild(li);\n        }\n      }\n      root.appendChild(compactions);\n    }\n    return root;\n  }\n  function renderTurn(turn) {\n    const li = document.createElement("li");\n    li.className = "turn";\n    li.appendChild(textSpan("turn", String(turn.turnNumber), "turn__num"));\n    li.appendChild(textSpan(turn.frozen ? "frozen" : "open", "", "turn__badge"));\n    li.querySelector(".turn__num").textContent = `turn ${turn.turnNumber}`;\n    li.querySelector(".turn__badge").textContent = turn.frozen ? "frozen" : "open";\n    if (turn.prompt) {\n      const prompt = elFromHtml(`<div class="turn__prompt"></div>`);\n      prompt.textContent = turn.prompt.text;\n      li.appendChild(prompt);\n    }\n    if (turn.agents.length > 0) {\n      const agentsList = elFromHtml(`<ul class="turn__agents"></ul>`);\n      for (const agent of turn.agents) {\n        const ali = document.createElement("li");\n        ali.className = "agent";\n        ali.textContent = `${agent.type} (${agent.status})`;\n        agentsList.appendChild(ali);\n      }\n      li.appendChild(agentsList);\n    }\n    if (turn.steps.length > 0) {\n      const stepsList = elFromHtml(`<ol class="turn__steps"></ol>`);\n      for (const step of turn.steps) {\n        stepsList.appendChild(renderStep(step));\n      }\n      li.appendChild(stepsList);\n    }\n    return li;\n  }\n  function renderStep(step) {\n    const li = document.createElement("li");\n    li.className = "step";\n    if (step.text) {\n      const text = document.createElement("div");\n      text.className = "step__text";\n      text.textContent = step.text;\n      li.appendChild(text);\n    }\n    if (step.tools.length > 0) {\n      const toolsList = elFromHtml(`<ul class="step__tools"></ul>`);\n      for (const tool of step.tools) {\n        const tli = document.createElement("li");\n        tli.className = `tool tool--${tool.status}`;\n        tli.textContent = `${tool.name} \\xB7 ${tool.status}` + (tool.duration != null ? ` \\xB7 ${tool.duration.toFixed(2)}s` : "");\n        toolsList.appendChild(tli);\n      }\n      li.appendChild(toolsList);\n    }\n    return li;\n  }\n  function replaceChildById(parent, id, next) {\n    next.id = id;\n    const existing = parent.querySelector(`:scope > #${CSS.escape(id)}`);\n    if (existing && existing !== next) {\n      parent.replaceChild(next, existing);\n      return;\n    }\n    parent.appendChild(next);\n  }\n  function render() {\n    const status = el("status");\n    if (status) {\n      const txt = state.notice ? `${state.status} \\u2014 ${state.notice}` : state.status;\n      if (status.textContent !== txt) status.textContent = txt;\n    }\n    renderFleet(document.body);\n    renderInbox(document.body);\n    renderDrillDown(document.body);\n  }\n  function isServerMessage(value) {\n    if (typeof value !== "object" || value === null) return false;\n    const t = value.type;\n    return typeof t === "string";\n  }\n  function applySnapshot(msg) {\n    switch (msg.type) {\n      case "overview.snapshot":\n      case "overview-data":\n        state.projects = msg.projects;\n        break;\n      case "inbox.snapshot":\n      case "inbox-items":\n        state.inbox = msg.items;\n        break;\n      case "session.snapshot":\n        if (state.currentSessionId === msg.sessionId) {\n          state.currentSession = msg.session;\n        }\n        break;\n      case "session-patches": {\n        if (state.currentSessionId !== msg.sessionId) break;\n        if (!state.currentSession) break;\n        let working = state.currentSession;\n        for (const patch of msg.patches) {\n          if (!working) break;\n          const next = applyPatch(working, patch);\n          if (next === working) {\n            send({ type: "request.session", sessionId: msg.sessionId });\n            state.currentSession = null;\n            working = null;\n            break;\n          }\n          working = next;\n        }\n        if (working) state.currentSession = working;\n        break;\n      }\n      case "session.removed":\n        if (state.currentSessionId === msg.sessionId) {\n          state.currentSessionId = null;\n          state.currentSession = null;\n        }\n        break;\n      case "notice":\n        state.notice = msg.text;\n        break;\n      case "protocol.mismatch":\n        state.notice = `protocol mismatch \\u2014 ${msg.text}`;\n        break;\n      case "state-changed":\n        break;\n      case "pi.session":\n        break;\n    }\n  }\n  function connect() {\n    closedByUs = false;\n    state.status = "connecting\\u2026";\n    state.notice = null;\n    render();\n    const url = new URL("/ws", location.href);\n    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";\n    url.searchParams.set("token", TOKEN);\n    ws = new WebSocket(url.toString());\n    ws.addEventListener("open", () => {\n      state.status = "connected";\n      render();\n      send({ type: "hello", capabilities: [], protocolVersion: 2 });\n      send({ type: "request.resync" });\n      if (state.currentSessionId) {\n        send({ type: "request.session", sessionId: state.currentSessionId });\n      }\n    });\n    ws.addEventListener("message", (ev) => {\n      let parsed;\n      try {\n        parsed = JSON.parse(typeof ev.data === "string" ? ev.data : "");\n      } catch {\n        return;\n      }\n      if (!isServerMessage(parsed)) return;\n      applySnapshot(parsed);\n      render();\n      if (shouldSyncPoll(parsed)) {\n        send({ type: "poll" });\n      }\n    });\n    ws.addEventListener("close", () => {\n      ws = null;\n      state.currentSession = null;\n      state.status = "disconnected";\n      render();\n      if (!closedByUs) scheduleReconnect();\n    });\n    ws.addEventListener("error", () => {\n    });\n  }\n  function send(payload) {\n    if (!ws || ws.readyState !== WebSocket.OPEN) return;\n    try {\n      ws.send(JSON.stringify(payload));\n    } catch {\n    }\n  }\n  function scheduleReconnect() {\n    state.status = "reconnecting\\u2026";\n    render();\n    if (reconnectTimer) clearTimeout(reconnectTimer);\n    reconnectTimer = setTimeout(() => {\n      reconnectTimer = null;\n      connect();\n    }, RECONNECT_DELAY_MS);\n  }\n  document.addEventListener("visibilitychange", () => {\n    if (document.visibilityState !== "visible") return;\n    if (!ws || ws.readyState === WebSocket.CLOSED) {\n      if (reconnectTimer) clearTimeout(reconnectTimer);\n      reconnectTimer = null;\n      connect();\n    }\n  });\n  window.addEventListener("beforeunload", () => {\n    closedByUs = true;\n    if (ws) {\n      try {\n        ws.close();\n      } catch {\n      }\n      ws = null;\n    }\n  });\n  connect();\n})();\n\n</script>\n  </body>\n</html>\n';
+
 // src/pi-driver/turn-accumulator.ts
 function createAccState(sessionId, cwd, effortLevel = "medium") {
   return {
@@ -106752,7 +106992,10 @@ var ServerConfigLive = Layer_exports.effect(
       piEnabled,
       piCwd,
       piThinkingLevel,
-      piExtensionInstallDir: process.env.GRAVITY_PI_EXTENSION_DIR ?? join2(home, ".pi", "agent", "extensions")
+      piExtensionInstallDir: process.env.GRAVITY_PI_EXTENSION_DIR ?? join2(home, ".pi", "agent", "extensions"),
+      gatewayEnabled: process.env.GRAVITY_GATEWAY_DISABLE !== "1",
+      gatewayHost: process.env.GRAVITY_GATEWAY_HOST || "127.0.0.1",
+      gatewayPort: parseInt(process.env.GRAVITY_GATEWAY_PORT || "8765", 10)
     };
   })
 );
@@ -108595,6 +108838,20 @@ var program = Effect_exports.gen(function* () {
   mermaidServer.start().catch((e) => {
     logMsg(`Mermaid RPC server failed to start: ${e}`, "warn");
   });
+  const gatewayToken = randomBytes2(24).toString("hex");
+  let gateway = null;
+  if (config.gatewayEnabled) {
+    const clientHtml = CLIENT_HTML_TEMPLATE.replace("%%GRAVITY_TOKEN%%", gatewayToken);
+    gateway = new WsGateway({
+      host: config.gatewayHost,
+      port: config.gatewayPort,
+      terminalSocketPath: config.terminalSocketPath,
+      token: gatewayToken,
+      clientHtml,
+      logFn: logMsg
+    });
+    gateway.start().then(() => logMsg(`Browser gateway listening on http://${config.gatewayHost}:${gateway.port}`)).catch((e) => logMsg(`Browser gateway failed to start: ${e}`, "warn"));
+  }
   yield* fs.unlinkIfExists(config.terminalSocketPath);
   yield* fs.mkdirp(dirname2(config.terminalSocketPath));
   const terminalServer = createServer2((socket) => {
@@ -108705,6 +108962,7 @@ var program = Effect_exports.gen(function* () {
     store.clearAllPurgeTimers();
     hookServer.close();
     terminalServer.close();
+    if (gateway) gateway.stop();
     try {
       unlinkSync2(config.hookSocketPath);
     } catch {
