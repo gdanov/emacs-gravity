@@ -1,10 +1,13 @@
-// ws-gateway-startup-resilience.test.ts — Verifies the non-fatal
-// `.catch()` wrapper around `WsGateway.start()` in `gravity-server.ts`
-// (around line 1633):
+// ws-gateway-startup-resilience.test.ts — Verifies the actual
+// `startGatewayNonFatal` helper exported from `gravity-server.ts`, which
+// wraps `WsGateway.start()` so a bind failure never escapes as a fatal
+// error or an unhandled rejection:
 //
-//   gateway.start()
-//     .then(() => logMsg(`Browser gateway listening on ...`))
-//     .catch((e: unknown) => logMsg(`Browser gateway failed to start: ${e}`, "warn"));
+//   export function startGatewayNonFatal(gateway, host, log) {
+//     return gateway.start()
+//       .then(() => log(`Browser gateway listening on ...`))
+//       .catch((e) => log(`Browser gateway failed to start: ${e}`, "warn"));
+//   }
 //
 // The contract: if `start()` rejects (e.g. port already in use), the
 // `.catch` handler must run, the promise chain must settle without an
@@ -20,6 +23,7 @@ import { tmpdir } from "os";
 import { createServer as createNetServer, type Server as NetServer } from "net";
 
 import { WsGateway } from "../src/gateway/ws-gateway.js";
+import { startGatewayNonFatal } from "../src/gravity-server.js";
 
 function makeTempSocketDir(): string {
   return mkdtempSync(join(tmpdir(), "gravity-ws-gw-resilience-"));
@@ -49,7 +53,7 @@ async function bindEphemeral(host: string): Promise<HeldPort> {
   });
 }
 
-describe("WsGateway startup resilience (non-fatal .catch wrapper)", () => {
+describe("WsGateway startup resilience (startGatewayNonFatal wrapper)", () => {
   let tempDir: string;
   let occupant: WsGateway | null = null;
   let heldPort: HeldPort | null = null;
@@ -110,12 +114,9 @@ describe("WsGateway startup resilience (non-fatal .catch wrapper)", () => {
 
     const second = makeGateway("loser-token", occupiedPort);
     try {
-      // Tiny reproduction of the exact `.then().catch(logFn)` wrapper
-      // in gravity-server.ts ~line 1633 — verbatim shape, just with
-      // logFn pointed at our array instead of `logMsg`.
-      await second.start()
-        .then(() => logFn("Browser gateway listening on http://127.0.0.1:0"))
-        .catch((e: unknown) => logFn(`Browser gateway failed to start: ${e}`, "warn"));
+      // Exercise the actual production wrapper, with logFn pointed at
+      // our array instead of the real `logMsg`.
+      await startGatewayNonFatal(second, "127.0.0.1", logFn);
 
       // Give the event loop a tick to surface any unhandledRejection.
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -157,9 +158,7 @@ describe("WsGateway startup resilience (non-fatal .catch wrapper)", () => {
 
     const second = makeGateway("loser-token-2", heldPort.port);
     try {
-      await second.start()
-        .then(() => logFn("Browser gateway listening on http://127.0.0.1:0"))
-        .catch((e: unknown) => logFn(`Browser gateway failed to start: ${e}`, "warn"));
+      await startGatewayNonFatal(second, "127.0.0.1", logFn);
 
       await new Promise<void>((resolve) => setImmediate(resolve));
 

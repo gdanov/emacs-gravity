@@ -111487,6 +111487,9 @@ var HOOKS_SILENCE_WARN_MS = 9e4;
 var HOOKS_SILENCE_REARM_MS = 6e5;
 var BIDIRECTIONAL_EVENTS = /* @__PURE__ */ new Set(["PermissionRequest", "AskUserQuestionIntercept"]);
 var OVERVIEW_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PermissionRequest", "AskUserQuestionIntercept"]);
+function startGatewayNonFatal(gateway, host, log2) {
+  return gateway.start().then(() => log2(`Browser gateway listening on http://${host}:${gateway.port}`)).catch((e) => log2(`Browser gateway failed to start: ${e}`, "warn"));
+}
 function logMsg(message, level = "info") {
   const ts = (/* @__PURE__ */ new Date()).toISOString();
   try {
@@ -112540,7 +112543,7 @@ var program = Effect_exports.gen(function* () {
       clientHtml,
       logFn: logMsg
     });
-    gateway.start().then(() => logMsg(`Browser gateway listening on http://${config.gatewayHost}:${gateway.port}`)).catch((e) => logMsg(`Browser gateway failed to start: ${e}`, "warn"));
+    startGatewayNonFatal(gateway, config.gatewayHost, logMsg);
   }
   yield* fs.unlinkIfExists(config.terminalSocketPath);
   yield* fs.mkdirp(dirname2(config.terminalSocketPath));
@@ -112719,5 +112722,6 @@ export {
   pollSubscribedSessions,
   processHookMessage,
   purgeSession,
+  startGatewayNonFatal,
   subscribeAndSnapshot
 };
