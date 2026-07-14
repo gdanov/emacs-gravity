@@ -35,6 +35,9 @@ export interface WsGatewayOptions {
   /** Optional log sink; defaults to a no-op. Signature mirrors
    * `makeTerminal`'s `logFn` in services/terminal.ts. */
   logFn?: (msg: string, level?: string) => void;
+  /** Keepalive ping interval override, mostly for tests. Defaults to
+   * KEEPALIVE_INTERVAL_MS (30s) when omitted. */
+  keepaliveIntervalMs?: number;
 }
 
 interface TrackedWebSocket extends WebSocket {
@@ -91,7 +94,7 @@ export class WsGateway {
         }
         this.keepalive = setInterval(() => {
           this.tickKeepalive();
-        }, KEEPALIVE_INTERVAL_MS);
+        }, this.opts.keepaliveIntervalMs ?? KEEPALIVE_INTERVAL_MS);
         this.started = true;
         resolve();
       });
