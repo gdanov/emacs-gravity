@@ -24,6 +24,14 @@ export interface ServerConfigData {
    * `pi` can pick it up via its standard extension-loader path.
    */
   readonly piExtensionInstallDir: string;
+  /** Whether the browser-client WebSocket gateway starts. Default true;
+   * disable via GRAVITY_GATEWAY_DISABLE=1 for ops that don't want it. */
+  readonly gatewayEnabled: boolean;
+  /** Bind host for the gateway's HTTP+WS listener. */
+  readonly gatewayHost: string;
+  /** Bind port for the gateway's HTTP+WS listener. 0 = OS-assigned
+   * ephemeral port (tests only). */
+  readonly gatewayPort: number;
 }
 
 export const ServerConfig = ServiceMap.Service<ServerConfigData>("ServerConfig");
@@ -65,6 +73,9 @@ export const ServerConfigLive = Layer.effect(
       piExtensionInstallDir:
         process.env.GRAVITY_PI_EXTENSION_DIR ??
         join(home, ".pi", "agent", "extensions"),
+      gatewayEnabled: process.env.GRAVITY_GATEWAY_DISABLE !== "1",
+      gatewayHost: process.env.GRAVITY_GATEWAY_HOST || "127.0.0.1",
+      gatewayPort: parseInt(process.env.GRAVITY_GATEWAY_PORT || "8765", 10),
     };
   }),
 );
@@ -80,5 +91,8 @@ export const ServerConfigTest = (overrides?: Partial<ServerConfigData>) =>
     piCwd: undefined,
     piThinkingLevel: undefined,
     piExtensionInstallDir: "/tmp/test-pi-extensions",
+    gatewayEnabled: false,
+    gatewayHost: "127.0.0.1",
+    gatewayPort: 0,
     ...overrides,
   });
