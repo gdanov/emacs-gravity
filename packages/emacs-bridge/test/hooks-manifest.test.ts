@@ -58,6 +58,24 @@ describe("hooks/hooks.json manifest", () => {
     const parsed = JSON.parse(readFileSync(HOOKS_JSON_PATH, "utf-8"));
     const preToolUseStr = JSON.stringify(parsed.hooks.PreToolUse);
     expect(preToolUseStr).toContain("AskUserQuestionIntercept");
+
+    // Exact-match assertions on the AskUserQuestion matcher block:
+    // the matched block's first hook must carry the
+    // AskUserQuestionIntercept command, the expected long-form
+    // timeout, and the expected statusMessage. These are the
+    // frozen-contract values from fix-pr27-plan §3 (transcribed
+    // verbatim from hooks.json by the conductor) — assert them
+    // against the LIVE parsed value, not against a hardcoded
+    // duplicate, so a hooks.json drift fails this test loudly.
+    const askBlock = parsed.hooks.PreToolUse.find(
+      (b: any) => b.matcher === "AskUserQuestion",
+    );
+    expect(askBlock).toBeDefined();
+    expect(askBlock.hooks[0].command).toBe(
+      "${CLAUDE_PLUGIN_ROOT}/hooks/AskUserQuestionIntercept",
+    );
+    expect(askBlock.hooks[0].timeout).toBe(345600);
+    expect(askBlock.hooks[0].statusMessage).toBe("gravity: question");
   });
 
   it("every command string uses ${CLAUDE_PLUGIN_ROOT}", () => {

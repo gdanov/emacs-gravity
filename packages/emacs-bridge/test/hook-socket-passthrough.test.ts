@@ -18,13 +18,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
-  closeSync,
   existsSync,
   mkdtempSync,
-  openSync,
-  readSync,
+  readFileSync,
   rmSync,
-  statSync,
   unlinkSync,
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -40,26 +37,27 @@ const BRIDGE_SRC = join(BRIDGE_ROOT, "src", "index.ts");
  *  fast on a regression that hangs the child. */
 const BRIDGE_CHILD_TIMEOUT_MS = 10_000;
 
-/** Log file the bridge writes to when `transcript_path` is absent/null.
- *  This WP keeps `initLogForSession` AFTER the early-exit (per pinned
- *  decision 3, option (a)) so the pass-through reason line lands here. */
-const BRIDGE_LOG_FILE = "/tmp/emacs-bridge.log";
-
 /** Minimal env for a spawned bridge child. We deliberately do NOT
  *  inherit `process.env` — the plan explicitly forbids the real
  *  `~/.local/state/claude-gravity.sock` symlink leaking into a test,
  *  and inheriting env-vars also risks pulling in unrelated
- *  `CLAUDE_*`/`*_DUMP*` settings. */
+ *  `CLAUDE_*`/`*_DUMP*` settings.
+ *
+ *  The optional `extraEnv` is merged last so individual tests can
+ *  inject per-test overrides (e.g. `EMACS_BRIDGE_LOG_FILE`) without
+ *  widening Test A's call site. */
 function buildChildEnv(
   hookSockPath: string,
   legacySockPath: string,
   homeDir: string,
+  extraEnv: Record<string, string> = {},
 ): Record<string, string> {
   return {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     HOME: homeDir,
     GRAVITY_HOOK_SOCK: hookSockPath,
     CLAUDE_GRAVITY_SOCK: legacySockPath,
+    ...extraEnv,
   };
 }
 
@@ -282,30 +280,17 @@ describe("bridge early-exit gate — hook socket absent", () => {
   let child: ChildProcess | undefined;
   let killChild: ((signal?: NodeJS.Signals) => void) | undefined;
   let absentHookPath: string | undefined;
-  let logSizeBefore: number | undefined;
-
-  beforeEach(() => {
-    // The pass-through path logs a new WARN line to /tmp/emacs-bridge.log
-    // (this WP keeps initLogForSession AFTER the early-exit — log lands at
-    // the default path per pinned decision 3, option (a)). Record the
-    // file length now; after the child exits we'll read only the newly
-    // appended bytes. /tmp/emacs-bridge.log is shared growing machine
-    // state, so we MUST NOT assert on the file's full contents.
-    try {
-      logSizeBefore = statSync(BRIDGE_LOG_FILE).size;
-    } catch {
-      logSizeBefore = 0; // file may not exist yet → assume start at 0
-    }
-  });
+  let logPath: string | undefined;
 
   afterEach(() => {
     if (child && killChild) killChild("SIGKILL");
     child = undefined;
     killChild = undefined;
     absentHookPath = undefined;
+    logPath = undefined;
   });
 
-  it("writes {} to stdout and a new WARN log line at the default log file", async () => {
+  it("writes {} to stdout and a new WARN log line into the per-test temp log file", async () => {
     // Hook-socket-absent: a fresh mkdtempSync dir + a socket filename
     // we never create/bind. The bridge's hookSocketExists() must
     // return false, triggering the pass-through.
@@ -314,8 +299,16 @@ describe("bridge early-exit gate — hook socket absent", () => {
     const absentLegacy = join(freshTempDir("passthrough-legacy-B-"), "no-legacy.sock");
     const tempHome = freshTempDir("passthrough-home-B-");
 
-    // Sanity: the absent socket really doesn't exist before we start.
+    // Per-test log file path. The FILE itself is NOT pre-created — it
+    // is created on first write by the bridge child. We point the
+    // bridge at it via EMACS_BRIDGE_LOG_FILE so we can assert on the
+    // full contents (no shared-file byte-delta trick needed and no
+    // touching of the host's shared log path).
+    logPath = join(freshTempDir("passthrough-log-B-"), "bridge.log");
+
+    // Sanity: neither path exists before we start.
     expect(existsSync(absentHookPath)).toBe(false);
+    expect(existsSync(logPath)).toBe(false);
 
     const envelope = JSON.stringify({
       session_id: `test-sess-B-${Date.now()}-${process.pid}`,
@@ -323,7 +316,9 @@ describe("bridge early-exit gate — hook socket absent", () => {
       transcript_path: null,
     });
 
-    const env = buildChildEnv(absentHookPath, absentLegacy, tempHome);
+    const env = buildChildEnv(absentHookPath, absentLegacy, tempHome, {
+      EMACS_BRIDGE_LOG_FILE: logPath,
+    });
     const spawnRes = spawnBridge("SessionStart", env, envelope);
     child = spawnRes.child;
     killChild = spawnRes.killChild;
@@ -335,30 +330,20 @@ describe("bridge early-exit gate — hook socket absent", () => {
     const stdoutStr = Buffer.concat(spawnRes.stdoutBuf).toString();
     expect(stdoutStr).toBe("{}\n");
 
-    // --- log-append assertion: a NEW line (added by this test's
-    // child) must contain the pass-through reason text. We read
-    // only bytes appended since logSizeBefore; never touch the
-    // pre-existing log state.
-    const logSizeAfter = statSync(BRIDGE_LOG_FILE).size;
-    expect(logSizeAfter).toBeGreaterThanOrEqual(logSizeBefore ?? 0);
-    const len = logSizeAfter - (logSizeBefore ?? 0);
-    if (len <= 0) {
+    // --- log assertion: the per-test temp file must exist after the
+    // child ran (the bridge writes the pass-through WARN line into
+    // it via EMACS_BRIDGE_LOG_FILE) and contain the reason string.
+    // The file starts absent; we read the whole thing because no
+    // other writer touches this temp path.
+    if (!existsSync(logPath)) {
       throw new Error(
-        `expected /tmp/emacs-bridge.log to grow during the pass-through test, ` +
-          `but file length stayed at ${logSizeBefore} bytes (delta=${len}). ` +
-          `child stderr=${Buffer.concat(spawnRes.stderrBuf).toString()}`,
+        `expected per-test log file to exist after child exit, but it does not: ` +
+          `${logPath}. child stderr=${Buffer.concat(spawnRes.stderrBuf).toString()}`,
       );
     }
-    const handle = openSync(BRIDGE_LOG_FILE, "r");
-    try {
-      const buf = Buffer.alloc(len);
-      readSync(handle, buf, 0, len, logSizeBefore ?? 0);
-      const deltaStr = buf.toString();
-      expect(deltaStr).toContain(
-        `Hook socket not found at ${absentHookPath}, passing through`,
-      );
-    } finally {
-      closeSync(handle);
-    }
+    const logContents = readFileSync(logPath, "utf-8");
+    expect(logContents).toContain(
+      `Hook socket not found at ${absentHookPath}, passing through`,
+    );
   });
 });

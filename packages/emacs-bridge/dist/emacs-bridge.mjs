@@ -9574,7 +9574,7 @@ import { appendFileSync, existsSync, mkdirSync, statSync, renameSync, unlinkSync
 import { dirname, join } from "path";
 var LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 var currentLogLevel = process.env.EMACS_BRIDGE_LOG_LEVEL || "warn";
-var logFile = "/tmp/emacs-bridge.log";
+var logFile = process.env.EMACS_BRIDGE_LOG_FILE || "/tmp/emacs-bridge.log";
 var MAX_SIZE = parseInt(process.env.EMACS_BRIDGE_LOG_MAX_SIZE || "1048576", 10);
 var rotationChecked = false;
 function initLogForSession(transcriptPath) {
