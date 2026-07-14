@@ -10676,6 +10676,9 @@ function resolveHookSocketPath() {
   const home = process.env.HOME || "/tmp";
   return join5(home, ".local", "state", "gravity-hooks.sock");
 }
+function hookSocketExists() {
+  return existsSync8(resolveHookSocketPath());
+}
 var HookSocketClientLive = Layer_exports.succeed(
   HookSocketClient,
   makeHookSocketClient(resolveHookSocketPath())
@@ -10702,10 +10705,9 @@ var program = Effect_exports.gen(function* () {
   const raw = yield* io.readStdin().pipe(Effect_exports.catch(() => Effect_exports.succeed("")));
   let inputData = yield* parseStdin(raw);
   yield* Effect_exports.logDebug(`Payload: ${JSON.stringify(inputData)}`);
-  const socketPath = config.socketPath;
-  const socketExists = yield* socket.socketExists();
-  if (!socketExists) {
-    yield* Effect_exports.logDebug(`Socket not found at ${socketPath}, passing through`);
+  const hookSocketPath = resolveHookSocketPath();
+  if (!hookSocketExists()) {
+    log2(`Hook socket not found at ${hookSocketPath}, passing through`, "warn");
     yield* io.writeStdout(JSON.stringify({}) + "\n");
     return;
   }
