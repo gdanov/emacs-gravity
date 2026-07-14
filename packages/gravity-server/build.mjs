@@ -80,7 +80,7 @@ await esbuild.build({
   format: "esm",
   outfile: "dist/gravity-server.mjs",
   external: [
-    "net", "fs", "path", "child_process", "os", "crypto", "stream", "util", "events", "ws",
+    "net", "fs", "path", "child_process", "os", "crypto", "stream", "util", "events",
   ],
   banner: {
     js: `

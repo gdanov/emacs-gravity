@@ -468,6 +468,132 @@ describe("applyPatch — unhandled op", () => {
   });
 });
 
+describe("applyPatch — freeze_turn", () => {
+  it("sets frozen=true on the addressed turn and returns a new session reference", () => {
+    const session = makeSession({ turns: [makeTurn(0), makeTurn(1)] });
+    const next = applyPatch(session, { op: "freeze_turn", turnNumber: 1 });
+    expect(next).not.toBe(session);
+    const t = next.turns.find((x) => x.turnNumber === 1)!;
+    expect(t.frozen).toBe(true);
+    // The unrelated turn stays untouched.
+    const t0 = next.turns.find((x) => x.turnNumber === 0)!;
+    expect(t0.frozen).toBe(false);
+    // And the input session's frozen flag is NOT mutated.
+    const inputT = session.turns.find((x) => x.turnNumber === 1)!;
+    expect(inputT.frozen).toBe(false);
+  });
+
+  it("returns the input unchanged by reference when the turn number does not exist", () => {
+    const session = makeSession({ turns: [makeTurn(0), makeTurn(1)] });
+    const next = applyPatch(session, { op: "freeze_turn", turnNumber: 99 });
+    expect(next).toBe(session);
+  });
+});
+
+describe("applyPatch — add_step", () => {
+  it("pushes the supplied step onto the addressed turn and returns a new reference", () => {
+    const session = makeSession({ turns: [makeTurn(0), makeTurn(1)] });
+    const step = makeStep("hello step", [makeTool({ toolUseId: "tu_s1" })]);
+    const next = applyPatch(session, {
+      op: "add_step",
+      turnNumber: 1,
+      step,
+    });
+    expect(next).not.toBe(session);
+    const t = next.turns.find((x) => x.turnNumber === 1)!;
+    expect(t.steps).toHaveLength(1);
+    expect(t.steps[0]).toEqual(step);
+    // Round-trip the full step content (text + tools + thinking).
+    expect(t.steps[0].text).toBe("hello step");
+    expect(t.steps[0].thinking).toBeNull();
+    expect(t.steps[0].tools).toHaveLength(1);
+    expect(t.steps[0].tools[0].toolUseId).toBe("tu_s1");
+    // Original session is not mutated.
+    expect(session.turns.find((x) => x.turnNumber === 1)!.steps).toHaveLength(0);
+  });
+
+  it("returns the input unchanged by reference when the turn number does not exist", () => {
+    const session = makeSession();
+    const step = makeStep("orphan");
+    const next = applyPatch(session, {
+      op: "add_step",
+      turnNumber: 99,
+      step,
+    });
+    expect(next).toBe(session);
+  });
+});
+
+describe("applyPatch — complete_agent", () => {
+  it("flips the addressed agent to status=done and records optional fields from the patch", () => {
+    const agent = makeAgent("a1");
+    const session = makeSession({
+      currentTurn: 1,
+      turns: [makeTurn(0), makeTurn(1)],
+      agentIndex: { a1: { turnNumber: 1, agentIndex: 0 } },
+    });
+    // Splice the agent into turn 1 directly so we don't have to also
+    // exercise add_agent's side effects in this test.
+    session.turns[1].agents.push(agent);
+
+    const patch: Patch = {
+      op: "complete_agent",
+      agentId: "a1",
+      stopText: "agent done",
+      stopThinking: "model stopped thinking",
+      duration: 4.2,
+      transcriptPath: "/tmp/agent-a1.jsonl",
+    };
+    const next = applyPatch(session, patch);
+    expect(next).not.toBe(session);
+    const t = next.turns.find((x) => x.turnNumber === 1)!;
+    const a = t.agents[0];
+    expect(a.agentId).toBe("a1");
+    expect(a.status).toBe("done");
+    expect(a.stopText).toBe("agent done");
+    expect(a.stopThinking).toBe("model stopped thinking");
+    expect(a.duration).toBe(4.2);
+    expect(a.transcriptPath).toBe("/tmp/agent-a1.jsonl");
+  });
+
+  it("leaves pre-existing stopText/stopThinking/duration/transcriptPath intact when the patch omits them", () => {
+    const agent = makeAgent("a1");
+    // Pre-populate the agent with values that must survive the patch.
+    const seeded = {
+      ...agent,
+      stopText: "prior stopText",
+      stopThinking: "prior stopThinking",
+      duration: 1.1,
+      transcriptPath: "/tmp/prior.jsonl",
+    };
+    const session = makeSession({
+      currentTurn: 1,
+      turns: [makeTurn(0), makeTurn(1)],
+      agentIndex: { a1: { turnNumber: 1, agentIndex: 0 } },
+    });
+    session.turns[1].agents.push(seeded);
+
+    // Patch omits every optional field — only agentId and the
+    // discriminator are present.
+    const patch: Patch = { op: "complete_agent", agentId: "a1" };
+    const next = applyPatch(session, patch);
+    expect(next).not.toBe(session);
+    const t = next.turns.find((x) => x.turnNumber === 1)!;
+    const a = t.agents[0];
+    expect(a.status).toBe("done");
+    expect(a.stopText).toBe("prior stopText");
+    expect(a.stopThinking).toBe("prior stopThinking");
+    expect(a.duration).toBe(1.1);
+    expect(a.transcriptPath).toBe("/tmp/prior.jsonl");
+  });
+
+  it("returns the input unchanged by reference when the agentId is not indexed", () => {
+    const session = makeSession({ agentIndex: {} });
+    const patch: Patch = { op: "complete_agent", agentId: "unknown" };
+    expect(applyPatch(session, patch)).toBe(session);
+  });
+});
+
 // Suppress "unused" lint warnings on helpers retained for symmetry with
 // the existing session-primitives test, in case a future case needs them.
 void makeRole;
