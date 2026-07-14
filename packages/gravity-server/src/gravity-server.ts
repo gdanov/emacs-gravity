@@ -64,6 +64,23 @@ const OVERVIEW_EVENTS: ReadonlySet<HookEventName> = new Set(["SessionStart", "Se
 
 // ── Logging helper (simple, no service dependency for socket callbacks) ──
 
+/**
+ * Starts a `WsGateway` without failing the caller: resolves once
+ * `start()` settles either way. A bind failure (e.g. busy port) is
+ * logged at "warn" and swallowed rather than propagated, so the browser
+ * gateway is best-effort and never takes down the rest of gravity-server.
+ */
+export function startGatewayNonFatal(
+  gateway: WsGateway,
+  host: string,
+  log: (message: string, level?: string) => void,
+): Promise<void> {
+  return gateway
+    .start()
+    .then(() => log(`Browser gateway listening on http://${host}:${gateway.port}`))
+    .catch((e: unknown) => log(`Browser gateway failed to start: ${e}`, "warn"));
+}
+
 function logMsg(message: string, level: string = "info"): void {
   const ts = new Date().toISOString();
   try {
@@ -1630,9 +1647,7 @@ const program = Effect.gen(function* () {
       clientHtml,
       logFn: logMsg,
     });
-    gateway.start()
-      .then(() => logMsg(`Browser gateway listening on http://${config.gatewayHost}:${gateway!.port}`))
-      .catch((e: unknown) => logMsg(`Browser gateway failed to start: ${e}`, "warn"));
+    startGatewayNonFatal(gateway, config.gatewayHost, logMsg);
   }
 
   // ── Start terminal server ────────────────────────────────────────
