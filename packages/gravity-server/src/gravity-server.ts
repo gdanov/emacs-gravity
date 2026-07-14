@@ -35,6 +35,8 @@ import type { ServerConfigData } from "./services/config.js";
 // Pi driver (optional)
 import { startPiDriver, type StartPiDriverOptions, type PiSessionStats } from "./pi-driver/index.js";
 import type { ExtensionUIRequestEvent } from "./pi-driver/types.js";
+import { installEmitter } from "./pi-driver/install.js";
+import { PI_EMITTER_SOURCE } from "./pi-driver/emitter-bundle.generated.js";
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -1715,6 +1717,40 @@ const program = Effect.gen(function* () {
   yield* fs.mkdirp(dirname(config.pidFilePath));
   yield* fs.writeFile(config.pidFilePath, process.pid.toString());
   logMsg(`gravity-server ready (pid=${process.pid}, pidfile=${config.pidFilePath})`);
+
+  // ── Install pi extension bundle ───────────────────
+  //
+  // Self-install the inlined emitter source into the configured
+  // extensions directory so a `pi` process running alongside the
+  // server can pick it up via its standard extension-loader path.
+  // `installEmitter` is documented to never throw; the Effect
+  // wrapper here exists purely to belt-and-suspender a hypothetical
+  // future regression and to log the outcome. A failed install is a
+  // warn-level event — the server keeps running.
+  yield* Effect.tryPromise({
+    try: () =>
+      installEmitter({
+        installDir: config.piExtensionInstallDir,
+        source: PI_EMITTER_SOURCE,
+      }),
+    catch: (e) => ({
+      action: "failed" as const,
+      path: `${config.piExtensionInstallDir}/gravity-pi.js`,
+      error: e instanceof Error ? e.message : String(e),
+    }),
+  }).pipe(
+    Effect.tap((result) => {
+      if (result.action === "failed") {
+        logMsg(
+          `pi extension install failed: ${result.error ?? "unknown"} (${result.path})`,
+          "warn",
+        );
+      } else {
+        logMsg(`pi extension ${result.action} at ${result.path}`);
+      }
+      return Effect.void;
+    }),
+  );
 
   // ── Shutdown ─────────────────────────────────────────────────────
 

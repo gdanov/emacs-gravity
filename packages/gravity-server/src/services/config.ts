@@ -16,6 +16,14 @@ export interface ServerConfigData {
   readonly piEnabled: boolean;
   readonly piCwd: string | undefined;
   readonly piThinkingLevel: string | undefined;
+  /**
+   * Directory into which the gravity pi extension is self-installed at
+   * server startup. Overridable via GRAVITY_PI_EXTENSION_DIR; default
+   * is ~/.pi/agent/extensions. The server writes the inlined extension
+   * bundle into `<installDir>/gravity-pi.js` at startup so a running
+   * `pi` can pick it up via its standard extension-loader path.
+   */
+  readonly piExtensionInstallDir: string;
 }
 
 export const ServerConfig = ServiceMap.Service<ServerConfigData>("ServerConfig");
@@ -54,6 +62,9 @@ export const ServerConfigLive = Layer.effect(
       piEnabled,
       piCwd,
       piThinkingLevel,
+      piExtensionInstallDir:
+        process.env.GRAVITY_PI_EXTENSION_DIR ??
+        join(home, ".pi", "agent", "extensions"),
     };
   }),
 );
@@ -68,5 +79,6 @@ export const ServerConfigTest = (overrides?: Partial<ServerConfigData>) =>
     piEnabled: false,
     piCwd: undefined,
     piThinkingLevel: undefined,
+    piExtensionInstallDir: "/tmp/test-pi-extensions",
     ...overrides,
   });
