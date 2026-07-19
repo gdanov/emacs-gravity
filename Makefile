@@ -64,8 +64,12 @@ sync-marketplace: build-bridge build-server
 	@mkdir -p \
 		"$(MARKETPLACE_CACHE)dist" \
 		"$(MARKETPLACE_CACHE)packages/emacs-bridge/dist" \
-		"$(MARKETPLACE_CACHE)packages/gravity-server/dist"
+		"$(MARKETPLACE_CACHE)packages/gravity-server/dist" \
+		"$(MARKETPLACE_CACHE)hooks" \
+		"$(MARKETPLACE_CACHE).claude-plugin"
 	install -m 644 packages/emacs-bridge/dist/emacs-bridge.mjs "$(MARKETPLACE_CACHE)packages/emacs-bridge/dist/emacs-bridge.mjs"
+	install -m 644 packages/emacs-bridge/hooks/hooks.json "$(MARKETPLACE_CACHE)hooks/hooks.json"
+	install -m 644 packages/emacs-bridge/.claude-plugin/plugin.json "$(MARKETPLACE_CACHE).claude-plugin/plugin.json"
 	@# Server: stage to all three known layouts so this works for any released version.
 	@#   v4.0.1 _ensure-server fallback #2 → packages/gravity-server/dist/
 	@#   v4.0.2+ dev layout                → packages/emacs-bridge/dist/

@@ -18,7 +18,7 @@ import { BridgeConfig, BridgeConfigLive } from "./services/config.js";
 import { FsLive } from "@gravity/shared";
 import { LoggerLive } from "./services/logger.js";
 import { EmacsSocket, EmacsSocketLive } from "./services/emacs-socket.js";
-import { HookSocketClient, HookSocketClientLive } from "./services/hook-socket.js";
+import { HookSocketClient, HookSocketClientLive, resolveHookSocketPath, hookSocketExists } from "./services/hook-socket.js";
 import type { HookSocketMessage, HookEventName } from "@gravity/shared";
 
 // Re-export types and transcript functions
@@ -65,11 +65,14 @@ const program = Effect.gen(function* () {
 
   yield* Effect.logDebug(`Payload: ${JSON.stringify(inputData)}`);
 
-  // Early exit: if socket doesn't exist, pass through immediately
-  const socketPath = config.socketPath;
-  const socketExists = yield* socket.socketExists();
-  if (!socketExists) {
-    yield* Effect.logDebug(`Socket not found at ${socketPath}, passing through`);
+  // Early exit: if hook socket doesn't exist, pass through immediately.
+  // The actual v3 forwarding path is the hook socket
+  // (`GRAVITY_HOOK_SOCK` / default `~/.local/state/gravity-hooks.sock`);
+  // `config.socketPath` is the legacy v2 Emacs socket and not the path
+  // a live v3 server listens on. Exit on the live wire, not a relic.
+  const hookSocketPath = resolveHookSocketPath();
+  if (!hookSocketExists()) {
+    log(`Hook socket not found at ${hookSocketPath}, passing through`, "warn");
     yield* io.writeStdout(JSON.stringify({}) + "\n");
     return;
   }

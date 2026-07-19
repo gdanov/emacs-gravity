@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createServer, Server, Socket, createConnection } from "net";
-import { unlinkSync, existsSync } from "fs";
+import { unlinkSync, existsSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
+import { tmpdir } from "os";
 import { PromptQueue, DaemonSession, SendEventFn, SendAndWaitFn } from "../src/daemon-session";
 import { createDaemonHooks, createCanUseTool, clearAgents } from "../src/daemon-hooks";
 
@@ -240,7 +241,8 @@ describe("createCanUseTool", () => {
 // ─── Part 4: Daemon command socket integration ──────────────────────────────
 
 describe("Daemon command socket", () => {
-  const SOCK_PATH = join(__dirname, "test-daemon-cmd.sock");
+  let tempDir: string;
+  let SOCK_PATH: string;
   let server: Server;
 
   // A minimal mock command handler
@@ -256,7 +258,8 @@ describe("Daemon command socket", () => {
   }
 
   beforeEach((ctx) => {
-    if (existsSync(SOCK_PATH)) unlinkSync(SOCK_PATH);
+    tempDir = mkdtempSync(join(tmpdir(), "gvt-"));
+    SOCK_PATH = join(tempDir, "d.sock");
 
     return new Promise<void>((resolve) => {
       server = createServer((client: Socket) => {
@@ -285,7 +288,11 @@ describe("Daemon command socket", () => {
   afterEach(() => {
     return new Promise<void>((resolve) => {
       server.close(() => {
-        if (existsSync(SOCK_PATH)) unlinkSync(SOCK_PATH);
+        try {
+          rmSync(tempDir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
         resolve();
       });
     });

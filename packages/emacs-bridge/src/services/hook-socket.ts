@@ -144,11 +144,18 @@ export function makeHookSocketClient(socketPath: string): HookSocketClientServic
 // ── Layer constructors ────────────────────────────────────────────────
 
 /** Resolve hook socket path from environment, matching gravity-server defaults. */
-function resolveHookSocketPath(): string {
+export function resolveHookSocketPath(): string {
   const fromEnv = process.env.GRAVITY_HOOK_SOCK;
   if (fromEnv) return fromEnv;
   const home = process.env.HOME || "/tmp";
   return join(home, ".local", "state", "gravity-hooks.sock");
+}
+
+/** True if the hook socket file exists at the resolved path.
+ *  Synchronous because the bridge entry gate is itself synchronous
+ *  (file-existence is the only check) and lives outside the Effect runtime. */
+export function hookSocketExists(): boolean {
+  return existsSync(resolveHookSocketPath());
 }
 
 export const HookSocketClientLive = Layer.succeed(

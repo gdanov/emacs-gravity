@@ -6,7 +6,7 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 const LOG_LEVELS: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
 
 let currentLogLevel: LogLevel = (process.env.EMACS_BRIDGE_LOG_LEVEL as LogLevel) || 'warn';
-let logFile = "/tmp/emacs-bridge.log";
+let logFile = process.env.EMACS_BRIDGE_LOG_FILE || "/tmp/emacs-bridge.log";
 const MAX_SIZE = parseInt(process.env.EMACS_BRIDGE_LOG_MAX_SIZE || "1048576", 10); // 1MB
 let rotationChecked = false;
 
