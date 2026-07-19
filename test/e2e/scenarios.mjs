@@ -290,13 +290,15 @@ export const scenarios = [
       ctx.assert(done, "after prompt: session reaches idle (full turn processed end-to-end)");
 
       // Patch history grew with turn-tree ops — the server actually saw
-      // agent_start/agent_end and emitted real turn patches.
+      // agent_start/agent_end and emitted real turn patches. Polls are
+      // incremental (each patch delivered once), so ops must be
+      // accumulated across ALL session-patches messages — how they
+      // batch per message is a timing artifact.
       const sp = ctx.proxyMessages().filter((m) =>
         m.dir === "s2c" && m.msg?.type === "session-patches"
         && m.msg?.sessionId === sid);
-      const lastOps = sp.length
-        ? new Set((sp[sp.length - 1].msg.patches || []).map((p) => p.op))
-        : new Set();
+      const lastOps = new Set(
+        sp.flatMap((m) => (m.msg.patches || []).map((p) => p.op)));
       ctx.assert(lastOps.has("add_turn") && lastOps.has("add_prompt"),
         "server emitted turn-tree patches for the prompt (add_turn + add_prompt)");
       ctx.assert(lastOps.has("add_tool") && lastOps.has("complete_tool"),
@@ -492,11 +494,12 @@ export const scenarios = [
       // so we can measure growth, not absolute count (the boot pi session
       // may already have turns from earlier scenarios).
       const countAddTurnsForSid = () => {
+        // Sum across ALL session-patches messages — polls are
+        // incremental, so per-message batching is a timing artifact.
         const sp = ctx.proxyMessages().filter((m) =>
           m.dir === "s2c" && m.msg?.type === "session-patches"
           && m.msg?.sessionId === sid);
-        if (!sp.length) return 0;
-        return (sp[sp.length - 1].msg.patches || [])
+        return sp.flatMap((m) => m.msg.patches || [])
           .filter((p) => p.op === "add_turn").length;
       };
       const baselineAddTurns = countAddTurnsForSid();
@@ -737,13 +740,13 @@ export const scenarios = [
         "file B's single-edit consolidated diff shows two→TWO");
 
       // Server emitted update_turn_file patches (one per edit = 4 total).
+      // Summed across all session-patches messages — polls are
+      // incremental, per-message batching is a timing artifact.
       const sp = ctx.proxyMessages().filter((m) =>
         m.dir === "s2c" && m.msg?.type === "session-patches"
         && m.msg?.sessionId === sid);
-      const utfCount = sp.length
-        ? (sp[sp.length - 1].msg.patches || [])
-            .filter((p) => p.op === "update_turn_file").length
-        : 0;
+      const utfCount = sp.flatMap((m) => m.msg.patches || [])
+        .filter((p) => p.op === "update_turn_file").length;
       ctx.assert(utfCount >= 4,
         `server emitted ≥ 4 update_turn_file patches (3 for A + 1 for B; got ${utfCount})`);
     },
