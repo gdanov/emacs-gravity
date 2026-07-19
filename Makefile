@@ -19,7 +19,9 @@ test-elisp:
 test-bridge:
 	cd packages/emacs-bridge && npx vitest run
 
-test-server:
+# build-server first: src/gravity-server.ts imports build-generated (gitignored)
+# artifacts (emitter-bundle.generated.ts), so tests need a build on fresh checkouts.
+test-server: build-server
 	cd packages/gravity-server && npx vitest run
 
 test-menubar:
