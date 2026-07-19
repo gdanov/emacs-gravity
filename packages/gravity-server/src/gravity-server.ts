@@ -11,12 +11,15 @@ import type { Server, Socket } from "net";
 import { unlinkSync } from "fs";
 import { dirname } from "path";
 import { pathToFileURL } from "url";
+import { randomBytes } from "crypto";
 import { Effect, Layer } from "effect";
 
 import type { HookEventName, HookData, InboxItemType, Patch, ServerMessage, PiEventEnvelope, PlanFeedback } from "@gravity/shared";
 import { parseTerminalMessage, isHookMessage, helloProtocolVersion, protocolMismatch, shouldSendInboxOnPoll } from "./protocol/messages.js";
 import { handleEvent } from "./handlers/event-handler.js";
 import { MermaidRpcServer } from "./handlers/mermaid-rpc-server.js";
+import { WsGateway } from "./gateway/ws-gateway.js";
+import { CLIENT_HTML_TEMPLATE } from "./gateway/client-bundle.generated.js";
 import { sessionEnd, setCost, setContextUsage, setPiCommands, setPiModels, updateMeta } from "./state/session.js";
 import { translatePiEvent } from "./pi-driver/hook-translator.js";
 import { createAccState } from "./pi-driver/turn-accumulator.js";
@@ -60,6 +63,23 @@ const OVERVIEW_EVENTS: ReadonlySet<HookEventName> = new Set(["SessionStart", "Se
 
 
 // ── Logging helper (simple, no service dependency for socket callbacks) ──
+
+/**
+ * Starts a `WsGateway` without failing the caller: resolves once
+ * `start()` settles either way. A bind failure (e.g. busy port) is
+ * logged at "warn" and swallowed rather than propagated, so the browser
+ * gateway is best-effort and never takes down the rest of gravity-server.
+ */
+export function startGatewayNonFatal(
+  gateway: WsGateway,
+  host: string,
+  log: (message: string, level?: string) => void,
+): Promise<void> {
+  return gateway
+    .start()
+    .then(() => log(`Browser gateway listening on http://${host}:${gateway.port}`))
+    .catch((e: unknown) => log(`Browser gateway failed to start: ${e}`, "warn"));
+}
 
 function logMsg(message: string, level: string = "info"): void {
   const ts = new Date().toISOString();
@@ -1606,6 +1626,30 @@ const program = Effect.gen(function* () {
     logMsg(`Mermaid RPC server failed to start: ${e}`, "warn");
   });
 
+  // ── Start browser gateway (HTTP + WebSocket, in-process) ─────────
+  //
+  // An in-process HTTP+WS listener respawns on the same lifecycle as the
+  // existing terminal Unix socket: `_ensure-server` tearing down
+  // gravity-server (e.g. on plugin update) recreates both together, so
+  // no orphan-listener risk and no extra ship path. The gateway holds
+  // zero session state — it only proxies bytes to/from the terminal
+  // socket — so the "no state, no isolation benefit" trade-off rules
+  // out a sidecar for this class of server.
+  const gatewayToken = randomBytes(24).toString("hex");
+  let gateway: WsGateway | null = null;
+  if (config.gatewayEnabled) {
+    const clientHtml = CLIENT_HTML_TEMPLATE.replace("%%GRAVITY_TOKEN%%", gatewayToken);
+    gateway = new WsGateway({
+      host: config.gatewayHost,
+      port: config.gatewayPort,
+      terminalSocketPath: config.terminalSocketPath,
+      token: gatewayToken,
+      clientHtml,
+      logFn: logMsg,
+    });
+    startGatewayNonFatal(gateway, config.gatewayHost, logMsg);
+  }
+
   // ── Start terminal server ────────────────────────────────────────
 
 
@@ -1760,6 +1804,7 @@ const program = Effect.gen(function* () {
     store.clearAllPurgeTimers();
     hookServer.close();
     terminalServer.close();
+    if (gateway) gateway.stop();
     try { unlinkSync(config.hookSocketPath); } catch {}
     try { unlinkSync(config.terminalSocketPath); } catch {}
     try { unlinkSync(config.pidFilePath); } catch {}
