@@ -24,7 +24,14 @@
 // resync on a fresh socket, and re-subscribes to a previously drilled
 // session after reconnect (the server's subscription set lives on the
 // conn, which is gone after reconnect).
+//
+// Rendering builds a fresh subtree per update, but mounts it via keyed
+// DOM morphing (morph.ts) rather than a subtree swap: unchanged nodes
+// stay alive, so the window scroll position and <details> state survive
+// the constant patch stream. All click / keydown / toggle handling is
+// delegated at the document level — rendered nodes carry no listeners.
 
+import { morphEl } from "./morph.js";
 import {
   applyPatch,
   classifyInboxItem,
@@ -94,11 +101,6 @@ function elFromHtml(html: string): HTMLElement {
 
 function renderFleet(parent: HTMLElement): void {
   const projects = groupedFleet(state.projects);
-  // Drop any stale click handlers by recreating the container each
-  // render. The click wiring reads `data-session-id` off the row, so it
-  // naturally handles re-renders; recreating the wrapper is the
-  // simplest way to drop any per-row listeners without keeping a
-  // bookkeeping structure.
   const container = elFromHtml(`<div class="fleet"></div>`);
 
   if (projects.length === 0) {
@@ -178,14 +180,6 @@ function renderFleetRow(project: string, session: SessionSummary): HTMLTableRowE
   tr.appendChild(td(String(session.turnCount)));
   tr.appendChild(td(session.currentTool ?? "—"));
   tr.appendChild(td(formatCost(session.cost)));
-
-  tr.addEventListener("click", () => onSessionRowClick(session.sessionId));
-  tr.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter" || ev.key === " ") {
-      ev.preventDefault();
-      onSessionRowClick(session.sessionId);
-    }
-  });
   return tr;
 }
 
@@ -282,7 +276,6 @@ function renderDrillDown(parent: HTMLElement): void {
        <h3 class="drill__title"></h3>
      </header>`,
   );
-  header.querySelector(".drill__back")?.addEventListener("click", closeDrillDown);
   const titleEl = header.querySelector(".drill__title");
   if (titleEl) {
     titleEl.textContent = state.currentSession
@@ -310,10 +303,11 @@ function renderDrillDown(parent: HTMLElement): void {
 // visual language (kind tinting, badges, monospace summaries) mirrors
 // the render-transcript HTML reports so both read the same.
 //
-// Because the view re-renders on every patch, each card carries a
-// stable `data-key`; `openState` remembers the user's manual toggles
-// and re-applies them after a rebuild. Defaults: user prompts open,
-// everything else collapsed.
+// Each card carries a stable `data-key`. The morph keeps unchanged
+// cards' DOM nodes alive, and `openState` remembers the user's manual
+// toggles so a card that IS rebuilt (content changed) reopens the way
+// the user left it. Defaults: user prompts open, everything else
+// collapsed.
 
 const openState = new Map<string, boolean>();
 
@@ -420,29 +414,6 @@ function renderSessionTree(session: Session): HTMLElement {
     renderTurnEvents(events, session, turn);
   }
   root.appendChild(events);
-
-  // Record every manual toggle so the state survives re-renders.
-  // `toggle` doesn't bubble, so listen in the capture phase.
-  events.addEventListener(
-    "toggle",
-    (ev) => {
-      const d = ev.target as HTMLDetailsElement;
-      if (d.dataset.key) openState.set(d.dataset.key, d.open);
-    },
-    true,
-  );
-
-  const allCards = (): HTMLDetailsElement[] =>
-    Array.from(events.querySelectorAll<HTMLDetailsElement>("details[data-key]"));
-  controls.querySelector(".c-expand")?.addEventListener("click", () => {
-    for (const d of allCards()) d.open = true;
-  });
-  controls.querySelector(".c-collapse")?.addEventListener("click", () => {
-    for (const d of allCards()) d.open = false;
-  });
-  controls.querySelector(".c-prompts")?.addEventListener("click", () => {
-    for (const d of allCards()) d.open = d.classList.contains("prompt-event");
-  });
 
   return root;
 }
@@ -596,17 +567,34 @@ function renderAgentBranch(agent: Agent): HTMLDetailsElement {
   return details;
 }
 
+/**
+ * Mount `next` as the panel `#id` under `parent`. On first render the
+ * node is appended; afterwards the freshly built subtree is morphed
+ * into the live one so unchanged DOM nodes (and with them the scroll
+ * anchor and <details> state) are preserved.
+ */
 function replaceChildById(parent: HTMLElement, id: string, next: HTMLElement): void {
   next.id = id;
   const existing = parent.querySelector(`:scope > #${CSS.escape(id)}`);
-  if (existing && existing !== next) {
+  if (!existing || existing === next) {
+    if (!existing) parent.appendChild(next);
+    return;
+  }
+  if (existing.tagName !== next.tagName) {
     parent.replaceChild(next, existing);
     return;
   }
-  parent.appendChild(next);
+  morphEl(existing as HTMLElement, next);
 }
 
 function render(): void {
+  const doc = document.documentElement;
+  // Stick-to-bottom: when the user is already at (or near) the end of a
+  // live transcript, keep them pinned there as new events append.
+  // Anywhere else, the morph preserves the position natively.
+  const stickToBottom = state.currentSession != null
+    && window.scrollY + window.innerHeight >= doc.scrollHeight - 80;
+
   const status = el<HTMLElement>("status");
   if (status) {
     const txt = state.notice ? `${state.status} — ${state.notice}` : state.status;
@@ -615,6 +603,8 @@ function render(): void {
   renderFleet(document.body);
   renderInbox(document.body);
   renderDrillDown(document.body);
+
+  if (stickToBottom) window.scrollTo(0, doc.scrollHeight);
 }
 
 function isServerMessage(value: unknown): value is ServerMessage {
@@ -767,6 +757,75 @@ document.addEventListener("visibilitychange", () => {
     connect();
   }
 });
+
+// ── Delegated event handling ─────────────────────────────────────────
+//
+// Rendered nodes never carry listeners (they'd be lost or duplicated
+// across morphs); everything is handled here off stable selectors.
+
+function transcriptCards(): HTMLDetailsElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLDetailsElement>("#drill-root details[data-key]"),
+  );
+}
+
+/** Bulk-toggle cards AND record the result so later re-renders agree. */
+function setAllCards(want: (d: HTMLDetailsElement) => boolean): void {
+  for (const d of transcriptCards()) {
+    const open = want(d);
+    d.open = open;
+    if (d.dataset.key) openState.set(d.dataset.key, open);
+  }
+}
+
+document.addEventListener("click", (ev) => {
+  const target = ev.target instanceof Element ? ev.target : null;
+  if (!target) return;
+  const row = target.closest<HTMLElement>(".fleet-row");
+  if (row?.dataset.sessionId) {
+    onSessionRowClick(row.dataset.sessionId);
+    return;
+  }
+  if (target.closest(".drill__back")) {
+    closeDrillDown();
+    return;
+  }
+  if (target.closest(".c-expand")) {
+    setAllCards(() => true);
+    return;
+  }
+  if (target.closest(".c-collapse")) {
+    setAllCards(() => false);
+    return;
+  }
+  if (target.closest(".c-prompts")) {
+    setAllCards((d) => d.classList.contains("prompt-event"));
+  }
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Enter" && ev.key !== " ") return;
+  const row = ev.target instanceof Element
+    ? ev.target.closest<HTMLElement>(".fleet-row")
+    : null;
+  if (row?.dataset.sessionId) {
+    ev.preventDefault();
+    onSessionRowClick(row.dataset.sessionId);
+  }
+});
+
+// Record manual <details> toggles so morph-rebuilt cards reopen the way
+// the user left them. `toggle` doesn't bubble — capture phase.
+document.addEventListener(
+  "toggle",
+  (ev) => {
+    const d = ev.target;
+    if (d instanceof HTMLDetailsElement && d.dataset.key) {
+      openState.set(d.dataset.key, d.open);
+    }
+  },
+  true,
+);
 
 window.addEventListener("beforeunload", () => {
   closedByUs = true;
