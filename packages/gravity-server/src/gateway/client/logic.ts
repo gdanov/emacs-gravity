@@ -12,10 +12,86 @@ import type {
   ProjectSummary,
   Session,
   StepNode,
+  Tool,
 } from "@gravity/shared";
 
 export function shouldSyncPoll(msg: { type: string }): boolean {
   return msg.type === "state-changed";
+}
+
+// ── Transcript formatting helpers ────────────────────────────────────
+//
+// Pure string shaping for the transcript view. The renderer builds a
+// summary line per event card: `ToolName args → result-first-line`, all
+// derived here so the truncation / arg-picking rules stay testable.
+
+/** First line of a text, hard-capped at `max` chars with an ellipsis. */
+export function firstLine(text: string, max = 110): string {
+  const nl = text.indexOf("\n");
+  const line = (nl === -1 ? text : text.slice(0, nl)).trimEnd();
+  if (line.length <= max) return line;
+  return `${line.slice(0, max - 1)}…`;
+}
+
+/**
+ * Pick the one input field worth showing next to a tool name in a
+ * summary line (the reference transcript shows e.g. the file path for
+ * Read, the command for Bash). Falls back to a compact JSON of the
+ * whole input when no well-known field is present.
+ */
+export function toolArgSummary(tool: Pick<Tool, "name" | "input">): string {
+  const input = tool.input ?? {};
+  const preferred = [
+    "file_path", "path", "command", "pattern", "query", "prompt",
+    "description", "url", "subject",
+  ];
+  for (const key of preferred) {
+    const v = input[key];
+    if (typeof v === "string" && v.length > 0) return firstLine(v, 90);
+  }
+  const keys = Object.keys(input);
+  if (keys.length === 0) return "";
+  try {
+    return firstLine(JSON.stringify(input), 90);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Flatten a tool result (unknown shape) into displayable text. Handles
+ * the common Claude Code shapes: plain string, `{content: [{type:
+ * "text", text}]}` blocks, and anything else via pretty-printed JSON.
+ */
+export function resultText(result: unknown): string {
+  if (result == null) return "";
+  if (typeof result === "string") return result;
+  if (typeof result === "object") {
+    const content = (result as { content?: unknown }).content;
+    if (Array.isArray(content)) {
+      const texts = content
+        .map((c) =>
+          typeof c === "object" && c !== null && typeof (c as { text?: unknown }).text === "string"
+            ? (c as { text: string }).text
+            : "",
+        )
+        .filter((t) => t.length > 0);
+      if (texts.length > 0) return texts.join("\n");
+    }
+  }
+  try {
+    return JSON.stringify(result, null, 2);
+  } catch {
+    return String(result);
+  }
+}
+
+/** "4.2 s" / "1 m 08 s" — matches the reference waterfall's style. */
+export function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds.toFixed(1)} s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return `${m} m ${String(s).padStart(2, "0")} s`;
 }
 
 /**

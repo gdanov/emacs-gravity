@@ -29,9 +29,11 @@ const clientJsText = clientResult.outputFiles[0].text;
 const htmlTemplatePath = "src/gateway/client/index.html";
 const htmlTemplate = readFileSync(htmlTemplatePath, "utf8");
 const scriptTag = `<script>\n${clientJsText}\n</script>`;
+// Function replacement — a plain string here would mangle `$$`/`$&`
+// sequences in the bundled JS (String.replace treats them as patterns).
 const inlinedHtml = htmlTemplate.replace(
   "<!-- GRAVITY_CLIENT_SCRIPT -->",
-  scriptTag,
+  () => scriptTag,
 );
 
 const clientBundleGeneratedPath = "src/gateway/client-bundle.generated.ts";

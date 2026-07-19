@@ -5,13 +5,73 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>gravity</title>
     <style>
-      body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 1.5rem; }
-      h1 { font-size: 1rem; margin: 0 0 1rem; }
-      section { margin-bottom: 1.5rem; }
-      h2 { font-size: 0.9rem; margin: 0 0 0.5rem; }
-      ul { list-style: none; padding: 0; margin: 0; }
-      li { padding: 0.15rem 0; }
-      .status { color: #666; font-size: 0.85rem; }
+:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+body { max-width: 980px; margin: 16px auto; padding: 0 16px; color: #222; }
+h1 { font-size: 1.4em; margin: 0 0 4px 0; }
+h2 { font-size: 1em; margin: 16px 0 4px; }
+.status { color: #555; font-size: 0.9em; margin: 0 0 8px; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 3px; background: #eee; font-size: 0.85em; margin-right: 4px; }
+.badge.harness { background: #cfc; }
+.badge.role { background: #eef; }
+.badge.status-responding { background: #ffe9a8; }
+.badge.status-ended { background: #ddd; color: #666; }
+
+/* ── Fleet / inbox panels ──────────────────────────────────────── */
+.fleet-group { margin: 8px 0; }
+.fleet-group__key { font-size: 0.95em; margin: 8px 0 2px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.fleet-group__meta { color: #777; font-size: 0.85em; }
+.fleet-table { border-collapse: collapse; width: 100%; font-size: 0.85em; margin: 4px 0; }
+.fleet-table th { text-align: left; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; color: #888; padding: 3px 8px; }
+.fleet-table td { padding: 3px 8px; border-top: 1px solid #eee; }
+.fleet-row { cursor: pointer; }
+.fleet-row:hover { background: #f5f8ff; }
+.fleet-row__id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.fleet-empty, .inbox-empty, .drill-empty, .drill-loading { color: #888; font-style: italic; font-size: 0.9em; }
+.inbox { list-style: none; padding: 0; margin: 0; }
+.inbox-item { padding: 3px 6px; border: 1px solid #ddd; border-radius: 4px; margin: 3px 0; font-size: 0.9em; }
+.inbox-item--attention { background: #fff3f0; border-color: #e0a898; }
+.inbox-item--actionable { background: #f0f8ff; }
+.inbox-item__badge { display: inline-block; min-width: 1.4em; text-align: center; margin-right: 6px; color: #666; }
+.inbox-item__badge--attention { color: #a00; font-weight: 700; }
+.inbox-item__type { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-right: 8px; color: #446; }
+
+/* ── Transcript (drill-down) ───────────────────────────────────── */
+.drill__header { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid #ccc; margin: 8px 0; }
+.drill__header h3 { font-size: 1.2em; margin: 0; }
+.drill__back { padding: 4px 10px; cursor: pointer; }
+.transcript-meta { color: #555; font-size: 0.9em; line-height: 1.5; margin: 4px 0 8px; }
+.controls { padding: 8px 0; border-bottom: 1px solid #ddd; margin-bottom: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.controls button { padding: 4px 10px; cursor: pointer; }
+section.events { margin: 8px 0; }
+details.event, details.subagent { content-visibility: auto; contain-intrinsic-size: 0 32px; }
+details.event { margin: 4px 0; border: 1px solid #ccc; border-radius: 4px; padding: 4px 8px; }
+summary { cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+details.event > .body, details.subagent > .subagent-body { padding: 8px; background: #f8f8f8; }
+pre { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; max-width: 100%; }
+.body pre { white-space: pre-wrap; word-break: break-word; margin: 0 0 4px 0; background: #fff; padding: 4px; border: 1px solid #ddd; overflow: auto; }
+.body pre.json { background: #fffbf0; }
+.body pre.tool-call-input { background: #f5f5ff; }
+.kind-control { background: #fffbe6; }
+.kind-control > summary { color: #886800; }
+.kind-message > summary { color: #224; }
+.kind-tool-result { background: #fdf6f0; }
+.kind-tool-result > summary { color: #804; }
+.kind-tool-result.grouped { margin-left: 24px; border-left: 3px solid #e0b890; }
+.kind-tool-result.tool--running { background: #fdf9e0; }
+.kind-tool-result.tool--running > summary { color: #875f00; }
+.kind-tool-result.tool--error { background: #fdeaea; }
+.kind-tool-result.tool--error > summary { color: #a00; }
+summary .tool-name { font-weight: 600; }
+summary .tool-args { color: #777; font-weight: 400; }
+summary .result-arrow { color: #aaa; }
+summary .dur { color: #999; font-weight: 400; font-size: 0.85em; }
+details.thinking-block { margin: 4px 0; padding: 2px 6px; background: #fafafa; border: 1px dashed #ccc; }
+details.thinking-block > summary { font-size: 0.85em; color: #666; }
+details.subagent { margin: 4px 0 4px 24px; border-left: 3px solid #888; padding-left: 8px; }
+details.subagent > summary { color: #335; }
+.subagent-body { padding: 4px 0 4px 4px; }
+.turn-sep { color: #888; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.06em; border-top: 1px dashed #ccc; margin: 14px 0 4px; padding-top: 4px; font-variant-numeric: tabular-nums; }
+.hidden { display: none; }
     </style>
   </head>
   <body>

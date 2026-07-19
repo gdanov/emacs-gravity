@@ -28,15 +28,23 @@
 import {
   applyPatch,
   classifyInboxItem,
+  firstLine,
+  formatDuration,
   groupedFleet,
+  resultText,
   shouldSyncPoll,
+  toolArgSummary,
 } from "./logic.js";
 import type {
+  Agent,
   InboxItem,
   ProjectSummary,
   ServerMessage,
   Session,
   SessionSummary,
+  StepNode,
+  Tool,
+  TurnNode,
 } from "@gravity/shared";
 
 const RECONNECT_DELAY_MS = 1000;
@@ -76,13 +84,6 @@ function el<T extends HTMLElement>(id: string): T | null {
 
 function textNode(text: string): Text {
   return document.createTextNode(text);
-}
-
-function textSpan(prefix: string, text: string, className: string): HTMLSpanElement {
-  const span = document.createElement("span");
-  span.className = className;
-  span.textContent = prefix === "turn" ? `${prefix} ${text}` : prefix;
-  return span;
 }
 
 function elFromHtml(html: string): HTMLElement {
@@ -210,6 +211,7 @@ function onSessionRowClick(sessionId: string): void {
   }
   state.currentSessionId = sessionId;
   state.currentSession = null;
+  openState.clear();
   render();
   send({ type: "request.session", sessionId });
 }
@@ -219,6 +221,7 @@ function closeDrillDown(): void {
   send({ type: "request.unsubscribe", sessionId: state.currentSessionId });
   state.currentSessionId = null;
   state.currentSession = null;
+  openState.clear();
   render();
 }
 
@@ -299,103 +302,298 @@ function renderDrillDown(parent: HTMLElement): void {
   replaceChildById(parent, "drill-root", container);
 }
 
+// ── Transcript rendering ─────────────────────────────────────────────
+//
+// The drill-down renders the session as a chat-style transcript: one
+// collapsible `details.event` card per prompt / assistant message /
+// tool call, subagents as indented `details.subagent` branches. The
+// visual language (kind tinting, badges, monospace summaries) mirrors
+// the render-transcript HTML reports so both read the same.
+//
+// Because the view re-renders on every patch, each card carries a
+// stable `data-key`; `openState` remembers the user's manual toggles
+// and re-applies them after a rebuild. Defaults: user prompts open,
+// everything else collapsed.
+
+const openState = new Map<string, boolean>();
+
+function isOpen(key: string, dflt: boolean): boolean {
+  return openState.get(key) ?? dflt;
+}
+
+interface EventCardOpts {
+  key: string;
+  className: string;
+  defaultOpen?: boolean;
+  summary: (HTMLElement | Text)[];
+  body: HTMLElement[];
+}
+
+function eventCard(opts: EventCardOpts): HTMLDetailsElement {
+  const details = document.createElement("details");
+  details.className = opts.className;
+  details.dataset.key = opts.key;
+  details.open = isOpen(opts.key, opts.defaultOpen ?? false);
+  const summary = document.createElement("summary");
+  for (const node of opts.summary) summary.appendChild(node);
+  details.appendChild(summary);
+  if (opts.body.length > 0) {
+    const body = document.createElement("div");
+    body.className = "body";
+    for (const node of opts.body) body.appendChild(node);
+    details.appendChild(body);
+  }
+  return details;
+}
+
+function badge(text: string, extraClass = ""): HTMLSpanElement {
+  const span = document.createElement("span");
+  span.className = extraClass ? `badge ${extraClass}` : "badge";
+  span.textContent = text;
+  return span;
+}
+
+function span(className: string, text: string): HTMLSpanElement {
+  const s = document.createElement("span");
+  s.className = className;
+  s.textContent = text;
+  return s;
+}
+
+function pre(className: string, text: string): HTMLPreElement {
+  const p = document.createElement("pre");
+  p.className = className;
+  p.textContent = text;
+  return p;
+}
+
+function thinkingBlock(key: string, text: string): HTMLDetailsElement {
+  const details = document.createElement("details");
+  details.className = "thinking-block";
+  details.dataset.key = key;
+  details.open = isOpen(key, false);
+  const summary = document.createElement("summary");
+  summary.textContent = "thinking";
+  details.appendChild(summary);
+  details.appendChild(pre("text-block", text));
+  return details;
+}
+
 function renderSessionTree(session: Session): HTMLElement {
-  const root = elFromHtml(`<div class="session-tree"></div>`);
-  const meta = elFromHtml(
-    `<dl class="session-meta">
-       <dt>status</dt><dd class="m-status"></dd>
-       <dt>claude</dt><dd class="m-claude"></dd>
-       <dt>branch</dt><dd class="m-branch"></dd>
-       <dt>worktree</dt><dd class="m-worktree"></dd>
-       <dt>role</dt><dd class="m-role"></dd>
-       <dt>cost</dt><dd class="m-cost"></dd>
-     </dl>`,
-  );
-  meta.querySelector(".m-status")!.textContent = session.status;
-  meta.querySelector(".m-claude")!.textContent = session.claudeStatus;
-  meta.querySelector(".m-branch")!.textContent = session.branch ?? "—";
-  meta.querySelector(".m-worktree")!.textContent = session.worktree ?? "—";
-  meta.querySelector(".m-role")!.textContent = session.role ?? "—";
-  meta.querySelector(".m-cost")!.textContent = formatCost(session.cost);
+  const root = elFromHtml(`<div class="transcript"></div>`);
+
+  const meta = elFromHtml(`<div class="transcript-meta"></div>`);
+  meta.appendChild(badge(session.source ?? "claude-code", "harness"));
+  if (session.role) meta.appendChild(badge(session.role, "role"));
+  meta.appendChild(badge(
+    session.status === "ended" ? "ended" : session.claudeStatus,
+    session.status === "ended" ? "status-ended"
+      : session.claudeStatus === "responding" ? "status-responding" : "",
+  ));
+  const metaLines: string[] = [];
+  metaLines.push(`session id: ${session.sessionId}`);
+  if (session.modelName) metaLines.push(`model: ${session.modelName}`);
+  if (session.branch) metaLines.push(`branch: ${session.branch}`);
+  metaLines.push(`cwd: ${session.cwd}`);
+  metaLines.push(`started: ${new Date(session.startTime).toISOString()}`);
+  if (session.tokenUsage) {
+    metaLines.push(`tokens: in=${session.tokenUsage.input_tokens ?? 0} out=${session.tokenUsage.output_tokens ?? 0}`);
+  }
+  if (session.cost != null) metaLines.push(`cost: ${formatCost(session.cost)}`);
+  for (const line of metaLines) {
+    meta.appendChild(span("", line));
+    meta.appendChild(document.createElement("br"));
+  }
   root.appendChild(meta);
 
-  const turns = elFromHtml(`<ol class="turns"></ol>`);
-  for (const turn of session.turns) {
-    turns.appendChild(renderTurn(turn));
-  }
-  root.appendChild(turns);
+  const controls = elFromHtml(
+    `<div class="controls">
+       <button type="button" class="c-expand">expand all</button>
+       <button type="button" class="c-collapse">collapse all</button>
+       <button type="button" class="c-prompts">back to prompts only</button>
+     </div>`,
+  );
+  root.appendChild(controls);
 
-  if (session.compactions.length > 0) {
-    const compactions = elFromHtml(
-      `<section class="compactions"><h4>compactions</h4><ol></ol></section>`,
-    );
-    const list = compactions.querySelector("ol");
-    if (list) {
-      for (const marker of session.compactions) {
-        const li = document.createElement("li");
-        li.textContent = `turn ${marker.turnNumber}: ${marker.reason}` +
-          (marker.summary ? ` — ${marker.summary}` : "");
-        list.appendChild(li);
-      }
-    }
-    root.appendChild(compactions);
+  const events = elFromHtml(`<section class="events"></section>`);
+  for (const turn of session.turns) {
+    renderTurnEvents(events, session, turn);
   }
+  root.appendChild(events);
+
+  // Record every manual toggle so the state survives re-renders.
+  // `toggle` doesn't bubble, so listen in the capture phase.
+  events.addEventListener(
+    "toggle",
+    (ev) => {
+      const d = ev.target as HTMLDetailsElement;
+      if (d.dataset.key) openState.set(d.dataset.key, d.open);
+    },
+    true,
+  );
+
+  const allCards = (): HTMLDetailsElement[] =>
+    Array.from(events.querySelectorAll<HTMLDetailsElement>("details[data-key]"));
+  controls.querySelector(".c-expand")?.addEventListener("click", () => {
+    for (const d of allCards()) d.open = true;
+  });
+  controls.querySelector(".c-collapse")?.addEventListener("click", () => {
+    for (const d of allCards()) d.open = false;
+  });
+  controls.querySelector(".c-prompts")?.addEventListener("click", () => {
+    for (const d of allCards()) d.open = d.classList.contains("prompt-event");
+  });
+
   return root;
 }
 
-function renderTurn(turn: Session["turns"][number]): HTMLLIElement {
-  const li = document.createElement("li");
-  li.className = "turn";
-  li.appendChild(textSpan("turn", String(turn.turnNumber), "turn__num"));
-  li.appendChild(textSpan(turn.frozen ? "frozen" : "open", "", "turn__badge"));
-  li.querySelector(".turn__num")!.textContent = `turn ${turn.turnNumber}`;
-  li.querySelector(".turn__badge")!.textContent = turn.frozen ? "frozen" : "open";
+function renderTurnEvents(events: HTMLElement, session: Session, turn: TurnNode): void {
+  const sep = elFromHtml(`<div class="turn-sep"></div>`);
+  const parts = [`turn ${turn.turnNumber}`];
+  if (turn.toolCount > 0) parts.push(`${turn.toolCount} tools`);
+  if (turn.agentCount > 0) parts.push(`${turn.agentCount} agents`);
+  if (turn.stopReason && turn.stopReason !== "stop") parts.push(`stop: ${turn.stopReason}`);
+  sep.textContent = parts.join(" · ");
+  events.appendChild(sep);
+
+  for (const marker of session.compactions) {
+    if (marker.turnNumber !== turn.turnNumber) continue;
+    events.appendChild(eventCard({
+      key: `t${turn.turnNumber}-compact-${marker.timestamp}`,
+      className: "event kind-control",
+      summary: [badge("control"), textNode(` compaction (${marker.reason})`)],
+      body: marker.summary ? [pre("text-block", marker.summary)] : [],
+    }));
+  }
+
   if (turn.prompt) {
-    const prompt = elFromHtml(`<div class="turn__prompt"></div>`);
-    prompt.textContent = turn.prompt.text;
-    li.appendChild(prompt);
-  }
-  if (turn.agents.length > 0) {
-    const agentsList = elFromHtml(`<ul class="turn__agents"></ul>`);
-    for (const agent of turn.agents) {
-      const ali = document.createElement("li");
-      ali.className = "agent";
-      ali.textContent = `${agent.type} (${agent.status})`;
-      agentsList.appendChild(ali);
+    const roleLabel = turn.prompt.type === "user" ? "user" : turn.prompt.type;
+    const body: HTMLElement[] = [pre("text-block", turn.prompt.text)];
+    if (turn.prompt.answer) {
+      body.push(pre("text-block", `answer: ${turn.prompt.answer}`));
     }
-    li.appendChild(agentsList);
+    events.appendChild(eventCard({
+      key: `t${turn.turnNumber}-prompt`,
+      className: "event kind-message prompt-event",
+      defaultOpen: true,
+      summary: [badge(roleLabel, "role"), textNode(` ${firstLine(turn.prompt.text)}`)],
+      body,
+    }));
   }
-  if (turn.steps.length > 0) {
-    const stepsList = elFromHtml(`<ol class="turn__steps"></ol>`);
-    for (const step of turn.steps) {
-      stepsList.appendChild(renderStep(step));
-    }
-    li.appendChild(stepsList);
+
+  for (let si = 0; si < turn.steps.length; si++) {
+    renderStepEvents(events, turn.steps[si], `t${turn.turnNumber}-s${si}`);
   }
-  return li;
+
+  for (const agent of turn.agents) {
+    events.appendChild(renderAgentBranch(agent));
+  }
+
+  if (turn.stopText || turn.stopThinking) {
+    const body: HTMLElement[] = [];
+    if (turn.stopThinking) body.push(thinkingBlock(`t${turn.turnNumber}-stop-think`, turn.stopThinking));
+    if (turn.stopText) body.push(pre("text-block", turn.stopText));
+    events.appendChild(eventCard({
+      key: `t${turn.turnNumber}-stop`,
+      className: "event kind-message",
+      summary: [badge("assistant", "role"), textNode(` ${firstLine(turn.stopText ?? "(thinking)")}`)],
+      body,
+    }));
+  }
 }
 
-function renderStep(step: Session["turns"][number]["steps"][number]): HTMLLIElement {
-  const li = document.createElement("li");
-  li.className = "step";
-  if (step.text) {
-    const text = document.createElement("div");
-    text.className = "step__text";
-    text.textContent = step.text;
-    li.appendChild(text);
+function renderStepEvents(parent: HTMLElement, step: StepNode, keyPrefix: string): void {
+  if (step.text || step.thinking) {
+    const body: HTMLElement[] = [];
+    if (step.thinking) body.push(thinkingBlock(`${keyPrefix}-think`, step.thinking));
+    if (step.text) body.push(pre("text-block", step.text));
+    parent.appendChild(eventCard({
+      key: `${keyPrefix}-msg`,
+      className: "event kind-message",
+      summary: [badge("assistant", "role"), textNode(` ${firstLine(step.text ?? "(thinking)")}`)],
+      body,
+    }));
   }
-  if (step.tools.length > 0) {
-    const toolsList = elFromHtml(`<ul class="step__tools"></ul>`);
-    for (const tool of step.tools) {
-      const tli = document.createElement("li");
-      tli.className = `tool tool--${tool.status}`;
-      tli.textContent = `${tool.name} · ${tool.status}` +
-        (tool.duration != null ? ` · ${tool.duration.toFixed(2)}s` : "");
-      toolsList.appendChild(tli);
-    }
-    li.appendChild(toolsList);
+  for (const tool of step.tools) {
+    parent.appendChild(renderToolCard(tool, keyPrefix));
   }
-  return li;
+}
+
+function renderToolCard(tool: Tool, keyPrefix: string): HTMLDetailsElement {
+  const key = `${keyPrefix}-tool-${tool.toolUseId || tool.name}`;
+  const statusClass = tool.status === "running" ? " tool--running"
+    : tool.status === "error" ? " tool--error" : "";
+
+  const summary: (HTMLElement | Text)[] = [
+    badge(tool.status === "running" ? "running" : "tool"),
+    textNode(" "),
+    span("tool-name", tool.name),
+    textNode(" "),
+  ];
+  const args = toolArgSummary(tool);
+  if (args) {
+    summary.push(span("tool-args", args));
+    summary.push(textNode(" "));
+  }
+  const preview = tool.status === "running"
+    ? resultText(tool.partial)
+    : resultText(tool.result);
+  if (preview) {
+    summary.push(span("result-arrow", "→"));
+    summary.push(textNode(` ${firstLine(preview, 80)}`));
+  }
+  if (tool.duration != null) {
+    summary.push(textNode(" "));
+    summary.push(span("dur", formatDuration(tool.duration)));
+  }
+
+  const body: HTMLElement[] = [];
+  if (Object.keys(tool.input ?? {}).length > 0) {
+    body.push(pre("json tool-call-input", JSON.stringify(tool.input, null, 2)));
+  }
+  if (preview) body.push(pre("tool-result", preview));
+
+  return eventCard({
+    key,
+    className: `event kind-tool-result grouped${statusClass}`,
+    summary,
+    body,
+  });
+}
+
+function renderAgentBranch(agent: Agent): HTMLDetailsElement {
+  const key = `agent-${agent.agentId}`;
+  const details = document.createElement("details");
+  details.className = "subagent";
+  details.dataset.key = key;
+  details.open = isOpen(key, agent.status === "running");
+  const summary = document.createElement("summary");
+  summary.appendChild(badge(agent.status === "running" ? "running" : "agent"));
+  summary.appendChild(textNode(` ${agent.type}`));
+  if (agent.duration != null) {
+    summary.appendChild(textNode(" "));
+    summary.appendChild(span("dur", formatDuration(agent.duration)));
+  }
+  details.appendChild(summary);
+
+  const body = document.createElement("div");
+  body.className = "subagent-body";
+  for (let si = 0; si < agent.steps.length; si++) {
+    renderStepEvents(body, agent.steps[si], `${key}-s${si}`);
+  }
+  if (agent.stopText || agent.stopThinking) {
+    const stopBody: HTMLElement[] = [];
+    if (agent.stopThinking) stopBody.push(thinkingBlock(`${key}-stop-think`, agent.stopThinking));
+    if (agent.stopText) stopBody.push(pre("text-block", agent.stopText));
+    body.appendChild(eventCard({
+      key: `${key}-stop`,
+      className: "event kind-message",
+      summary: [badge("assistant", "role"), textNode(` ${firstLine(agent.stopText ?? "(thinking)")}`)],
+      body: stopBody,
+    }));
+  }
+  details.appendChild(body);
+  return details;
 }
 
 function replaceChildById(parent: HTMLElement, id: string, next: HTMLElement): void {

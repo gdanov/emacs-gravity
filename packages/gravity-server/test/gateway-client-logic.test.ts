@@ -11,8 +11,12 @@ import { describe, it, expect } from "vitest";
 import {
   applyPatch,
   classifyInboxItem,
+  firstLine,
+  formatDuration,
   groupedFleet,
+  resultText,
   shouldSyncPoll,
+  toolArgSummary,
 } from "../src/gateway/client/logic.js";
 import type {
   Agent,
@@ -597,3 +601,38 @@ describe("applyPatch — complete_agent", () => {
 // Suppress "unused" lint warnings on helpers retained for symmetry with
 // the existing session-primitives test, in case a future case needs them.
 void makeRole;
+
+describe("transcript formatting helpers", () => {
+  it("firstLine truncates at the first newline and hard-caps length", () => {
+    expect(firstLine("hello\nworld")).toBe("hello");
+    expect(firstLine("short")).toBe("short");
+    const long = "x".repeat(200);
+    expect(firstLine(long, 50)).toHaveLength(50);
+    expect(firstLine(long, 50).endsWith("…")).toBe(true);
+  });
+
+  it("toolArgSummary prefers well-known input fields", () => {
+    expect(toolArgSummary({ name: "Read", input: { file_path: "/a/b.ts" } })).toBe("/a/b.ts");
+    expect(toolArgSummary({ name: "Bash", input: { command: "ls -la", timeout: 5 } })).toBe("ls -la");
+    expect(toolArgSummary({ name: "X", input: {} })).toBe("");
+  });
+
+  it("toolArgSummary falls back to compact JSON of the whole input", () => {
+    const s = toolArgSummary({ name: "X", input: { a: 1, b: "z" } });
+    expect(s).toContain('"a":1');
+  });
+
+  it("resultText flattens strings, content blocks, and objects", () => {
+    expect(resultText("plain")).toBe("plain");
+    expect(resultText(null)).toBe("");
+    expect(
+      resultText({ content: [{ type: "text", text: "one" }, { type: "text", text: "two" }] }),
+    ).toBe("one\ntwo");
+    expect(resultText({ ok: true })).toBe('{\n  "ok": true\n}');
+  });
+
+  it("formatDuration renders sub-minute and minute+ spans", () => {
+    expect(formatDuration(4.21)).toBe("4.2 s");
+    expect(formatDuration(68)).toBe("1 m 08 s");
+  });
+});
