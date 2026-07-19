@@ -19,7 +19,9 @@ test-elisp:
 test-bridge:
 	cd packages/emacs-bridge && npx vitest run
 
-test-server:
+# build-server first: src/gravity-server.ts imports gitignored generated
+# modules (client-bundle / emitter-bundle), absent on fresh checkouts.
+test-server: build-server
 	cd packages/gravity-server && npx vitest run
 
 test-menubar:

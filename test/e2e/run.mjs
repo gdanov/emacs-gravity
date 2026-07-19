@@ -87,6 +87,14 @@ async function setup() {
   mkdirSync(PIWD, { recursive: true });
   writeFileSync(PROXY_LOG, "");
 
+  // gravity-server.ts imports gitignored *-bundle.generated.ts modules;
+  // a fresh checkout has none, so build before launching from source.
+  log("building generated bundles…");
+  const build = sh("node", ["build.mjs"], { cwd: join(REPO, "packages", "gravity-server") });
+  if (build.status !== 0) {
+    throw new Error(`build.mjs failed:\n${build.stderr || build.stdout}`);
+  }
+
   // `--pi` auto-starts a pi session at boot; PI_BINARY_PATH points the
   // pi-driver at our fake pi (no LLM). The hook socket still serves the
   // Claude-path scenarios — the extra pi session is inert until triggered.
