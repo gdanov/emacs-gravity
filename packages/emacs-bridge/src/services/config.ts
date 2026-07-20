@@ -3,6 +3,7 @@ import { execSync } from "child_process";
 import { ProcessIO } from "./process-io.js";
 import { Fs } from "@gravity/shared";
 import { join } from "path";
+import { resolveClaudePid, psLookup } from "../claude-pid.js";
 
 export interface BridgeConfigData {
   readonly socketPath: string;
@@ -33,8 +34,13 @@ export const BridgeConfigLive = Layer.effect(
     const dumpDir = yield* io.getEnv("CLAUDE_GRAVITY_DUMP_DIR");
     const dumpEnabled = !!dumpDir || (yield* io.getEnv("CLAUDE_GRAVITY_DUMP")) === "1";
     const noAutoApprove = (yield* io.getEnv("CLAUDE_GRAVITY_NO_AUTO_APPROVE")) === "1";
+    // CLAUDE_PID is set by our own hook scripts as $PPID, which is only
+    // claude itself when claude spawns hooks directly. Prefer the nearest
+    // `claude` ancestor of this process; fall back to the env value when
+    // the walk finds none (e.g. claude launched under a renamed binary).
     const claudePidStr = yield* io.getEnv("CLAUDE_PID");
-    const claudePid = claudePidStr ? parseInt(claudePidStr, 10) || null : null;
+    const envClaudePid = claudePidStr ? parseInt(claudePidStr, 10) || null : null;
+    const claudePid = resolveClaudePid(process.pid, psLookup) ?? envClaudePid;
     const tempId = (yield* io.getEnv("CLAUDE_GRAVITY_TEMP_ID")) ?? null;
 
     // Detect tmux session

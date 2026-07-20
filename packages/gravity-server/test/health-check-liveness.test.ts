@@ -84,6 +84,44 @@ describe("evaluateSessionHealth — real-exported liveness decision", () => {
     expect(result).toEqual({ dead: true, reason: "stale" });
   });
 
+  it("unreachable pid does NOT reap a session that emitted an event within the grace window", () => {
+    // The tracked pid can be an ephemeral wrapper process that claude
+    // spawned the hook through; it exits the moment the hook returns, so
+    // process.kill throws for a session that is very much alive. An event
+    // delivered seconds ago outranks the unreachable pid.
+    const now = 1_700_000_000_000;
+    const input: SessionHealthInput = {
+      pid: 999999,
+      source: "claude-code",
+      lastEventTime: now - 5_000,
+    };
+    const result = evaluateSessionHealth(input, now, {
+      staleThresholdMs: STALE_MS,
+      pidGraceMs: 90_000,
+      killFn: alwaysThrows,
+    });
+    expect(result).toEqual({ dead: false });
+  });
+
+  it("unreachable pid DOES reap once the grace window has lapsed", () => {
+    // The complement: a genuinely dead session stops emitting events, so
+    // once no event has arrived for longer than the grace window the
+    // unreachable pid is trusted and the session is reaped — well before
+    // the much longer staleness threshold would fire.
+    const now = 1_700_000_000_000;
+    const input: SessionHealthInput = {
+      pid: 999999,
+      source: "claude-code",
+      lastEventTime: now - 90_001,
+    };
+    const result = evaluateSessionHealth(input, now, {
+      staleThresholdMs: STALE_MS,
+      pidGraceMs: 90_000,
+      killFn: alwaysThrows,
+    });
+    expect(result).toEqual({ dead: true, reason: "pid-unreachable" });
+  });
+
   it("live pid-bearing session is NEVER reaped regardless of staleness", () => {
     // A session with a real (live) pid, regardless of how long it has
     // been idle: the pid branch's killFn returns without throwing,

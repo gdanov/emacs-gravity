@@ -54,6 +54,9 @@ const CAPABILITY_POLL_MS = 500;
 const PURGE_DELAY_MS = 2 * 60 * 1000;
 const HEALTH_CHECK_INTERVAL_MS = 30_000;
 const STALENESS_THRESHOLD_MS = 5 * 60 * 1000;
+// Must exceed HEALTH_CHECK_INTERVAL_MS so an active session is never
+// reaped between two consecutive events.
+const PID_UNREACHABLE_GRACE_MS = 90_000;
 const HINT_RECENCY_GUARD_MS = 30_000;
 const HOOKS_SILENCE_WARN_MS = 90_000;
 const HOOKS_SILENCE_REARM_MS = 600_000;
@@ -303,10 +306,15 @@ export type SessionHealthResult =
 export function evaluateSessionHealth(
   session: SessionHealthInput,
   now: number,
-  opts: { staleThresholdMs: number; killFn?: (pid: number, signal: 0) => void },
+  opts: {
+    staleThresholdMs: number;
+    pidGraceMs?: number;
+    killFn?: (pid: number, signal: 0) => void;
+  },
 ): SessionHealthResult {
   const killFn: (pid: number, signal: 0) => void =
     opts.killFn ?? ((pid, signal) => { process.kill(pid, signal); });
+  const pidGraceMs = opts.pidGraceMs ?? PID_UNREACHABLE_GRACE_MS;
   // PID branch first: a session with a real pid is alive iff the OS
   // reports so; the staleness fallback must NOT override a live pid.
   if (session.pid && session.pid > 0) {
@@ -314,6 +322,15 @@ export function evaluateSessionHealth(
       killFn(session.pid, 0);
       return { dead: false };
     } catch {
+      // An unreachable pid is not proof of death: the tracked pid may be
+      // an ephemeral wrapper that claude spawned the hook through, which
+      // exits immediately while the session lives on. A session that
+      // delivered an event within the grace window is alive whatever the
+      // pid says — a genuinely dead one also stops emitting, so it still
+      // gets reaped once the window lapses.
+      if (now - session.lastEventTime <= pidGraceMs) {
+        return { dead: false };
+      }
       return { dead: true, reason: "pid-unreachable" };
     }
   }
