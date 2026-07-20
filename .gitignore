@@ -12,8 +12,31 @@ emacs-bridge-agents.json
 /.opencode/
 result
 .direnv
-.envrc
 .vscode/
+
+# Secrets / sensitive local config — never commit
+.env
+.env.local
+.env.*.local
+.envrc
+.dev.vars
+*.dev.local
+*.local.*
+*.pem
+*.key
+secrets/
+
+# Keep example/template files
+!.env.example
+!.envrc.example
+!*.dev.local.example
+
+# Harness EnterWorktree scratch — interactive worktrees, never tracked
+.claude/worktrees/
+
+# Loop / swarm scratch (agentic pipeline)
+.clanq/
+.pi-subagents/
 
 # Taskplane runtime artifacts
 .pi/
