@@ -51,6 +51,18 @@ if [ "$MODE" = "restart" ]; then
   elif _gravity_is_semver "$marker" && _gravity_version_gt "$OWN_VERSION" "$marker"; then
     need_restart=1
   fi
+else
+  # Cold-spawn re-check UNDER THE LOCK: a concurrent winner (or an
+  # in-flight restart) may have already brought a live server up between
+  # this caller's _ensure-server liveness check and our acquiring the
+  # lock. If so, no-op — mirror master's loser-waits-and-returns behavior
+  # instead of killing the winner's fresh server and respawning.
+  if [ -S "$GRAVITY_SOCK" ] && [ -f "$GRAVITY_PID_FILE" ]; then
+    cold_pid="$(cat "$GRAVITY_PID_FILE" 2>/dev/null)"
+    if [ -n "$cold_pid" ] && kill -0 "$cold_pid" 2>/dev/null; then
+      need_restart=0
+    fi
+  fi
 fi
 
 if [ "$need_restart" -eq 1 ]; then

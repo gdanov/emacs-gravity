@@ -1184,3 +1184,82 @@ describe("T10: restart group-TERM reaches server descendants", () => {
     },
   );
 });
+
+// ─── T11 — concurrent cold spawns with NO pre-existing server → exactly
+//           one restart-spawn (the cold-path lock re-check) ─────────────
+
+describe("T11: concurrent cold spawn with no pre-existing server", () => {
+  let coldPid: number | undefined;
+
+  afterEach(async () => {
+    if (coldPid !== undefined) {
+      try {
+        process.kill(coldPid, "SIGTERM");
+      } catch {
+        /* already dead */
+      }
+    }
+    coldPid = undefined;
+    // Cold-spawned stub is a grandchild (spawned by `_spawn-server`, not
+    // via `trackedSpawn`), so the file-level `trackedSpawn` afterEach
+    // does not reap it. Give it a moment to settle after SIGTERM.
+    await new Promise((r) => setTimeout(r, 200));
+  });
+
+  it("two concurrent PostToolUse invocations racing a cold start produce exactly one spawn", async () => {
+    const home = freshTempDir("wp2-t11-home-");
+    const sockPath = join(home, "gravity-hooks.sock");
+    const pidFile = join(home, "gravity-server.pid");
+    const versionFile = join(home, "gravity-server.version");
+    const spawnLog = join(home, "spawn.log");
+
+    // Socket, pid file, and marker must all be ABSENT so `_ensure-server`
+    // reaches the bottom cold-spawn call for both invocations.
+    expect(existsSync(sockPath)).toBe(false);
+    expect(existsSync(pidFile)).toBe(false);
+    expect(existsSync(versionFile)).toBe(false);
+
+    const hooks = setupTestHooksDir({ ownVersion: "4.5.2" });
+    const stubBin = aliasStubAwayFromGravityServerName();
+    const env = buildChildEnv(
+      home,
+      { sockPath, pidFile, versionFile },
+      {
+        GRAVITY_SERVER_BIN: stubBin,
+        STUB_SERVER_VERSION: "4.5.2",
+        STUB_SPAWN_LOG: spawnLog,
+      },
+    );
+
+    const [r1, r2] = await Promise.all([
+      runEnsureServer({
+        hooksDir: hooks.hooksDir,
+        eventName: "PostToolUse",
+        env,
+      }),
+      runEnsureServer({
+        hooksDir: hooks.hooksDir,
+        eventName: "PostToolUse",
+        env,
+      }),
+    ]);
+
+    expect(r1.exitInfo.code).toBe(0);
+    expect(r2.exitInfo.code).toBe(0);
+
+    // The load-bearing assertion: without the fix, the loser kills the
+    // winner's freshly cold-spawned stub and respawns → 2 spawns.
+    expect(countSpawnLog(spawnLog)).toBe(1);
+
+    // Exactly one live pid.
+    const finalPid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
+    expect(finalPid).toBeGreaterThan(0);
+    expect(() => process.kill(finalPid, 0)).not.toThrow();
+    coldPid = finalPid;
+
+    // Lock file cleaned up.
+    expect(existsSync(join(home, ".local", "state", "gravity-server.lock"))).toBe(
+      false,
+    );
+  });
+});
