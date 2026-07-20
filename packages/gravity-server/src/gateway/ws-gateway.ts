@@ -5,8 +5,8 @@
 // protocol translation only — no session state, no protocol knowledge
 // beyond "complete lines ↔ one WS text message" framing. Authentication
 // is a per-process-start token supplied as the `?token=` query param on
-// the upgrade request, with an Origin allow-list limited to the loopback
-// host:port pair of this same listener.
+// the upgrade request, with an Origin check requiring the page to have
+// been served from this same listener (Origin host:port == request Host).
 
 import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer } from "http";
 import type { AddressInfo } from "net";
@@ -182,7 +182,7 @@ export class WsGateway {
       return;
     }
 
-    if (!this.originAllowed(req.headers.origin, this.boundPort)) {
+    if (!this.originAllowed(req.headers.origin, req.headers.host, this.boundPort)) {
       this.rejectUpgrade(socket);
       return;
     }
@@ -198,8 +198,15 @@ export class WsGateway {
     });
   }
 
-  private originAllowed(origin: string | undefined, port: number): boolean {
+  private originAllowed(
+    origin: string | undefined,
+    requestHost: string | undefined,
+    port: number,
+  ): boolean {
     if (typeof origin !== "string" || origin.length === 0) {
+      return false;
+    }
+    if (typeof requestHost !== "string" || requestHost.length === 0) {
       return false;
     }
     let parsed: URL;
@@ -210,9 +217,9 @@ export class WsGateway {
     }
     if (parsed.protocol !== "http:") return false;
     if (parsed.port !== String(port)) return false;
-    if (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") {
-      return false;
-    }
+    // The page must have been served by this same listener: the Origin's
+    // host:port must match the Host the browser is connecting to now.
+    if (parsed.host !== requestHost) return false;
     return true;
   }
 

@@ -74,7 +74,7 @@ export const ServerConfigLive = Layer.effect(
         process.env.GRAVITY_PI_EXTENSION_DIR ??
         join(home, ".pi", "agent", "extensions"),
       gatewayEnabled: process.env.GRAVITY_GATEWAY_DISABLE !== "1",
-      gatewayHost: process.env.GRAVITY_GATEWAY_HOST || "127.0.0.1",
+      gatewayHost: process.env.GRAVITY_GATEWAY_HOST || "0.0.0.0",
       gatewayPort: parseInt(process.env.GRAVITY_GATEWAY_PORT || "8765", 10),
     };
   }),
