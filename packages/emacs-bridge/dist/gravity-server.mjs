@@ -101485,9 +101485,9 @@ var require_websocket_server = __commonJS({
 
 // src/gravity-server.ts
 import { createServer as createServer2 } from "net";
-import { unlinkSync as unlinkSync2 } from "fs";
-import { dirname as dirname2 } from "path";
-import { pathToFileURL } from "url";
+import { readFileSync as readFileSync3, unlinkSync as unlinkSync2 } from "fs";
+import { dirname as dirname2, join as join5 } from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 import { randomBytes as randomBytes2 } from "crypto";
 
 // ../../node_modules/effect/dist/Pipeable.js
@@ -110678,6 +110678,7 @@ var ServerConfigLive = Layer_exports.effect(
       hookSocketPath: process.env.GRAVITY_HOOK_SOCK ?? join2(stateDir, "gravity-hooks.sock"),
       terminalSocketPath: process.env.GRAVITY_TERMINAL_SOCK ?? join2(stateDir, "gravity-terminal.sock"),
       pidFilePath: process.env.GRAVITY_PID_FILE ?? join2(stateDir, "gravity-server.pid"),
+      versionFilePath: process.env.GRAVITY_SERVER_VERSION_FILE ?? join2(stateDir, "gravity-server.version"),
       logPath: process.env.GRAVITY_LOG_PATH || "/tmp/gravity-server.log",
       logMaxSize: parseInt(process.env.GRAVITY_LOG_MAX_SIZE || "2097152", 10),
       piEnabled,
@@ -111604,6 +111605,32 @@ var processHookMessage = async (deps, msg, socket) => {
     }
   }
 };
+function resolveOwnVersion(moduleUrl = import.meta.url) {
+  return Effect_exports.runSync(
+    Effect_exports.try({
+      try: () => {
+        const selfDir = dirname2(fileURLToPath(moduleUrl));
+        const pluginJsonPath = join5(selfDir, "..", ".claude-plugin", "plugin.json");
+        const raw = readFileSync3(pluginJsonPath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (typeof parsed === "object" && parsed !== null && "version" in parsed && typeof parsed.version === "string" && parsed.version.length > 0) {
+          return parsed.version;
+        }
+        return "dev";
+      },
+      catch: () => void 0
+    }).pipe(Effect_exports.catch(() => Effect_exports.succeed("dev")))
+  );
+}
+var writeVersionMarker = (fs, path, version2) => fs.writeFile(path, version2);
+var removeVersionMarker = (path) => {
+  Effect_exports.runSync(
+    Effect_exports.try({
+      try: () => unlinkSync2(path),
+      catch: () => void 0
+    }).pipe(Effect_exports.catch(() => Effect_exports.void))
+  );
+};
 function evaluateSessionHealth(session, now, opts) {
   const killFn = opts.killFn ?? ((pid, signal) => {
     process.kill(pid, signal);
@@ -111871,7 +111898,7 @@ var program = Effect_exports.gen(function* () {
     const attemptRead = (attempt = 0) => {
       if (piDrivers.get(sessionId) !== driver) return;
       try {
-        const { readFileSync: readFileSync3 } = __require("fs");
+        const { readFileSync: readFileSync4 } = __require("fs");
         let branch = null;
         try {
           const fd = __require("fs").openSync(sessionFile, "r");
@@ -112496,6 +112523,9 @@ var program = Effect_exports.gen(function* () {
   };
   yield* fs.unlinkIfExists(config.hookSocketPath);
   yield* fs.mkdirp(dirname2(config.hookSocketPath));
+  const ownVersion = resolveOwnVersion();
+  yield* writeVersionMarker(fs, config.versionFilePath, ownVersion);
+  logMsg(`Version marker written: ${ownVersion} (${config.versionFilePath})`);
   const hookServer = createServer2((socket) => {
     let buffer = "";
     socket.on("data", (chunk) => {
@@ -112674,6 +112704,7 @@ var program = Effect_exports.gen(function* () {
       unlinkSync2(config.pidFilePath);
     } catch {
     }
+    removeVersionMarker(config.versionFilePath);
   };
   process.on("SIGINT", () => {
     shutdown();
@@ -112728,6 +112759,9 @@ export {
   pollSubscribedSessions,
   processHookMessage,
   purgeSession,
+  removeVersionMarker,
+  resolveOwnVersion,
   startGatewayNonFatal,
-  subscribeAndSnapshot
+  subscribeAndSnapshot,
+  writeVersionMarker
 };
