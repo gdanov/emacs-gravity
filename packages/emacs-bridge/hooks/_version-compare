@@ -1,0 +1,35 @@
+#!/bin/sh
+# _version-compare — POSIX semver helpers shared by _ensure-server and
+# _spawn-server. Sourced, never executed directly.
+
+# _gravity_is_semver STR — true (0) iff STR looks like x.y.z (digits-only
+# components). Anything else (including the literal "dev") is false.
+_gravity_is_semver() {
+  case "$1" in
+    [0-9]*.[0-9]*.[0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _gravity_version_gt A B — true (0) iff A > B, both "x.y.z". Pure POSIX
+# parameter-expansion split on "." + integer compare per component (no
+# awk/sed fork) — handles multi-digit components (4.10.0 > 4.9.0).
+_gravity_version_gt() {
+  a_maj=${1%%.*}; a_rest=${1#*.}; a_min=${a_rest%%.*}; a_patch=${a_rest#*.}
+  b_maj=${2%%.*}; b_rest=${2#*.}; b_min=${b_rest%%.*}; b_patch=${b_rest#*.}
+  [ "$a_maj" -gt "$b_maj" ] && return 0
+  [ "$a_maj" -lt "$b_maj" ] && return 1
+  [ "$a_min" -gt "$b_min" ] && return 0
+  [ "$a_min" -lt "$b_min" ] && return 1
+  [ "$a_patch" -gt "$b_patch" ] && return 0
+  return 1
+}
+
+# _gravity_own_version HOOKS_DIR — echo the version from
+# HOOKS_DIR/../.claude-plugin/plugin.json, or "dev" if absent/unparsable.
+_gravity_own_version() {
+  pj="$1/../.claude-plugin/plugin.json"
+  [ -f "$pj" ] || { printf '%s\n' "dev"; return; }
+  v=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pj" | head -n1)
+  if [ -n "$v" ]; then printf '%s\n' "$v"; else printf '%s\n' "dev"; fi
+}

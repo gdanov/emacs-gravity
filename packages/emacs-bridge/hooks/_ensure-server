@@ -1,14 +1,40 @@
 #!/bin/sh
-# Auto-start gravity-server if hook socket doesn't exist.
-# Sourced by all hook scripts before invoking the bridge.
+# Auto-start gravity-server if hook socket doesn't exist. Also restarts a
+# live-but-stale server on gated events (SessionStart / UserPromptSubmit)
+# so a resurrected old-plugin session can no longer pin the server to a
+# stale version. Sourced by all hook scripts before invoking the bridge.
+
+HOOKS_DIR="$(dirname "$0")"
+. "$HOOKS_DIR/_version-compare"
 
 GRAVITY_SOCK="${GRAVITY_HOOK_SOCK:-$HOME/.local/state/gravity-hooks.sock}"
 GRAVITY_PID_FILE="${GRAVITY_PID_FILE:-$HOME/.local/state/gravity-server.pid}"
+GRAVITY_SERVER_VERSION_FILE="${GRAVITY_SERVER_VERSION_FILE:-$HOME/.local/state/gravity-server.version}"
 
 # Fast path: socket exists AND server process is alive → running
 if [ -S "$GRAVITY_SOCK" ] && [ -f "$GRAVITY_PID_FILE" ]; then
   pid=$(cat "$GRAVITY_PID_FILE" 2>/dev/null)
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    # Staleness compare — gated to SessionStart/UserPromptSubmit only.
+    # Every other event name (PreToolUse, PostToolUse, Stop, ...) skips
+    # this case body entirely and hits `return 0` below without ever
+    # reading plugin.json or the marker file.
+    case "$(basename "$0")" in
+      SessionStart | UserPromptSubmit)
+        own_version="$(_gravity_own_version "$HOOKS_DIR")"
+        marker="$(cat "$GRAVITY_SERVER_VERSION_FILE" 2>/dev/null)"
+        restart_needed=0
+        if [ -z "$marker" ]; then
+          restart_needed=1   # absent marker → pre-feature server
+        elif _gravity_is_semver "$marker" && _gravity_version_gt "$own_version" "$marker"; then
+          restart_needed=1
+        fi
+        if [ "$restart_needed" -eq 1 ]; then
+          SERVER_BIN="${GRAVITY_SERVER_BIN:-$HOOKS_DIR/../dist/gravity-server.mjs}"
+          [ -f "$SERVER_BIN" ] && sh "$HOOKS_DIR/_spawn-server" "$SERVER_BIN" restart "$own_version"
+        fi
+        ;;
+    esac
     return 0
   fi
   # PID dead but socket file exists → stale, fall through to restart
@@ -36,53 +62,8 @@ else
   # Plugin layout: hooks/ → ../dist/gravity-server.mjs
   # Works in the dev sync-cache, local marketplace checkouts, and GitHub
   # releases — all ship the server bundle alongside the bridge.
-  SERVER_BIN="$(dirname "$0")/../dist/gravity-server.mjs"
+  SERVER_BIN="$HOOKS_DIR/../dist/gravity-server.mjs"
 fi
 [ -f "$SERVER_BIN" ] || return 0  # Not found → skip, Emacs can start it
 
-# Atomic lock to prevent duplicate spawns from concurrent hooks
-LOCK_FILE="$HOME/.local/state/gravity-server.lock"
-mkdir -p "$(dirname "$LOCK_FILE")"
-if ! (set -C; echo $$ > "$LOCK_FILE") 2>/dev/null; then
-  # Another hook is already spawning — just wait for socket
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [ -S "$GRAVITY_SOCK" ] && break
-    sleep 0.1
-  done
-  return 0
-fi
-
-# Kill any orphaned server processes before spawning
-if [ -f "$GRAVITY_PID_FILE" ]; then
-  old_pid=$(cat "$GRAVITY_PID_FILE" 2>/dev/null)
-  if [ -n "$old_pid" ]; then
-    kill -TERM "-$old_pid" 2>/dev/null  # process group
-    kill -TERM "$old_pid" 2>/dev/null   # direct
-  fi
-  rm -f "$GRAVITY_PID_FILE"
-fi
-# Catch any remaining orphans
-pkill -f "gravity-server\\.(mjs|ts)" 2>/dev/null || true
-
-# Clean up stale sockets
-rm -f "$GRAVITY_SOCK" "$HOME/.local/state/gravity-terminal.sock"
-
-# Rotate oversized log before starting fresh server
-LOG_FILE="/tmp/gravity-server.log"
-if [ -f "$LOG_FILE" ] && [ "$(wc -c < "$LOG_FILE")" -gt 2097152 ]; then
-  mv -f "$LOG_FILE" "${LOG_FILE}.1"
-fi
-
-# Spawn server in background — stderr (logMsg output) goes to log file
-nohup node "$SERVER_BIN" >>"$LOG_FILE" 2>&1 &
-# Write spawner PID immediately (server overwrites with its own shortly)
-echo $! > "$GRAVITY_PID_FILE"
-
-# Wait for socket (up to 2s)
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  [ -S "$GRAVITY_SOCK" ] && break
-  sleep 0.1
-done
-
-# Remove lock
-rm -f "$LOCK_FILE"
+sh "$HOOKS_DIR/_spawn-server" "$SERVER_BIN"
