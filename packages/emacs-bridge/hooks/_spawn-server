@@ -76,7 +76,14 @@ if [ "$need_restart" -eq 1 ]; then
     mv -f "$LOG_FILE" "${LOG_FILE}.1"
   fi
 
-  nohup node "$SERVER_BIN" >>"$LOG_FILE" 2>&1 &
+  # Spawn as a process-group leader (via setsid, when available) so the
+  # group-TERM below reaches server descendants; degrades to today's
+  # behavior on hosts without setsid.
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid node "$SERVER_BIN" >>"$LOG_FILE" 2>&1 &
+  else
+    nohup node "$SERVER_BIN" >>"$LOG_FILE" 2>&1 &
+  fi
   echo $! > "$GRAVITY_PID_FILE"
 
   i=0

@@ -22,7 +22,7 @@
 // hook event had fired.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -140,6 +140,65 @@ function buildChildEnv(
     ...extra,
   };
 }
+
+// ─── C1 — spawn-count log (restart-spawns only) ─────────────────────────
+
+/** Number of restart-spawned stubs recorded in `spawnLog` (one line per
+ *  stub that had `STUB_SPAWN_LOG` set at startup). 0 if the file was
+ *  never created. */
+function countSpawnLog(spawnLog: string): number {
+  if (!existsSync(spawnLog)) return 0;
+  return readFileSync(spawnLog, "utf-8").split("\n").filter((l) => l.trim() !== "")
+    .length;
+}
+
+// ─── C2 — read-trace bindir (proves the hot path reads neither
+//          plugin.json nor the marker) ──────────────────────────────────
+
+/** Resolve the absolute path of a real external tool via `command -v`
+ *  in a fresh `sh`, so the wrapper we write can `exec` the genuine
+ *  binary after recording its own invocation. */
+function resolveRealTool(name: string): string {
+  const r = spawnSync("sh", ["-c", `command -v ${name}`], {
+    env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" },
+    encoding: "utf-8",
+  });
+  const resolved = (r.stdout ?? "").trim();
+  if (!resolved) throw new Error(`could not resolve real "${name}" via command -v`);
+  return resolved;
+}
+
+interface ReadTraceBindir {
+  binDir: string;
+  traceFile: string;
+}
+
+/** Creates a per-test bindir with `cat`/`sed` wrapper scripts that
+ *  append `"<tool> <args>\n"` to `$GRAVITY_READ_TRACE` then `exec` the
+ *  real tool. Prepend `binDir` to the child's PATH and set
+ *  `GRAVITY_READ_TRACE=traceFile` to wire it in. Other commands
+ *  (`head`, `node`, `sh`, `rm`, `kill`, ...) are left unwrapped and
+ *  resolve normally from the inherited PATH. */
+function setupReadTraceBindir(): ReadTraceBindir {
+  const binDir = freshTempDir("wp2-readtrace-bin-");
+  const traceDir = freshTempDir("wp2-readtrace-log-");
+  const traceFile = join(traceDir, "trace.log");
+
+  for (const tool of ["cat", "sed"]) {
+    const realTool = resolveRealTool(tool);
+    const body = `#!/bin/sh\nprintf '%s\\n' "${tool} $*" >> "$GRAVITY_READ_TRACE"\nexec ${realTool} "$@"\n`;
+    writeFileSync(join(binDir, tool), body, { mode: 0o755 });
+  }
+
+  return { binDir, traceFile };
+}
+
+// ─── C3 — setsid availability (for the T10 regression test skip guard) ──
+
+const hasSetsid: boolean =
+  spawnSync("sh", ["-c", "command -v setsid"], {
+    env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" },
+  }).status === 0;
 
 // ─── Per-test plugin (hooks dir + sibling .claude-plugin/plugin.json) ────
 
@@ -532,7 +591,7 @@ describe("T6: gated fast path", () => {
     const sockPath = join(home, "gravity-hooks.sock");
     const pidFile = join(home, "gravity-server.pid");
     const versionFile = join(home, "gravity-server.version");
-    const markerBackup = `${versionFile}.mtime-backup`;
+    const spawnLog = join(home, "spawn.log");
 
     // Pre-launch OLD stub: marker "4.5.1".
     stub = await startStubServer({
@@ -542,10 +601,12 @@ describe("T6: gated fast path", () => {
       versionFile,
     });
 
-    // Snapshot marker mtime so we can assert it was never re-read or
+    // Snapshot marker content so we can assert it was never re-read or
     // re-written by a hot-path that shouldn't touch it.
-    const markerMtimeBefore = readFileSync(versionFile, "utf-8");
-    expect(markerMtimeBefore).toBe("4.5.1");
+    const markerContentBefore = readFileSync(versionFile, "utf-8");
+    expect(markerContentBefore).toBe("4.5.1");
+
+    const { binDir, traceFile } = setupReadTraceBindir();
 
     // Use the REAL production hooks dir but with a sibling
     // .claude-plugin/plugin.json set to "4.5.2" — the gated branch
@@ -577,7 +638,11 @@ describe("T6: gated fast path", () => {
         }),
       );
 
-      const env = buildChildEnv(home, { sockPath, pidFile, versionFile });
+      const env = buildChildEnv(home, { sockPath, pidFile, versionFile }, {
+        PATH: `${binDir}:${process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`,
+        GRAVITY_READ_TRACE: traceFile,
+        STUB_SPAWN_LOG: spawnLog,
+      });
       const result = await runEnsureServer({
         hooksDir: HOOKS_SRC_DIR,
         eventName: "PostToolUse",
@@ -589,6 +654,17 @@ describe("T6: gated fast path", () => {
       // Marker file unchanged.
       expect(readFileSync(versionFile, "utf-8")).toBe("4.5.1");
 
+      // C2: the wrappers were genuinely on PATH and exercised (the hot
+      // path always `cat`s the pid file) — but never read the marker
+      // or plugin.json.
+      const trace = existsSync(traceFile) ? readFileSync(traceFile, "utf-8") : "";
+      expect(trace).toContain(pidFile);
+      expect(trace).not.toContain(versionFile);
+      expect(trace).not.toContain("plugin.json");
+
+      // C1: no restart-spawn happened.
+      expect(countSpawnLog(spawnLog)).toBe(0);
+
       // Pid file still points at the OLD stub.
       const pidNow = readFileSync(pidFile, "utf-8").trim();
       expect(parseInt(pidNow, 10)).toBe(stub.pid);
@@ -599,11 +675,6 @@ describe("T6: gated fast path", () => {
 
       // Socket still bound (by OLD stub).
       expect(existsSync(sockPath)).toBe(true);
-
-      // No NEW child processes — we tracked every spawn in
-      // `liveChildren` and afterEach's cleanup loop didn't SIGKILL
-      // anything new (only the _ensure-server sh, which is the one
-      // we expect). The OLD stub is still alive.
     } finally {
       restorePluginJson();
     }
@@ -614,6 +685,7 @@ describe("T6: gated fast path", () => {
     const sockPath = join(home, "gravity-hooks.sock");
     const pidFile = join(home, "gravity-server.pid");
     const versionFile = join(home, "gravity-server.version");
+    const spawnLog = join(home, "spawn.log");
 
     // Pre-launch OLD stub: marker "4.5.1". Own will be "4.5.1" too —
     // case body enters, computes own > marker → 1>1 → false, so
@@ -626,8 +698,13 @@ describe("T6: gated fast path", () => {
     });
 
     const hooks = setupTestHooksDir({ ownVersion: "4.5.1" });
+    const { binDir, traceFile } = setupReadTraceBindir();
 
-    const env = buildChildEnv(home, { sockPath, pidFile, versionFile });
+    const env = buildChildEnv(home, { sockPath, pidFile, versionFile }, {
+      PATH: `${binDir}:${process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`,
+      GRAVITY_READ_TRACE: traceFile,
+      STUB_SPAWN_LOG: spawnLog,
+    });
     const result = await runEnsureServer({
       hooksDir: hooks.hooksDir,
       eventName: "SessionStart",
@@ -648,6 +725,16 @@ describe("T6: gated fast path", () => {
 
     // Socket still bound.
     expect(existsSync(sockPath)).toBe(true);
+
+    // C2 positive control: the case body WAS entered — trace shows
+    // both the marker read (`cat`) and the plugin.json read (`sed`).
+    // Proves the read-trace mechanism is not vacuously green.
+    const trace = existsSync(traceFile) ? readFileSync(traceFile, "utf-8") : "";
+    expect(trace).toContain(versionFile);
+    expect(trace).toContain("plugin.json");
+
+    // C1: entered the case body, but own == marker → no restart.
+    expect(countSpawnLog(spawnLog)).toBe(0);
   });
 });
 
@@ -689,6 +776,7 @@ describe("T7: stale restart", () => {
     });
     const oldPid = stub.pid;
     expect(readFileSync(versionFile, "utf-8")).toBe("4.5.1");
+    const spawnLog = join(home, "spawn.log");
 
     // Per-test plugin layout: hooks dir + sibling .claude-plugin with
     // own version "4.5.2" (strictly newer than marker).
@@ -702,6 +790,7 @@ describe("T7: stale restart", () => {
       {
         GRAVITY_SERVER_BIN: stubBin,
         STUB_SERVER_VERSION: "4.5.2",
+        STUB_SPAWN_LOG: spawnLog,
       },
     );
 
@@ -732,6 +821,9 @@ describe("T7: stale restart", () => {
 
     // Old stub is dead.
     expect(() => process.kill(oldPid, 0)).toThrow();
+
+    // C1: exactly one restart-spawn.
+    expect(countSpawnLog(spawnLog)).toBe(1);
 
     // New pid is alive.
     expect(() => process.kill(ordering.newPid, 0)).not.toThrow();
@@ -795,12 +887,14 @@ describe("T8: absent marker vs dev marker", () => {
     // Use the alias path so `pkill` in `_spawn-server` doesn't match
     // its own parent shell's argv.
     const stubBin = aliasStubAwayFromGravityServerName();
+    const spawnLog = join(home, "spawn.log");
     const env = buildChildEnv(
       home,
       { sockPath, pidFile, versionFile },
       {
         GRAVITY_SERVER_BIN: stubBin,
         STUB_SERVER_VERSION: "4.5.2",
+        STUB_SPAWN_LOG: spawnLog,
       },
     );
 
@@ -823,6 +917,9 @@ describe("T8: absent marker vs dev marker", () => {
     expect(newPid).not.toBe(sleeperPid);
     expect(newPid).toBeGreaterThan(0);
     expect(() => process.kill(newPid, 0)).not.toThrow();
+
+    // F4/C1: exactly one restart-spawn.
+    expect(countSpawnLog(spawnLog)).toBe(1);
   });
 
   it("SessionStart + dev marker: NO restart, old still alive", async () => {
@@ -844,7 +941,10 @@ describe("T8: absent marker vs dev marker", () => {
     expect(readFileSync(versionFile, "utf-8")).toBe("dev");
 
     const hooks = setupTestHooksDir({ ownVersion: "4.5.2" });
-    const env = buildChildEnv(home, { sockPath, pidFile, versionFile });
+    const spawnLog = join(home, "spawn.log");
+    const env = buildChildEnv(home, { sockPath, pidFile, versionFile }, {
+      STUB_SPAWN_LOG: spawnLog,
+    });
 
     const result = await runEnsureServer({
       hooksDir: hooks.hooksDir,
@@ -864,6 +964,9 @@ describe("T8: absent marker vs dev marker", () => {
 
     // Socket still bound.
     expect(existsSync(sockPath)).toBe(true);
+
+    // C1: no restart-spawn.
+    expect(countSpawnLog(spawnLog)).toBe(0);
   });
 });
 
@@ -902,12 +1005,14 @@ describe("T9: lock serialization under concurrent detectors", () => {
     // Reuse the OLD stub's alias path (already safe by construction —
     // no `gravity-server.mjs` substring) for GRAVITY_SERVER_BIN.
     const stubBin = aliasStubAwayFromGravityServerName();
+    const spawnLog = join(home, "spawn.log");
     const env = buildChildEnv(
       home,
       { sockPath, pidFile, versionFile },
       {
         GRAVITY_SERVER_BIN: stubBin,
         STUB_SERVER_VERSION: "4.5.2",
+        STUB_SPAWN_LOG: spawnLog,
       },
     );
 
@@ -948,6 +1053,134 @@ describe("T9: lock serialization under concurrent detectors", () => {
     // OLD stub is dead.
     expect(() => process.kill(oldPid, 0)).toThrow();
 
+    // F2/C1: despite two concurrent detectors, exactly ONE restart-spawn.
+    expect(countSpawnLog(spawnLog)).toBe(1);
+
     stub = undefined;
   });
+});
+
+// ─── T10 — restarted server's descendant receives group TERM (F3/C3) ────
+
+describe("T10: restart group-TERM reaches server descendants", () => {
+  let oldStubPid: number | undefined;
+  let newStubPid: number | undefined;
+  let descendantPid: number | undefined;
+
+  afterEach(() => {
+    // Defensive force-kill — a failed assertion must not leave a
+    // `sleep 600` (or stub node process) straggler.
+    for (const pid of [oldStubPid, newStubPid, descendantPid]) {
+      if (pid === undefined) continue;
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* already dead */
+      }
+    }
+    oldStubPid = undefined;
+    newStubPid = undefined;
+    descendantPid = undefined;
+  });
+
+  it.skipIf(!hasSetsid)(
+    "restarted server's descendant receives group TERM",
+    async () => {
+      const home = freshTempDir("wp2-t10-home-");
+      const sockPath = join(home, "gravity-hooks.sock");
+      const pidFile = join(home, "gravity-server.pid");
+      const versionFile = join(home, "gravity-server.version");
+      const childPidFile = join(home, "stub-child.pid");
+
+      const stubBin = aliasStubAwayFromGravityServerName();
+      const hooks = setupTestHooksDir({ ownVersion: "4.5.2" });
+
+      // Cold-spawn the "old server" through the REAL `_spawn-server`
+      // (socket/pid absent → the unconditional cold-spawn path runs,
+      // for any event name) so it becomes a setsid group leader with
+      // a descendant child in its process group.
+      const coldEnv = buildChildEnv(
+        home,
+        { sockPath, pidFile, versionFile },
+        {
+          GRAVITY_SERVER_BIN: stubBin,
+          STUB_SERVER_VERSION: "4.5.1",
+          STUB_CHILD_PID_FILE: childPidFile,
+        },
+      );
+      const coldResult = await runEnsureServer({
+        hooksDir: hooks.hooksDir,
+        eventName: "PostToolUse",
+        env: coldEnv,
+      });
+      expect(coldResult.exitInfo.code).toBe(0);
+
+      // Poll for pid file + socket + child-pid file (cold-spawn already
+      // waits up to 2s for the socket internally, but poll defensively
+      // for all three to avoid a startup-ordering flake).
+      const deadline = Date.now() + 5000;
+      while (
+        Date.now() < deadline &&
+        !(existsSync(pidFile) && existsSync(sockPath) && existsSync(childPidFile))
+      ) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(existsSync(pidFile)).toBe(true);
+      expect(existsSync(sockPath)).toBe(true);
+      expect(existsSync(childPidFile)).toBe(true);
+
+      const oldPid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
+      const childPid = parseInt(readFileSync(childPidFile, "utf-8").trim(), 10);
+      expect(oldPid).toBeGreaterThan(0);
+      expect(childPid).toBeGreaterThan(0);
+      oldStubPid = oldPid;
+      descendantPid = childPid;
+
+      // Descendant is alive before the restart.
+      expect(() => process.kill(childPid, 0)).not.toThrow();
+
+      // Trigger a stale restart via SessionStart: own version (4.5.2,
+      // from the per-test plugin.json) is strictly newer than the
+      // marker the old stub wrote (4.5.1) → restart path → group-TERM.
+      const restartEnv = buildChildEnv(
+        home,
+        { sockPath, pidFile, versionFile },
+        {
+          GRAVITY_SERVER_BIN: stubBin,
+          STUB_SERVER_VERSION: "4.5.2",
+        },
+      );
+      const restartResult = await runEnsureServer({
+        hooksDir: hooks.hooksDir,
+        eventName: "SessionStart",
+        env: restartEnv,
+      });
+      expect(restartResult.exitInfo.code).toBe(0);
+
+      const newPid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
+      expect(newPid).not.toBe(oldPid);
+      newStubPid = newPid;
+      expect(readFileSync(versionFile, "utf-8")).toBe("4.5.2");
+
+      // Poll briefly for the descendant to die (group-TERM propagation
+      // + process teardown is not instant).
+      const deathDeadline = Date.now() + 2000;
+      let descendantAlive = true;
+      while (Date.now() < deathDeadline) {
+        try {
+          process.kill(childPid, 0);
+        } catch {
+          descendantAlive = false;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      // Counterfactual this guards: without `setsid` in `_spawn-server`,
+      // the old stub would not be a process-group leader, the
+      // group-TERM `kill -TERM "-$old_pid"` would be a no-op, and this
+      // descendant would survive the restart.
+      expect(descendantAlive).toBe(false);
+    },
+  );
 });
