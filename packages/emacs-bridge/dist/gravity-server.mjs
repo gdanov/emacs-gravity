@@ -111483,6 +111483,7 @@ var CAPABILITY_POLL_MS = 500;
 var PURGE_DELAY_MS = 2 * 60 * 1e3;
 var HEALTH_CHECK_INTERVAL_MS = 3e4;
 var STALENESS_THRESHOLD_MS = 5 * 60 * 1e3;
+var PID_UNREACHABLE_GRACE_MS = 9e4;
 var HINT_RECENCY_GUARD_MS = 3e4;
 var HOOKS_SILENCE_WARN_MS = 9e4;
 var HOOKS_SILENCE_REARM_MS = 6e5;
@@ -111607,11 +111608,15 @@ function evaluateSessionHealth(session, now, opts) {
   const killFn = opts.killFn ?? ((pid, signal) => {
     process.kill(pid, signal);
   });
+  const pidGraceMs = opts.pidGraceMs ?? PID_UNREACHABLE_GRACE_MS;
   if (session.pid && session.pid > 0) {
     try {
       killFn(session.pid, 0);
       return { dead: false };
     } catch {
+      if (now - session.lastEventTime <= pidGraceMs) {
+        return { dead: false };
+      }
       return { dead: true, reason: "pid-unreachable" };
     }
   }

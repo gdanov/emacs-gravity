@@ -10344,7 +10344,7 @@ var ProcessIOLive = Layer_exports.succeed(ProcessIO, {
 });
 
 // src/services/config.ts
-import { execSync } from "child_process";
+import { execSync as execSync2 } from "child_process";
 
 // ../shared/src/safe-bash.ts
 import { basename as basename2 } from "path";
@@ -10427,6 +10427,44 @@ var FsLive = Layer_exports.succeed(Fs, {
 
 // src/services/config.ts
 import { join as join4 } from "path";
+
+// src/claude-pid.ts
+import { execSync } from "child_process";
+import { basename as basename3 } from "path";
+var MAX_HOPS = 8;
+function isClaude(comm) {
+  return basename3(comm.trim()) === "claude";
+}
+function resolveClaudePid(startPid, lookup, maxHops = MAX_HOPS) {
+  let pid = startPid;
+  for (let hop = 0; hop < maxHops; hop++) {
+    if (!Number.isInteger(pid) || pid <= 1) return null;
+    const info = lookup(pid);
+    if (!info) return null;
+    if (isClaude(info.comm)) return pid;
+    pid = info.ppid;
+  }
+  return null;
+}
+var psLookup = (pid) => {
+  let out;
+  try {
+    out = execSync(`ps -o ppid=,comm= -p ${pid}`, {
+      encoding: "utf-8",
+      timeout: 1e3,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+  } catch {
+    return null;
+  }
+  const line = out.trim();
+  if (!line) return null;
+  const match4 = /^(\d+)\s+(.+)$/.exec(line);
+  if (!match4) return null;
+  return { ppid: parseInt(match4[1], 10), comm: match4[2] };
+};
+
+// src/services/config.ts
 var BridgeConfig = ServiceMap_exports.Service("BridgeConfig");
 var BridgeConfigLive = Layer_exports.effect(
   BridgeConfig,
@@ -10441,13 +10479,14 @@ var BridgeConfigLive = Layer_exports.effect(
     const dumpEnabled = !!dumpDir || (yield* io.getEnv("CLAUDE_GRAVITY_DUMP")) === "1";
     const noAutoApprove = (yield* io.getEnv("CLAUDE_GRAVITY_NO_AUTO_APPROVE")) === "1";
     const claudePidStr = yield* io.getEnv("CLAUDE_PID");
-    const claudePid = claudePidStr ? parseInt(claudePidStr, 10) || null : null;
+    const envClaudePid = claudePidStr ? parseInt(claudePidStr, 10) || null : null;
+    const claudePid = resolveClaudePid(process.pid, psLookup) ?? envClaudePid;
     const tempId = (yield* io.getEnv("CLAUDE_GRAVITY_TEMP_ID")) ?? null;
     let tmuxSession = null;
     const tmuxEnv = yield* io.getEnv("TMUX");
     if (tmuxEnv) {
       try {
-        tmuxSession = execSync(
+        tmuxSession = execSync2(
           'tmux display-message -p "#{session_name}"',
           { encoding: "utf-8", timeout: 1e3 }
         ).trim() || null;
