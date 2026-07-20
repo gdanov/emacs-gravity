@@ -109998,7 +109998,7 @@ var WsGateway = class {
       this.rejectUpgrade(socket);
       return;
     }
-    if (!this.originAllowed(req.headers.origin, this.boundPort)) {
+    if (!this.originAllowed(req.headers.origin, req.headers.host, this.boundPort)) {
       this.rejectUpgrade(socket);
       return;
     }
@@ -110011,8 +110011,11 @@ var WsGateway = class {
       this.wss.emit("connection", ws, req);
     });
   }
-  originAllowed(origin, port) {
+  originAllowed(origin, requestHost, port) {
     if (typeof origin !== "string" || origin.length === 0) {
+      return false;
+    }
+    if (typeof requestHost !== "string" || requestHost.length === 0) {
       return false;
     }
     let parsed;
@@ -110023,9 +110026,7 @@ var WsGateway = class {
     }
     if (parsed.protocol !== "http:") return false;
     if (parsed.port !== String(port)) return false;
-    if (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") {
-      return false;
-    }
+    if (parsed.host !== requestHost) return false;
     return true;
   }
   rejectUpgrade(socket) {
@@ -110684,7 +110685,7 @@ var ServerConfigLive = Layer_exports.effect(
       piThinkingLevel,
       piExtensionInstallDir: process.env.GRAVITY_PI_EXTENSION_DIR ?? join2(home, ".pi", "agent", "extensions"),
       gatewayEnabled: process.env.GRAVITY_GATEWAY_DISABLE !== "1",
-      gatewayHost: process.env.GRAVITY_GATEWAY_HOST || "127.0.0.1",
+      gatewayHost: process.env.GRAVITY_GATEWAY_HOST || "0.0.0.0",
       gatewayPort: parseInt(process.env.GRAVITY_GATEWAY_PORT || "8765", 10)
     };
   })
