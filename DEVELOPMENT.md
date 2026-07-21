@@ -204,6 +204,10 @@ The `magit-insert-section` macros expand into complex `unwind-protect` blocks. D
 
 The `hooks.json` file uses `${CLAUDE_PLUGIN_ROOT}` which is expanded by Claude Code at startup, not by the shell. Ensure all paths in `hooks.json` use this variable or absolute paths.
 
+### Background Process Groups in Hook Scripts
+
+A bare `nohup node "$BIN" >>"$LOG" 2>&1 &` does NOT make the spawned process its own process-group leader — its PGID stays the launching shell's, not its own PID. A later `kill -TERM "-$pid"` (meant to reach the server's descendants, e.g. the browser gateway) then silently no-ops (ESRCH) while looking like it worked, so a stale-version restart can leave the old server's children alive. Spawn with `setsid` (`nohup setsid node "$BIN" … &`, falling back to a bare spawn where `setsid` is unavailable) so the server is its own group leader and a group-`TERM` actually reaches its children. See `packages/emacs-bridge/hooks/_spawn-server`.
+
 ## Performance Considerations
 
 See @MEMORY.md for detailed performance analysis (last updated 2026-02-09). Key findings:
