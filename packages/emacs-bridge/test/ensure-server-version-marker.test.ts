@@ -1263,3 +1263,63 @@ describe("T11: concurrent cold spawn with no pre-existing server", () => {
     );
   });
 });
+
+// ─── T11 — the helper must survive its own orphan-reaper ────────────────
+//
+// `_spawn-server` takes SERVER_BIN as an argv argument, so its own command
+// line contains the server path. An unanchored `pkill -f
+// "gravity-server\.(mjs|ts)"` therefore matched the helper itself and
+// SIGTERMed it before it could spawn — and, because it died before its
+// cleanup, stranded the lock, which then wedged every later spawn.
+// Every other test here aliases the stub away from the production
+// filename, so none of them can reproduce it; this one uses the REAL name
+// on purpose. Note: the reaper is global, so this test also kills any
+// gravity-server running on the host.
+
+/** Copy the stub to a temp path named exactly like the shipped bundle, so
+ *  the helper's argv carries the production `gravity-server.mjs` string. */
+function stubUnderProductionName(): string {
+  const dir = freshTempDir("prod-name-");
+  const p = join(dir, "gravity-server.mjs");
+  copyFileSync(STUB_PATH, p);
+  return p;
+}
+
+describe("_spawn-server with a production-named SERVER_BIN", () => {
+  it("still cold-spawns (does not SIGTERM itself via its own reaper)", async () => {
+    const { hooksDir } = setupTestHooksDir({ ownVersion: "4.6.1" });
+    const home = freshTempDir("prod-home-");
+    const stateDir = join(home, ".local", "state");
+    mkdirSync(stateDir, { recursive: true });
+    const paths = {
+      sockPath: join(stateDir, "gravity-hooks.sock"),
+      pidFile: join(stateDir, "gravity-server.pid"),
+      versionFile: join(stateDir, "gravity-server.version"),
+    };
+
+    await runEnsureServer({
+      hooksDir,
+      eventName: "PostToolUse",
+      env: buildChildEnv(home, paths, {
+        GRAVITY_SERVER_BIN: stubUnderProductionName(),
+        STUB_SERVER_VERSION: "4.6.1",
+      }),
+    });
+
+    // Reaching the spawn at all is the assertion: socket bound + live pid.
+    expect(existsSync(paths.sockPath)).toBe(true);
+    expect(existsSync(paths.pidFile)).toBe(true);
+    const pid = Number(readFileSync(paths.pidFile, "utf-8").trim());
+    expect(Number.isInteger(pid) && pid > 0).toBe(true);
+
+    // And the lock must not be stranded — that is what turned the one-shot
+    // self-kill into a permanent wedge.
+    expect(existsSync(join(stateDir, "gravity-server.lock"))).toBe(false);
+
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      /* already gone */
+    }
+  });
+});

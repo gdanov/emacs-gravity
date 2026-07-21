@@ -36,11 +36,23 @@ mkdir -p "$(dirname "$LOCK_FILE")"
 # Serialize on the lock. A loser waits (bounded ~5s) rather than racing —
 # only the winner ever kills/spawns; the loser falls through to no-op.
 i=0
+steals=0
 while ! (set -C; echo $$ > "$LOCK_FILE") 2>/dev/null; do
+  # Steal a lock whose holder is gone: a helper that dies before its
+  # cleanup would otherwise wedge every future spawn permanently.
+  holder="$(cat "$LOCK_FILE" 2>/dev/null)"
+  if [ -z "$holder" ] || ! kill -0 "$holder" 2>/dev/null; then
+    steals=$((steals + 1))
+    [ "$steals" -ge 3 ] && exit 0
+    rm -f "$LOCK_FILE"
+    continue
+  fi
   i=$((i + 1))
   [ "$i" -ge 50 ] && exit 0
   sleep 0.1
 done
+# Release the lock even when signalled, for the same reason.
+trap 'rm -f "$LOCK_FILE"' EXIT INT TERM
 
 need_restart=1
 if [ "$MODE" = "restart" ]; then
@@ -80,7 +92,10 @@ if [ "$need_restart" -eq 1 ]; then
     fi
     rm -f "$GRAVITY_PID_FILE"
   fi
-  pkill -f "gravity-server\\.(mjs|ts)" 2>/dev/null || true
+  # Anchor on the `node` runtime. This helper's own argv carries
+  # SERVER_BIN, so an unanchored pattern matches — and SIGTERMs — this
+  # very script before it reaches the spawn below.
+  pkill -f "node .*gravity-server\\.(mjs|ts)" 2>/dev/null || true
 
   rm -f "$GRAVITY_SOCK" "$GRAVITY_TERM_SOCK"
 
