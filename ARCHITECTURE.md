@@ -50,9 +50,9 @@ Terminal clients
 ### Auto-Start
 
 Hook scripts source `_ensure-server` which:
-1. Checks if hook socket exists (fast path)
-2. Spawns gravity-server if missing (atomic lock prevents duplicate spawns)
-3. Waits up to 2s for socket to appear
+1. Fast path — if the hook socket exists AND the pid file's process is alive, returns immediately.
+2. On `SessionStart` / `UserPromptSubmit` only, compares the firing hook's own plugin version (read from its sibling `.claude-plugin/plugin.json`) against the running server's version marker (`${GRAVITY_SERVER_VERSION_FILE:-$HOME/.local/state/gravity-server.version}`, which the server writes *before* opening the hook socket and removes on shutdown). A strictly-newer own version — or an absent marker (a pre-marker server) — restarts the server; a `dev`/non-semver marker never restarts. `PreToolUse` / `PostToolUse` / etc. skip this compare entirely, so the hot path keeps today's cost (no extra reads, no extra fork).
+3. Delegates any cold-spawn or stale-restart to `hooks/_spawn-server`, a standalone helper that serializes on an atomic lock, waits (bounded) for an old process to fully exit before touching the sockets, spawns the server via `setsid` (so it becomes its own process-group leader and a later restart's group-`TERM` reaches its descendants), and waits up to 2s for the socket to appear.
 
 ## Monorepo Structure
 

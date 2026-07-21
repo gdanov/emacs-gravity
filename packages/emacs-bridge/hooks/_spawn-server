@@ -1,0 +1,110 @@
+#!/bin/sh
+# _spawn-server — standalone (exit-based, never sourced) helper: lock +
+# kill-stale (bounded wait-for-exit) + spawn `node <server_bin>` +
+# wait-for-socket. Invoked (as a subprocess, `sh .../_spawn-server ...`)
+# by _ensure-server on any cache miss.
+#
+# Usage: _spawn-server <server_bin> [restart <own_version>]
+#   (no mode arg)      — cold-spawn: ensure a server is running, killing
+#                         any orphaned pid defensively first (unchanged
+#                         from today's behavior).
+#   restart <own_ver>  — a caller detected the running server's marker is
+#                         older than <own_ver>. Re-verified fresh under
+#                         the lock before killing — a losing/late
+#                         detector becomes a no-op once the winner has
+#                         already restarted (this is what gives T9
+#                         exactly-one-restart under concurrency).
+
+SERVER_BIN="$1"
+MODE="$2"
+OWN_VERSION="$3"
+
+[ -f "$SERVER_BIN" ] || exit 0
+
+SCRIPT_DIR="$(dirname "$0")"
+. "$SCRIPT_DIR/_version-compare"
+
+GRAVITY_SOCK="${GRAVITY_HOOK_SOCK:-$HOME/.local/state/gravity-hooks.sock}"
+GRAVITY_TERM_SOCK="$HOME/.local/state/gravity-terminal.sock"
+GRAVITY_PID_FILE="${GRAVITY_PID_FILE:-$HOME/.local/state/gravity-server.pid}"
+GRAVITY_SERVER_VERSION_FILE="${GRAVITY_SERVER_VERSION_FILE:-$HOME/.local/state/gravity-server.version}"
+LOCK_FILE="$HOME/.local/state/gravity-server.lock"
+LOG_FILE="/tmp/gravity-server.log"
+
+mkdir -p "$(dirname "$LOCK_FILE")"
+
+# Serialize on the lock. A loser waits (bounded ~5s) rather than racing —
+# only the winner ever kills/spawns; the loser falls through to no-op.
+i=0
+while ! (set -C; echo $$ > "$LOCK_FILE") 2>/dev/null; do
+  i=$((i + 1))
+  [ "$i" -ge 50 ] && exit 0
+  sleep 0.1
+done
+
+need_restart=1
+if [ "$MODE" = "restart" ]; then
+  need_restart=0
+  marker="$(cat "$GRAVITY_SERVER_VERSION_FILE" 2>/dev/null)"
+  if [ -z "$marker" ]; then
+    need_restart=1
+  elif _gravity_is_semver "$marker" && _gravity_version_gt "$OWN_VERSION" "$marker"; then
+    need_restart=1
+  fi
+else
+  # Cold-spawn re-check UNDER THE LOCK: a concurrent winner (or an
+  # in-flight restart) may have already brought a live server up between
+  # this caller's _ensure-server liveness check and our acquiring the
+  # lock. If so, no-op — mirror master's loser-waits-and-returns behavior
+  # instead of killing the winner's fresh server and respawning.
+  if [ -S "$GRAVITY_SOCK" ] && [ -f "$GRAVITY_PID_FILE" ]; then
+    cold_pid="$(cat "$GRAVITY_PID_FILE" 2>/dev/null)"
+    if [ -n "$cold_pid" ] && kill -0 "$cold_pid" 2>/dev/null; then
+      need_restart=0
+    fi
+  fi
+fi
+
+if [ "$need_restart" -eq 1 ]; then
+  if [ -f "$GRAVITY_PID_FILE" ]; then
+    old_pid=$(cat "$GRAVITY_PID_FILE" 2>/dev/null)
+    if [ -n "$old_pid" ]; then
+      kill -TERM "-$old_pid" 2>/dev/null
+      kill -TERM "$old_pid" 2>/dev/null
+      i=0
+      while kill -0 "$old_pid" 2>/dev/null; do
+        i=$((i + 1))
+        [ "$i" -ge 10 ] && break
+        sleep 0.1
+      done
+    fi
+    rm -f "$GRAVITY_PID_FILE"
+  fi
+  pkill -f "gravity-server\\.(mjs|ts)" 2>/dev/null || true
+
+  rm -f "$GRAVITY_SOCK" "$GRAVITY_TERM_SOCK"
+
+  if [ -f "$LOG_FILE" ] && [ "$(wc -c < "$LOG_FILE")" -gt 2097152 ]; then
+    mv -f "$LOG_FILE" "${LOG_FILE}.1"
+  fi
+
+  # Spawn as a process-group leader (via setsid, when available) so the
+  # group-TERM below reaches server descendants; degrades to today's
+  # behavior on hosts without setsid.
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid node "$SERVER_BIN" >>"$LOG_FILE" 2>&1 &
+  else
+    nohup node "$SERVER_BIN" >>"$LOG_FILE" 2>&1 &
+  fi
+  echo $! > "$GRAVITY_PID_FILE"
+
+  i=0
+  while [ "$i" -lt 20 ]; do
+    [ -S "$GRAVITY_SOCK" ] && break
+    i=$((i + 1))
+    sleep 0.1
+  done
+fi
+
+rm -f "$LOCK_FILE"
+exit 0

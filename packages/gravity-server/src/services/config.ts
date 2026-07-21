@@ -10,6 +10,10 @@ export interface ServerConfigData {
   readonly hookSocketPath: string;
   readonly terminalSocketPath: string;
   readonly pidFilePath: string;
+  /** Path to the version marker gravity-server writes on startup (before
+   * hookServer.listen) and removes on shutdown(). Default mirrors
+   * GRAVITY_PID_FILE's pattern. */
+  readonly versionFilePath: string;
   readonly logPath: string;
   readonly logMaxSize: number;
   // Pi driver options (when --pi flag is set)
@@ -65,6 +69,8 @@ export const ServerConfigLive = Layer.effect(
       hookSocketPath: process.env.GRAVITY_HOOK_SOCK ?? join(stateDir, "gravity-hooks.sock"),
       terminalSocketPath: process.env.GRAVITY_TERMINAL_SOCK ?? join(stateDir, "gravity-terminal.sock"),
       pidFilePath: process.env.GRAVITY_PID_FILE ?? join(stateDir, "gravity-server.pid"),
+      versionFilePath:
+        process.env.GRAVITY_SERVER_VERSION_FILE ?? join(stateDir, "gravity-server.version"),
       logPath: process.env.GRAVITY_LOG_PATH || "/tmp/gravity-server.log",
       logMaxSize: parseInt(process.env.GRAVITY_LOG_MAX_SIZE || "2097152", 10),
       piEnabled,
@@ -85,6 +91,7 @@ export const ServerConfigTest = (overrides?: Partial<ServerConfigData>) =>
     hookSocketPath: "/tmp/test-hooks.sock",
     terminalSocketPath: "/tmp/test-terminal.sock",
     pidFilePath: "/tmp/test-server.pid",
+    versionFilePath: "/tmp/test-server.version",
     logPath: "/tmp/test-gravity-server.log",
     logMaxSize: 2097152,
     piEnabled: false,

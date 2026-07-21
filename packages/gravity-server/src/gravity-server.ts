@@ -8,9 +8,9 @@
 
 import { createServer } from "net";
 import type { Server, Socket } from "net";
-import { unlinkSync } from "fs";
-import { dirname } from "path";
-import { pathToFileURL } from "url";
+import { readFileSync, unlinkSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 import { randomBytes } from "crypto";
 import { Effect, Layer } from "effect";
 
@@ -32,7 +32,7 @@ import { SessionStore, SessionStoreLive, type SessionStoreService } from "./serv
 import { Inbox, InboxLive, type InboxService } from "./services/inbox.js";
 import { Terminal, TerminalLive, type TerminalService } from "./services/terminal.js";
 import type { TerminalConnection } from "./services/terminal.js";
-import type { FsService } from "@gravity/shared";
+import type { FsService, FileWriteError } from "@gravity/shared";
 import type { ServerConfigData } from "./services/config.js";
 
 // Pi driver (optional)
@@ -281,8 +281,60 @@ export const processHookMessage = async (
   }
 };
 
+// ── Version marker helpers ──────────────────────────────────────────
+
+/**
+ * Resolve this server build's own version: the `version` field of the
+ * sibling `.claude-plugin/plugin.json` two directories up from this
+ * module (`<dist-or-src-dir>/../.claude-plugin/plugin.json`). Returns
+ * `"dev"` when no such file resolves (source/tsx dev layout) or it
+ * fails to parse — this is the literal sentinel `_ensure-server` also
+ * writes/reads, so hook and server MUST agree on it.
+ */
+export function resolveOwnVersion(moduleUrl: string = import.meta.url): string {
+  return Effect.runSync(
+    Effect.try({
+      try: () => {
+        const selfDir = dirname(fileURLToPath(moduleUrl));
+        const pluginJsonPath = join(selfDir, "..", ".claude-plugin", "plugin.json");
+        const raw = readFileSync(pluginJsonPath, "utf-8");
+        const parsed: unknown = JSON.parse(raw);
+        if (
+          typeof parsed === "object"
+          && parsed !== null
+          && "version" in parsed
+          && typeof parsed.version === "string"
+          && parsed.version.length > 0
+        ) {
+          return parsed.version;
+        }
+        return "dev";
+      },
+      catch: () => undefined,
+    }).pipe(Effect.catch(() => Effect.succeed("dev"))),
+  );
+}
+
+/** Write the version marker. Thin `Fs` wrapper so the call site and the
+ * unit test share one seam. */
+export const writeVersionMarker = (
+  fs: FsService,
+  path: string,
+  version: string,
+): Effect.Effect<void, FileWriteError> => fs.writeFile(path, version);
+
+/** Remove the version marker (best-effort — matches the other three
+ * shutdown() unlinks). */
+export const removeVersionMarker = (path: string): void => {
+  Effect.runSync(
+    Effect.try({
+      try: () => unlinkSync(path),
+      catch: () => undefined,
+    }).pipe(Effect.catch(() => Effect.void)),
+  );
+};
+
 // ── Health-check liveness decision (extracted for direct unit testing) ─
-//
 // The health-check setInterval is an inline closure inside `program` and
 // is not callable in isolation. The PID-reaping-before-pi-source-skip
 // ordering, the staleness-vs-pid-alive priority rules, and the exact
@@ -1585,6 +1637,10 @@ const program = Effect.gen(function* () {
   yield* fs.unlinkIfExists(config.hookSocketPath);
   yield* fs.mkdirp(dirname(config.hookSocketPath));
 
+  const ownVersion = resolveOwnVersion();
+  yield* writeVersionMarker(fs, config.versionFilePath, ownVersion);
+  logMsg(`Version marker written: ${ownVersion} (${config.versionFilePath})`);
+
   const hookServer: Server = createServer((socket: Socket) => {
     let buffer = "";
 
@@ -1825,6 +1881,7 @@ const program = Effect.gen(function* () {
     try { unlinkSync(config.hookSocketPath); } catch {}
     try { unlinkSync(config.terminalSocketPath); } catch {}
     try { unlinkSync(config.pidFilePath); } catch {}
+    removeVersionMarker(config.versionFilePath);
   };
 
   process.on("SIGINT", () => { shutdown(); process.exit(0); });
