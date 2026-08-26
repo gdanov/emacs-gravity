@@ -144,6 +144,229 @@
         (push (or rendered (string-join (nreverse table-acc) "\n")) result)))
     (string-join (nreverse result) "\n")))
 
+;;;; Edit-buffer table rendering
+
+;; Parsing is delegated to markdown-mode throughout: it is escape- and
+;; code-span-aware, honours the alignment row, and measures width with
+;; hidden markup removed.
+
+(defvar claude-gravity--md-table-min-column 6
+  "Minimum display width of a rendered table column.")
+
+(defun claude-gravity--md-split-row (line)
+  "Split propertized table LINE into cells, keeping text properties.
+Mirrors `markdown--table-line-to-columns', which discards them: bars
+that are escaped, inside inline code, or part of a wiki link do not
+split a cell."
+  (with-temp-buffer
+    (insert line)
+    (goto-char (point-min))
+    (let ((cur (point)) cells)
+      (while (re-search-forward "\\s-*\\(|\\)\\s-*" nil t)
+        (let ((bar (match-beginning 1)))
+          (cond
+           ((markdown--first-column-p bar)
+            (setq cur (match-end 0)))
+           ((eq (char-before bar) ?\\)
+            (goto-char (match-end 1)))
+           ((markdown--face-p bar '(markdown-inline-code-face))
+            (goto-char (match-end 1)))
+           ((markdown--thing-at-wiki-link bar))
+           (t
+            (push (buffer-substring cur (match-beginning 0)) cells)
+            (setq cur (match-end 0))))))
+      (when (< cur (point-max))
+        (push (buffer-substring cur (point-max)) cells))
+      (nreverse cells))))
+
+(defun claude-gravity--md-table-cells (line)
+  "Split propertized table LINE into trimmed cell strings.
+Splitting happens before hidden markup is removed, so an escaped bar
+still reads as an escape; widths then match what is displayed."
+  (mapcar (lambda (cell)
+            (string-trim (markdown--remove-invisible-markup cell)))
+          (claude-gravity--md-split-row line)))
+
+(defun claude-gravity--md-table-fit-widths (widths budget)
+  "Cap WIDTHS so their sum fits BUDGET, shrinking the widest columns first.
+Columns narrower than the cap keep their natural width."
+  (if (or (<= budget 0) (<= (apply #'+ widths) budget))
+      widths
+    (let ((lo claude-gravity--md-table-min-column)
+          (hi (apply #'max widths))
+          (cap claude-gravity--md-table-min-column))
+      (while (<= lo hi)
+        (let* ((mid (/ (+ lo hi) 2))
+               (sum (apply #'+ (mapcar (lambda (w) (min w mid)) widths))))
+          (if (<= sum budget)
+              (setq cap mid lo (1+ mid))
+            (setq hi (1- mid)))))
+      (mapcar (lambda (w) (min w cap)) widths))))
+
+(defun claude-gravity--md-wrap-cell (cell width)
+  "Wrap CELL to WIDTH columns, returning a list of display lines."
+  (if (<= (string-width cell) width)
+      (list cell)
+    (let (lines (current ""))
+      (dolist (word (split-string cell "[ \t]+" t))
+        (let ((candidate (if (string-empty-p current) word
+                           (concat current " " word))))
+          (cond
+           ((<= (string-width candidate) width)
+            (setq current candidate))
+           ((> (string-width word) width)
+            (unless (string-empty-p current)
+              (push current lines)
+              (setq current ""))
+            (let ((rest word))
+              (while (> (string-width rest) width)
+                (let ((head (truncate-string-to-width rest width)))
+                  (push head lines)
+                  (setq rest (substring rest (length head)))))
+              (setq current rest)))
+           (t
+            (push current lines)
+            (setq current word)))))
+      (unless (string-empty-p current)
+        (push current lines))
+      (or (nreverse lines) (list "")))))
+
+(defun claude-gravity--md-pad-cell (text width align)
+  "Pad TEXT to WIDTH columns according to ALIGN (`l', `r', `c' or `d')."
+  (let ((pad (max 0 (- width (string-width text)))))
+    (pcase align
+      ('r (concat (make-string pad ?\s) text))
+      ('c (let ((left (/ pad 2)))
+            (concat (make-string left ?\s) text
+                    (make-string (- pad left) ?\s))))
+      (_ (concat text (make-string pad ?\s))))))
+
+(defun claude-gravity--md-table-rule (widths left mid right)
+  "Return a horizontal rule for WIDTHS using LEFT, MID and RIGHT corners."
+  (concat left
+          (mapconcat (lambda (w) (make-string (+ w 2) ?─)) widths mid)
+          right))
+
+(defun claude-gravity--md-render-width ()
+  "Return the column budget available for a rendered table."
+  (let ((win (get-buffer-window (current-buffer) t)))
+    (max 24 (- (if win (window-body-width win) 80) 2))))
+
+(defun claude-gravity--md-format-row (row widths aligns ncols)
+  "Format ROW as one or more box lines, wrapping cells to WIDTHS."
+  (let* ((cells (cl-loop for i from 0 below ncols
+                         collect (claude-gravity--md-wrap-cell
+                                  (or (nth i row) "") (nth i widths))))
+         (height (apply #'max 1 (mapcar #'length cells))))
+    (mapconcat
+     (lambda (li)
+       (concat "│"
+               (mapconcat
+                (lambda (i)
+                  (concat " "
+                          (claude-gravity--md-pad-cell
+                           (or (nth li (nth i cells)) "")
+                           (nth i widths) (nth i aligns))
+                          " "))
+                (number-sequence 0 (1- ncols)) "│")
+               "│"))
+     (number-sequence 0 (1- height)) "\n")))
+
+(defun claude-gravity--md-parse-table (table-lines)
+  "Parse TABLE-LINES into (ITEMS . FMTSPEC).
+Each element of ITEMS is either the symbol `rule' or a list of cells."
+  (let (fmtspec items)
+    (dolist (line table-lines)
+      (if (markdown--is-delimiter-row line)
+          (progn (setq fmtspec (or fmtspec line))
+                 (push 'rule items))
+        (push (claude-gravity--md-table-cells line) items)))
+    (cons (nreverse items) fmtspec)))
+
+(defun claude-gravity--md-build-table (items fmtspec width)
+  "Build one display string per element of ITEMS, capped to WIDTH columns.
+The top and bottom rules are attached to the first and last lines so
+that every source line keeps its own display string and stays
+individually navigable."
+  (let* ((rows (seq-remove (lambda (x) (eq x 'rule)) items))
+         (ncols (if rows (apply #'max (mapcar #'length rows)) 0)))
+    (when (> ncols 0)
+      (let* ((aligns (let ((a (markdown-table-colfmt fmtspec)))
+                       (append a (make-list (max 0 (- ncols (length a))) 'd))))
+             (widths (let ((ws (make-list ncols 1)))
+                       (dolist (row rows ws)
+                         (dotimes (i ncols)
+                           (setf (nth i ws)
+                                 (max (nth i ws)
+                                      (string-width (or (nth i row) ""))))))))
+             (widths (claude-gravity--md-table-fit-widths
+                      widths (- width (1+ ncols) (* 2 ncols))))
+             (top (claude-gravity--md-table-rule widths "┌" "┬" "┐"))
+             (mid (claude-gravity--md-table-rule widths "├" "┼" "┤"))
+             (bot (claude-gravity--md-table-rule widths "└" "┴" "┘"))
+             (last (1- (length items)))
+             (idx -1))
+        (mapcar
+         (lambda (item)
+           (setq idx (1+ idx))
+           (concat (when (= idx 0) (concat top "\n"))
+                   (if (eq item 'rule)
+                       mid
+                     (claude-gravity--md-format-row item widths aligns ncols))
+                   (when (= idx last) (concat "\n" bot))))
+         items)))))
+
+(defvar claude-gravity--md-table-cache (make-hash-table :test 'equal :size 128)
+  "Rendered table lines, keyed by width and parsed cell content.
+Keying on parsed content rather than raw text means a table first seen
+before `markdown-hide-markup' properties were applied re-renders once
+they are, instead of caching the unstripped version forever.")
+
+(defun claude-gravity--md-buffer-lines (beg end)
+  "Return the propertized buffer lines between BEG and END."
+  (save-excursion
+    (goto-char beg)
+    (let (acc)
+      (while (< (point) end)
+        (push (buffer-substring (line-beginning-position) (line-end-position)) acc)
+        (forward-line 1))
+      (nreverse acc))))
+
+(defun claude-gravity--md-table-display-lines (beg end width)
+  "Return per-line display strings for the table between BEG and END, or nil.
+The cache is consulted before parsing, which is the expensive step.
+HIDDEN is part of the key so a table first rendered before font-lock
+applied its invisibility properties re-renders once they arrive."
+  (let* ((raw (buffer-substring-no-properties beg end))
+         (hidden (and (text-property-any beg end 'invisible 'markdown-markup) t))
+         (key (list width hidden raw))
+         (hit (gethash key claude-gravity--md-table-cache)))
+    (cond
+     ((eq hit 'none) nil)
+     (hit hit)
+     (t (let* ((parsed (claude-gravity--md-parse-table
+                        (claude-gravity--md-buffer-lines beg end)))
+               (built (claude-gravity--md-build-table
+                       (car parsed) (cdr parsed) width)))
+          (when (> (hash-table-count claude-gravity--md-table-cache) 256)
+            (clrhash claude-gravity--md-table-cache))
+          (puthash key (or built 'none) claude-gravity--md-table-cache)
+          built)))))
+
+(defun claude-gravity--md-table-bounds ()
+  "Return (BEG . END) of the whole table at point, or nil.
+Resolving the real start matters: font-lock hands out chunks, and a
+chunk beginning mid-table would otherwise render a fragment."
+  (when (markdown-table-at-point-p)
+    (save-excursion
+      (while (and (not (bobp))
+                  (save-excursion (forward-line -1) (markdown-table-at-point-p)))
+        (forward-line -1))
+      (let ((beg (line-beginning-position)))
+        (while (and (not (eobp)) (markdown-table-at-point-p))
+          (forward-line 1))
+        (cons beg (point))))))
+
 ;;;; Mermaid
 
 (defvar claude-gravity--mermaid-cache
@@ -263,25 +486,28 @@
           t)))))
 
 (defun claude-gravity--md-fontify-rendered-table (limit)
-  "Font-lock function: render markdown tables from point to LIMIT."
+  "Font-lock matcher: render the markdown table at point, up to LIMIT."
   (when (re-search-forward "|" limit t)
-    (when (markdown-table-at-point-p)
-      (let* ((row-beg (line-beginning-position))
-             (table-lines nil))
-        (save-excursion
-          (goto-char row-beg)
-          (while (and (not (eobp)) (markdown-table-at-point-p))
-            (push (buffer-substring-no-properties (line-beginning-position) (line-end-position))
-                  table-lines)
-            (forward-line 1))
-          (when table-lines
-            (let* ((rendered (claude-gravity--render-markdown-table (nreverse table-lines)))
-                   (display-str (if rendered (concat "\n" rendered "\n") "")))
-              (font-lock-append-text-property row-beg (point) 'face 'markdown-table-face)
-              (when (and markdown-hide-markup claude-gravity--markdown-render-mode rendered)
-                (add-text-properties row-beg (point) `(display ,display-str))))))
-        (forward-line 1)
-        t))))
+    (let ((bounds (claude-gravity--md-table-bounds)))
+      (if (null bounds)
+          (progn (forward-line 1) t)
+        (let ((beg (car bounds))
+              (end (cdr bounds)))
+          (font-lock-append-text-property beg end 'face 'markdown-table-face)
+          (when (and markdown-hide-markup claude-gravity--markdown-render-mode)
+            (let ((rendered (claude-gravity--md-table-display-lines
+                             beg end (claude-gravity--md-render-width))))
+              (when rendered
+                (save-excursion
+                  (goto-char beg)
+                  (dolist (str rendered)
+                    (when (and str (< (point) end))
+                      (add-text-properties (line-beginning-position)
+                                           (line-end-position)
+                                           `(display ,str)))
+                    (forward-line 1))))))
+          (goto-char end)
+          t)))))
 
 (defun claude-gravity-setup-md-render ()
   "Enable gravity markdown rendering extensions for markdown-mode."
@@ -309,29 +535,23 @@
 
 (add-hook 'markdown-mode-hook #'claude-gravity-setup-md-render)
 
-;;;; Window resize → re-fontify tables/diagrams
+;;;; Window resize -> re-render tables
 
 (defvar-local claude-gravity--md-last-render-width nil
-  "Width (columns) used the last time this buffer was font-locked.
-Used by `claude-gravity--md-process-resize' to decide whether the
-table-rendering matcher needs to refire.")
+  "Window width used the last time this buffer was font-locked.")
 
 (defvar claude-gravity--md-resize-timer nil
-  "Pending idle timer that will run `claude-gravity--md-process-resize'.
-Replaced on every size-change event so dragging the frame coalesces
-into a single re-render.")
+  "Pending idle timer coalescing window-size-change events.")
 
 (defun claude-gravity--md-schedule-resize-check (&rest _)
   "Debounce window-size-change events into a single idle-time check."
-  (when (and claude-gravity--md-resize-timer
-             (timerp claude-gravity--md-resize-timer))
+  (when (timerp claude-gravity--md-resize-timer)
     (cancel-timer claude-gravity--md-resize-timer))
   (setq claude-gravity--md-resize-timer
-        (run-with-idle-timer 0.2 nil
-                             #'claude-gravity--md-process-resize)))
+        (run-with-idle-timer 0.2 nil #'claude-gravity--md-process-resize)))
 
 (defun claude-gravity--md-process-resize ()
-  "Flush font-lock in markdown buffers whose displaying window changed width."
+  "Re-render tables in markdown buffers whose window changed width."
   (setq claude-gravity--md-resize-timer nil)
   (walk-windows
    (lambda (win)
@@ -340,7 +560,7 @@ into a single re-render.")
          (with-current-buffer buf
            (when (and claude-gravity--markdown-render-mode
                       (derived-mode-p 'markdown-mode))
-             (let ((new-width (window-width win)))
+             (let ((new-width (window-body-width win)))
                (unless (eql new-width claude-gravity--md-last-render-width)
                  (setq claude-gravity--md-last-render-width new-width)
                  (font-lock-flush))))))))
