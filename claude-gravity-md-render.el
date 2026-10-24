@@ -509,6 +509,27 @@ chunk beginning mid-table would otherwise render a fragment."
           (goto-char end)
           t)))))
 
+(defvar font-lock-beg)
+(defvar font-lock-end)
+
+(defun claude-gravity--md-extend-region-to-tables ()
+  "Widen `font-lock-beg' and `font-lock-end' to whole tables at the edges.
+The table matcher renders a whole table at once, so every row must
+already carry markdown-mode's hidden-markup properties; a region ending
+mid-table would leave the rows past it rendered with raw markup."
+  (let ((beg (save-excursion
+               (goto-char font-lock-beg)
+               (car (claude-gravity--md-table-bounds))))
+        (end (save-excursion
+               (goto-char (max font-lock-beg (1- font-lock-end)))
+               (cdr (claude-gravity--md-table-bounds))))
+        changed)
+    (when (and beg (< beg font-lock-beg))
+      (setq font-lock-beg beg changed t))
+    (when (and end (> end font-lock-end))
+      (setq font-lock-end end changed t))
+    changed))
+
 (defun claude-gravity-setup-md-render ()
   "Enable gravity markdown rendering extensions for markdown-mode."
   (setq claude-gravity--markdown-render-mode t)
@@ -518,6 +539,8 @@ chunk beginning mid-table would otherwise render a fragment."
      (claude-gravity--md-fontify-mermaid-block)
      (claude-gravity--md-fontify-rendered-table))
    'append)
+  (add-hook 'font-lock-extend-region-functions
+            #'claude-gravity--md-extend-region-to-tables 'append t)
   (add-hook 'window-size-change-functions
             #'claude-gravity--md-schedule-resize-check)
   (claude-gravity--log 'debug "gravity md render enabled"))
@@ -530,6 +553,8 @@ chunk beginning mid-table would otherwise render a fragment."
    '(("^\\s-*```mermaid\\b" (0 'markdown-markup-face 'prepend))
      (claude-gravity--md-fontify-mermaid-block)
      (claude-gravity--md-fontify-rendered-table)))
+  (remove-hook 'font-lock-extend-region-functions
+               #'claude-gravity--md-extend-region-to-tables t)
   (clrhash claude-gravity--mermaid-cache)
   (claude-gravity--log 'debug "gravity md render disabled"))
 

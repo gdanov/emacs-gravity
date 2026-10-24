@@ -14,6 +14,7 @@ test-elisp:
 		-l claude-gravity-test \
 		-l claude-gravity-patch-test \
 		-l claude-gravity-pull-signal-test \
+		-l claude-gravity-md-table-test \
 		-f ert-run-tests-batch-and-exit
 
 test-bridge:
